@@ -62,14 +62,22 @@ jobs:
           curl -fL \
             "https://github.com/obsproject/obs-deps/releases/download/2024-09-12/${{ matrix.deps }}" \
             -o "$RUNNER_TEMP/deps.pkg"
-          # bsdtar (present on Windows and macOS runners) reads both .zip and
-          # .tar.xz; unzip is not reliably on Windows-runner PATH.
-          tar -xf "$RUNNER_TEMP/deps.pkg" -C "$DEPS"
           # OBS's patched Qt6 (ABI-matching)
           curl -fL \
             "https://github.com/obsproject/obs-deps/releases/download/2024-09-12/${{ matrix.qt }}" \
             -o "$RUNNER_TEMP/qt.pkg"
-          tar -xf "$RUNNER_TEMP/qt.pkg" -C "$DEPS"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # bsdtar on Windows misreads the drive-letter temp path (D:) as a
+            # remote host ("Cannot connect to D: resolve failed"); use
+            # PowerShell's native Expand-Archive for the .zip deps instead.
+            powershell -NoProfile -Command \
+              "Expand-Archive -LiteralPath '$RUNNER_TEMP/deps.pkg' -DestinationPath '$DEPS' -Force"
+            powershell -NoProfile -Command \
+              "Expand-Archive -LiteralPath '$RUNNER_TEMP/qt.pkg' -DestinationPath '$DEPS' -Force"
+          else
+            tar -xf "$RUNNER_TEMP/deps.pkg" -C "$DEPS"
+            tar -xf "$RUNNER_TEMP/qt.pkg" -C "$DEPS"
+          fi
           echo "OBS_DEPS=$DEPS" >> "$GITHUB_ENV"
 
       - name: Configure (Windows)
