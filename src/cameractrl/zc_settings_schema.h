@@ -80,6 +80,7 @@ constexpr const char *kStream = "/ctrl/stream_setting";
 constexpr const char *kRtmp = "/ctrl/rtmp";
 constexpr const char *kNickName = "/ctrl/nick_name";
 constexpr const char *kTemp = "/ctrl/temperature";
+constexpr const char *kNetwork = "/ctrl/network";
 } // namespace http
 
 /* WebSocket notification event names (the raw `what` field). */
@@ -229,6 +230,19 @@ std::vector<CatalogDef> &catalogs();
    with a pan/tilt head has. The dock hides those groups for a camera whose
    /info says it has none (spec §2), instead of offering keys it would reject. */
 bool catalogRequiresPtz(const QString &catalogId);
+
+/* Whether a catalog may be offered for a camera of this model. The Avatar and
+   the E2-F6 Pro have no camera-side identity authentication or HTTPS, and
+   writing those keys on such a camera leaves its control API unreachable, so
+   the `security` group is withheld from them (bug list). An unknown model
+   (empty string) keeps every catalog. */
+bool catalogSupportedByModel(const QString &catalogId, const QString &model);
+
+/* Whether writing this key makes the camera reboot (HTTPS, identity auth,
+   network type). After such a write the dock shows a "restarting" notice and
+   reconnects on its own, because the camera's control API is gone until it
+   comes back up. */
+bool settingRebootsCamera(const QString &key);
 
 /* Keys-with-ranges / per-key reads that need individual /ctrl/get. */
 bool isPerKey(const QString &key);

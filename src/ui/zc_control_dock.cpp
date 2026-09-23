@@ -48,11 +48,16 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <QSignalBlocker>
 #include <QTabWidget>
 #include <QJsonArray>
+#include <QJsonObject>
+#include <QPointer>
+#include <QMessageBox>
+#include <QInputDialog>
 #include <QApplication>
 #include <QStyledItemDelegate>
 #include <QStyle>
 #include <QStyleOptionViewItem>
 #include <functional>
+#include <array>
 #include <QPainter>
 #include <QPainterPath>
 #include <QMouseEvent>
@@ -76,6 +81,31 @@ static QString ztr(const char *key)
 	   newline here. */
 	return QString::fromUtf8(obs_module_text(key)).replace(
 		QStringLiteral("\\n"), QStringLiteral("\n"));
+}
+
+/* Human label for a settings row. The camera reports lowercase ids
+   ("http_auth"); the locale turns the ones whose id is misleading into readable
+   text (bug 5: `http_auth` is the identity-authentication switch, not a second
+   HTTPS toggle). A key with no entry keeps its raw id, so a key a newer
+   firmware adds is still usable. */
+static QString settingLabel(const QString &key)
+{
+	static const QHash<QString, const char *> kLabels = {
+		{QStringLiteral("http_auth"), "ZCameraPlugin.Setting.HttpAuth"},
+		{QStringLiteral("https_on"), "ZCameraPlugin.Setting.HttpsOn"},
+		{QStringLiteral("ev"), "ZCameraPlugin.Setting.Ev"},
+		{QStringLiteral("ev_choice"), "ZCameraPlugin.Setting.EvChoice"},
+		{QStringLiteral("shutter"), "ZCameraPlugin.Setting.Shutter"},
+		{QStringLiteral("max_shutter"), "ZCameraPlugin.Setting.MaxShutter"},
+		{QStringLiteral("sht_operation"),
+		 "ZCameraPlugin.Setting.ShutterOperation"},
+	};
+	auto it = kLabels.constFind(key);
+	if (it == kLabels.constEnd())
+		return key;
+	/* obs_module_text echoes the key itself when the locale has no entry. */
+	const QString text = ztr(*it);
+	return text == QLatin1String(*it) ? key : text;
 }
 
 /* Small painted camera glyph so the discovery list needs no bundled asset.
@@ -619,6 +649,19 @@ void ZcSettingsPanel::refreshGroup()
 		client_->readGroup(catalog_, [](bool) {});
 }
 
+void ZcSettingsPanel::writeKey(const QString &key, const QString &value)
+{
+	if (!client_)
+		return;
+	client_->writeSetting(key, value);
+	/* HTTPS and identity auth restart the camera's web service, and a
+	   network-type change can move it to another address: the reply never
+	   arrives and the connection drops. The dock is told to wait for the camera
+	   and reconnect instead of leaving the pane dead (bug 8). */
+	if (zc::settingRebootsCamera(key))
+		emit cameraRestarting();
+}
+
 /* Read the stream document and repaint the bar. The first read of a camera also
    discovers which index its firmware offers: `app_stream1` when it answers with
    a document, `stream1` otherwise (spec §2 Stream). The index then stays fixed
@@ -688,12 +731,20 @@ void ZcSettingsPanel::populateGroups()
 {
 	const QString keep = catalog_;
 	const bool ptz = client_ && client_->cameraSupportsPtz();
+	/* Model-specific capability: an E2_F6_Pro or Avatar has no identity-auth or
+	   HTTPS setting, so the security group is not offered there. Turning one on
+	   through the plugin blanks every setting and cannot be undone from either
+	   side (bug 7). An empty model ("not read yet") keeps the group, and the
+	   list is rebuilt when /info arrives. */
+	const QString model = client_ ? client_->cameraModel() : QString();
 	/* The rebuild must not repaint the rows pane through onGroupSelected: the
 	   caller decides what to render next. */
 	QSignalBlocker blocker(subtabList_);
 	subtabList_->clear();
 	for (const auto &cat : zc::catalogs()) {
 		if (zc::catalogRequiresPtz(cat.id) && !ptz)
+			continue;
+		if (!zc::catalogSupportedByModel(cat.id, model))
 			continue;
 		auto *item = new QListWidgetItem(cat.id, subtabList_);
 		item->setData(Qt::UserRole, cat.id);
@@ -809,9 +860,12 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 			continue;
 
 		auto *row = new QHBoxLayout;
-		auto *label = new QLabel(key, rowsContainer_);
+		auto *label = new QLabel(settingLabel(key), rowsContainer_);
 		label->setMinimumWidth(170);
 		label->setStyleSheet("color:#eef2ed;");
+		/* The camera's own key stays reachable: a locale may rename a row, but
+		   the raw id is what the camera and its web UI use. */
+		label->setToolTip(key);
 		row->addWidget(label);
 		row->addStretch(1);
 
@@ -824,7 +878,7 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 			combo->setCurrentText(def.value);
 			connect(combo, &QComboBox::currentTextChanged, this,
 				[this, key](const QString &text) {
-					client_->writeSetting(key, text);
+					writeKey(key, text);
 				});
 			control = combo;
 		} else if (def.type == 2 && def.max > def.min && def.step > 0 &&
@@ -846,8 +900,8 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 				[val](int v) { val->setText(QString::number(v)); });
 			connect(slider, &QSlider::sliderReleased, this,
 				[this, key, slider] {
-					client_->writeSetting(
-						key, QString::number(slider->value()));
+					writeKey(key,
+						 QString::number(slider->value()));
 				});
 			wl->addWidget(slider, 1);
 			wl->addWidget(val);
@@ -858,7 +912,7 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 			auto *edit = new QLineEdit(def.value, rowsContainer_);
 			connect(edit, &QLineEdit::editingFinished, this,
 				[this, key, edit] {
-					client_->writeSetting(key, edit->text());
+					writeKey(key, edit->text());
 				});
 			control = edit;
 		}
@@ -868,6 +922,93 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		row->addWidget(control);
 		rowLayout->addLayout(row);
 	}
+
+	/* The Ethernet address is not a settings-catalog key: it is /ctrl/network
+	   (bug 15). */
+	if (catalog == QLatin1String("network"))
+		buildStaticNetworkBlock(rowLayout);
+}
+
+/* Bug 15: the static Ethernet address lives on /ctrl/network, not in a
+   settings catalog, so it has no row of its own. Without it the operator can
+   only switch the camera to static mode from its web UI, and doing that with
+   the defaults (10.98.32.1) leaves the camera unreachable. */
+void ZcSettingsPanel::buildStaticNetworkBlock(QBoxLayout *rowLayout)
+{
+	auto *title = new QLabel(ztr("ZCameraPlugin.Setting.StaticIpTitle"),
+				 rowsContainer_);
+	title->setStyleSheet("color:#8a9bb2;padding:12px 8px 2px 8px;");
+	rowLayout->addWidget(title);
+
+	/* Order: IP address, netmask, gateway, DNS (the camera's own field names). */
+	static const char *kLabels[] = {"ZCameraPlugin.Setting.StaticIp",
+					"ZCameraPlugin.Setting.StaticNetmask",
+					"ZCameraPlugin.Setting.StaticGateway",
+					"ZCameraPlugin.Setting.StaticDns"};
+	static const char *kHints[] = {"192.168.1.100", "255.255.255.0",
+				       "192.168.1.1", "8.8.8.8"};
+	std::array<QPointer<QLineEdit>, 4> edits;
+	for (int i = 0; i < 4; ++i) {
+		auto *row = new QHBoxLayout;
+		auto *label = new QLabel(ztr(kLabels[i]), rowsContainer_);
+		label->setMinimumWidth(170);
+		label->setStyleSheet("color:#eef2ed;");
+		row->addWidget(label);
+		row->addStretch(1);
+		auto *edit = new QLineEdit(rowsContainer_);
+		edit->setPlaceholderText(QString::fromLatin1(kHints[i]));
+		edit->setMinimumWidth(200);
+		edit->setMaximumWidth(260);
+		row->addWidget(edit);
+		rowLayout->addLayout(row);
+		edits[i] = edit;
+	}
+
+	auto *apply = new QPushButton(ztr("ZCameraPlugin.Setting.StaticApply"),
+				      rowsContainer_);
+	rowLayout->addWidget(apply, 0, Qt::AlignRight);
+
+	/* Prefill from the camera, so the operator edits the current address
+	   instead of retyping it. The pointers are guarded: a group switch can
+	   rebuild these rows before the reply lands. */
+	client_->networkInfo([edits](const QJsonObject &info) {
+		auto pick = [&info](const char *a, const char *b) {
+			QString v = info.value(QLatin1String(a)).toString();
+			if (v.isEmpty() && b)
+				v = info.value(QLatin1String(b)).toString();
+			return v;
+		};
+		const QString values[] = {pick("ipaddr", "ip"),
+					  pick("netmask", "mask"),
+					  pick("gateway", nullptr),
+					  pick("dns", nullptr)};
+		for (int i = 0; i < 4; ++i) {
+			if (edits[i])
+				edits[i]->setText(values[i]);
+		}
+	});
+
+	connect(apply, &QPushButton::clicked, this, [this, edits] {
+		const QString ip = edits[0] ? edits[0]->text().trimmed() : QString();
+		const QString netmask =
+			edits[1] ? edits[1]->text().trimmed() : QString();
+		const QString gateway =
+			edits[2] ? edits[2]->text().trimmed() : QString();
+		const QString dns = edits[3] ? edits[3]->text().trimmed() : QString();
+		if (ip.isEmpty()) {
+			QMessageBox::warning(this,
+					     ztr("ZCameraPlugin.Setting.StaticIpTitle"),
+					     ztr("ZCameraPlugin.Setting.StaticIpRequired"));
+			return;
+		}
+		if (QMessageBox::question(
+			this, ztr("ZCameraPlugin.Setting.StaticIpTitle"),
+			ztr("ZCameraPlugin.Setting.StaticConfirm").arg(ip)) !=
+		    QMessageBox::Yes)
+			return;
+		client_->setNetworkStatic(ip, netmask, gateway, dns,
+					  [](const QJsonObject &) {});
+	});
 }
 
 /* A JSON array of choices as a string list; the lists are numbers for fps and
@@ -2129,15 +2270,21 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 	auto *statusBar = new QHBoxLayout;
 	statusBarLabel_ = new QLabel(ztr("ZCameraPlugin.Dock.StatusDisconnected"), container);
 	statusBarLabel_->setStyleSheet("color:#8a9bb2;padding:2px 6px;");
-	debugButton_ = new QPushButton("Debug", container);
-	debugButton_->setCheckable(true);
 	statusBar->addWidget(statusBarLabel_);
 	statusBar->addStretch();
+#ifdef ZC_ENABLE_DEBUG_PANEL
+	/* Development aid: only compiled in when the build asks for it, so a
+	   release build ships no debug affordance (bug list: "Debug button not
+	   removed from the release build"). */
+	debugButton_ = new QPushButton("Debug", container);
+	debugButton_->setCheckable(true);
 	statusBar->addWidget(debugButton_);
+#endif
 	outer->addLayout(statusBar);
 
 	setWidget(container);
 
+#ifdef ZC_ENABLE_DEBUG_PANEL
 	/* Debug panel (dockable/floating, hidden by default). */
 	debugPanel_ = new ZcDebugPanel(nullptr);
 	debugPanel_->hide();
@@ -2148,6 +2295,7 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 		else
 			debugPanel_->hide();
 	});
+#endif
 
 	connect(rail_, &ZcCameraRail::cameraClicked, this,
 		&ZcControlDock::onCameraClicked);
@@ -2187,6 +2335,15 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 	scanTimer_->setInterval(2500);
 	connect(scanTimer_, &QTimer::timeout, this, &ZcControlDock::refreshCameras);
 	scanTimer_->start();
+
+	/* A setting the camera applies by restarting its web service (HTTPS,
+	   identity auth) or by moving to another address (network type) drops the
+	   control connection until it comes back (bug 8). */
+	connect(settings_, &ZcSettingsPanel::cameraRestarting, this,
+		&ZcControlDock::onCameraRestarting);
+	restartTimer_ = new QTimer(this);
+	restartTimer_->setInterval(4000);
+	connect(restartTimer_, &QTimer::timeout, this, &ZcControlDock::tryReconnect);
 }
 
 /* Query the mDNS discovery records for the currently advertised cameras and
@@ -2410,8 +2567,10 @@ ZcControlDock::~ZcControlDock()
 						  &ZcControlDock::onObsSourceSignal,
 						  this);
 	}
+#ifdef ZC_ENABLE_DEBUG_PANEL
 	if (debugPanel_)
 		delete debugPanel_;
+#endif
 	delete client_;
 }
 
@@ -2437,6 +2596,11 @@ void ZcControlDock::updatePtzTab()
    (spec §1, L11). */
 bool ZcControlDock::openCamera(const QString &host)
 {
+	return openCamera(host, creds_.value(host));
+}
+
+bool ZcControlDock::openCamera(const QString &host, const ZcCredentials &creds)
+{
 	if (client_) {
 		/* Detach the panels before the client goes away: a panel holding a
 		   pointer to a deleted client would write through it. */
@@ -2451,8 +2615,12 @@ bool ZcControlDock::openCamera(const QString &host)
 	ptz_->setClient(client_);
 	presets_->setClient(client_);
 
-	bool ok = client_->connect(host);
+	bool ok = client_->connect(host, 80, creds);
 	if (!ok) {
+		/* Distinguish "the camera wants a login we do not have" from "the
+		   camera is not there", so the caller can ask for credentials
+		   (bug 4) instead of reporting it offline. */
+		lastAuthRequired_ = client_->authRequired();
 		settings_->setClient(nullptr);
 		ptz_->setClient(nullptr);
 		presets_->setClient(nullptr);
@@ -2464,6 +2632,7 @@ bool ZcControlDock::openCamera(const QString &host)
 		    ztr("ZCameraPlugin.Dock.OfflineReason").arg(host));
 		return false;
 	}
+	lastAuthRequired_ = false;
 
 	statusBarLabel_->setText(ztr("ZCameraPlugin.Dock.Connected").arg(host));
 	client_->refreshStatus();
@@ -2486,14 +2655,102 @@ bool ZcControlDock::openCamera(const QString &host)
 	return true;
 }
 
+/* Bug 8: a write that makes the camera restart its web service (HTTPS,
+   identity auth) or move to another address (network type) is applied by a
+   camera that is briefly unreachable. Say so, then poll for it rather than
+   leaving the pane dead. */
+void ZcControlDock::onCameraRestarting()
+{
+	if (currentHost_.isEmpty() || !restartTimer_)
+		return;
+	statusBarLabel_->setText(
+	    ztr("ZCameraPlugin.Dock.CameraRestarting").arg(currentHost_));
+	restartAttempts_ = 0;
+	restartTimer_->start();
+}
+
+void ZcControlDock::tryReconnect()
+{
+	const QString host = currentHost_;
+	if (host.isEmpty()) {
+		restartTimer_->stop();
+		return;
+	}
+	/* A bounded number of tries: a camera that never comes back, or comes back
+	   on another address, must not leave a timer polling for ever. */
+	if (++restartAttempts_ > 15) {
+		restartTimer_->stop();
+		statusBarLabel_->setText(
+		    ztr("ZCameraPlugin.Dock.OfflineReason").arg(host));
+		return;
+	}
+	if (openCamera(host)) {
+		restartTimer_->stop();
+		reachableHosts_.insert(host);
+		unreachableHosts_.remove(host);
+		refreshRailPresence();
+		return;
+	}
+	/* The restart applied a login (identity authentication): ask for it rather
+	   than polling for a camera that will keep answering 401 (bug 4). */
+	if (lastAuthRequired_) {
+		restartTimer_->stop();
+		if (promptForCredentials(host)) {
+			reachableHosts_.insert(host);
+			unreachableHosts_.remove(host);
+			refreshRailPresence();
+		}
+		return;
+	}
+	/* openCamera() reported the failed attempt; keep the restarting notice up
+	   while the camera is still coming back. */
+	statusBarLabel_->setText(
+	    ztr("ZCameraPlugin.Dock.CameraRestarting").arg(host));
+}
+
+/* Bug 4: the camera's control API is behind a login (identity authentication
+   was switched on, or HTTPS with auth). Ask for the login the operator set on
+   the camera and retry, so the pane is usable again instead of showing empty
+   settings. The credentials are kept for this session only. */
+bool ZcControlDock::promptForCredentials(const QString &host)
+{
+	bool accepted = false;
+	const QString user = QInputDialog::getText(
+	    this, ztr("ZCameraPlugin.Dock.AuthTitle"),
+	    ztr("ZCameraPlugin.Dock.AuthUser").arg(host), QLineEdit::Normal,
+	    QString(), &accepted);
+	if (!accepted || user.isEmpty())
+		return false;
+	const QString pass = QInputDialog::getText(
+	    this, ztr("ZCameraPlugin.Dock.AuthTitle"),
+	    ztr("ZCameraPlugin.Dock.AuthPassword"), QLineEdit::Password,
+	    QString(), &accepted);
+	if (!accepted)
+		return false;
+
+	ZcCredentials creds;
+	creds.username = user;
+	creds.password = pass;
+	if (!openCamera(host, creds))
+		return false;
+	creds_.insert(host, creds);
+	return true;
+}
+
 /* Spec §1, L2: selecting a camera connects the control client only. Adding it
    to OBS is a separate, explicit action. Spec §1, L11: whether it answered is
    remembered, so a source-only row that is really there stays usable and one
    that is not stays marked offline. */
 void ZcControlDock::onCameraClicked(const QString &host)
 {
+	/* An explicit pick ends any wait for a restarting camera. */
+	if (restartTimer_)
+		restartTimer_->stop();
 	currentHost_ = host;
-	const bool ok = openCamera(host);
+	bool ok = openCamera(host);
+	/* The camera answered 401: it wants a login we do not have yet (bug 4). */
+	if (!ok && lastAuthRequired_)
+		ok = promptForCredentials(host);
 	if (ok) {
 		reachableHosts_.insert(host);
 		unreachableHosts_.remove(host);

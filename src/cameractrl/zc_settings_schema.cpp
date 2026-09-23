@@ -19,16 +19,18 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 
 #include "zc_settings_schema.h"
 
+#include <QRegularExpression>
+
 namespace zc {
 
 static std::vector<CatalogDef> makeCatalogs()
 {
 	/* Mirrors ZCamGuiOpen settings-schema.ts groups + catalogs. */
 	return {
-	    {"exposure", {}, {"ev_choice", "flicker", "meter_mode", "iris",
-			      "iso", "min_iso", "max_iso", "iso_ctrl",
-			      "shutter_angle_ctrl", "sht_operation", "eND",
-			      "lock_ae_in_rec", "ae_speed", "bl_comp"}},
+	    {"exposure", {}, {"ev", "ev_choice", "flicker", "meter_mode", "iris",
+			      "iso", "min_iso", "max_iso", "iso_ctrl", "shutter",
+			      "max_shutter", "shutter_angle_ctrl", "sht_operation",
+			      "eND", "lock_ae_in_rec", "ae_speed", "bl_comp"}},
 	    {"wb", {}, {"wb", "wb_priority", "lock_awb_in_rec", "mwb", "tint",
 			"mwb_r", "mwb_g", "mwb_b"}},
 	    {"lens", {}, {"focus", "af_mode", "caf", "caf_sens", "af_area",
@@ -81,7 +83,8 @@ static std::vector<DependencyRule> makeDeps()
 	    {{"caf", "caf_sens", "live_caf", "af_mode", "af_area", "af_speed",
 	      "af_adjust_with_ptz", "mf_mag", "mf_recording"}, {"lens"}},
 	    {{"iso", "iso_ctrl", "min_iso", "max_iso", "sht_operation",
-	      "shutter_angle_ctrl"}, {"exposure"}},
+	      "shutter_angle_ctrl", "shutter", "max_shutter", "ev", "ev_choice"},
+	     {"exposure"}},
 	    {{"lut"}, {"exposure"}},
 	    {{"compose_mode", "movvfr", "video_encoder", "record_mode"},
 	     {"record", "video"}},
@@ -104,6 +107,7 @@ std::vector<CatalogDef> &catalogs()
 static const char *kPerKeys[] = {
     "mwb", "tint", "mwb_r", "mwb_g", "mwb_b", "brightness", "contrast",
     "saturation", "hue", "lens_focus_pos", "lens_zoom_pos", "fz_speed",
+    "shutter", "max_shutter",
     "audio_in_l_gain", "audio_in_r_gain", "audio_output_gain", "lcd_backlight",
     "gl_shf_coarse", "gl_shf_fine", "video_tl_interval", "record_meta",
     "camera_id", "reelname", "ptz_common_speed", "ptz_common_time",
@@ -260,6 +264,32 @@ bool catalogRequiresPtz(const QString &catalogId)
 	/* Only the `ptz` catalog holds PTZ configuration. The PTZ *pane* (presets
 	   and traces) is gated by the same capability in the dock. */
 	return catalogId == QStringLiteral("ptz");
+}
+
+bool catalogSupportedByModel(const QString &catalogId, const QString &model)
+{
+	if (catalogId != QStringLiteral("security"))
+		return true;
+	/* Model names vary ("E2-F6 Pro", "E2_F6_Pro", "Avatar"), so compare on a
+	   letters-and-digits-only form. An empty model means "not known yet": the
+	   group stays, and the dock rebuilds its list once /info arrives. */
+	QString m = model.toLower();
+	m.remove(QRegularExpression(QStringLiteral("[^a-z0-9]")));
+	if (m.isEmpty())
+		return true;
+	return !(m.contains(QStringLiteral("avatar")) ||
+		 m.contains(QStringLiteral("e2f6pro")));
+}
+
+bool settingRebootsCamera(const QString &key)
+{
+	/* HTTPS and identity auth restart the camera's web service; a network-type
+	   change can move it to another address entirely. */
+	return key == QStringLiteral("https_on") ||
+	       key == QStringLiteral("http_auth") ||
+	       key == QStringLiteral("ip_mode") ||
+	       key == QStringLiteral("net_mode") ||
+	       key == QStringLiteral("eth_mode");
 }
 
 bool isPerKey(const QString &key)

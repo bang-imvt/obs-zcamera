@@ -56,6 +56,10 @@ public:
 	QString mode() const { return mode_; }
 	bool isRecording() const { return recording_; }
 	double temperature() const { return temperature_; }
+	/* The camera answered a request with a Digest challenge. A connect() that
+	   fails while this is true failed for want of credentials, not because the
+	   camera is unreachable: the dock asks the operator for them (bug 4). */
+	bool authRequired() const { return authRequired_; }
 
 	/* Camera identity from the /info reply (fetched on connect). */
 	QString cameraModel() const { return model_; }
@@ -154,6 +158,15 @@ public:
 	/* Refresh live HUD keys. */
 	void refreshStatus();
 
+	/* Ethernet address. `info` is /ctrl/network?action=info (mode + ipaddr +
+	   netmask + gateway + dns); setNetworkStatic switches the interface to the
+	   given static address (mode=static). Both deliver the camera's reply, and
+	   an empty object means it did not answer. */
+	void networkInfo(std::function<void(const QJsonObject &)> cb);
+	void setNetworkStatic(const QString &ip, const QString &netmask,
+			      const QString &gateway, const QString &dns,
+			      std::function<void(const QJsonObject &)> cb);
+
 signals:
 	/* Normalized events from the WS notifier. */
 	void statusChanged(const QJsonObject &status);
@@ -195,6 +208,9 @@ private:
 	ZcSettingsEngine settings_;
 
 	bool connected_ = false;
+	/* Set by a connect() that failed on a Digest challenge with no credentials
+	   (bug 4). */
+	bool authRequired_ = false;
 	QString host_;
 	QString mode_;
 	bool recording_ = false;

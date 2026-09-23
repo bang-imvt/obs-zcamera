@@ -44,6 +44,7 @@ bool ZcCameraClient::connect(const QString &host, int port,
 			     const ZcCredentials &creds)
 {
 	host_ = host;
+	authRequired_ = false;
 	transport_.setCredentials(creds);
 
 	/* Probe + origin negotiation. */
@@ -53,8 +54,12 @@ bool ZcCameraClient::connect(const QString &host, int port,
 	/* The camera requires Digest auth; without credentials nothing else we
 	   do can succeed, so fail fast instead of looping on 401s. The Digest
 	   handshake itself runs in the transport on the first real request. */
-	if (transport_.authRequired() && creds.username.isEmpty())
+	if (transport_.authRequired() && creds.username.isEmpty()) {
+		/* Remembered so the dock can tell "needs a login" from "unreachable"
+		   and ask the operator for credentials (bug 4). */
+		authRequired_ = true;
 		return false;
+	}
 
 	/* Start the WebSocket notifications (wss when origin is https), carrying
 	   the Digest Authorization / cookie / x-auth-token from the transport. */
@@ -82,6 +87,7 @@ void ZcCameraClient::disconnect()
 	recording_ = false;
 	model_.clear();
 	supportsPtz_ = false;
+	authRequired_ = false;
 	emit cameraInfoChanged();
 	emit connectionStateChanged(false);
 }
@@ -460,6 +466,47 @@ void ZcCameraClient::sendStreamSetting(
 			   : QJsonObject());
 	    },
 	    20000);
+}
+
+/* Both network calls deliver the camera's JSON reply; an empty object means it
+   did not answer (or answered non-JSON). */
+static std::function<void(const ZcHttpResponse &)>
+jsonObjectCb(std::function<void(const QJsonObject &)> cb)
+{
+	return [cb](const ZcHttpResponse &rsp) {
+		QJsonParseError err{};
+		const QJsonDocument doc = QJsonDocument::fromJson(rsp.body, &err);
+		cb(err.error == QJsonParseError::NoError && doc.isObject()
+		       ? doc.object()
+		       : QJsonObject());
+	};
+}
+
+void ZcCameraClient::networkInfo(std::function<void(const QJsonObject &)> cb)
+{
+	QUrlQuery q;
+	q.addQueryItem(QStringLiteral("action"), QStringLiteral("info"));
+	transport_.getQuery(http::kNetwork, q, jsonObjectCb(cb), 20000);
+}
+
+void ZcCameraClient::setNetworkStatic(
+    const QString &ip, const QString &netmask, const QString &gateway,
+    const QString &dns, std::function<void(const QJsonObject &)> cb)
+{
+	QUrlQuery q;
+	q.addQueryItem(QStringLiteral("action"), QStringLiteral("set"));
+	q.addQueryItem(QStringLiteral("mode"), QStringLiteral("static"));
+	/* The camera's own client omits a field it was not handed, so an empty
+	   string leaves that field as it is. */
+	if (!ip.isEmpty())
+		q.addQueryItem(QStringLiteral("ipaddr"), ip);
+	if (!netmask.isEmpty())
+		q.addQueryItem(QStringLiteral("netmask"), netmask);
+	if (!gateway.isEmpty())
+		q.addQueryItem(QStringLiteral("gateway"), gateway);
+	if (!dns.isEmpty())
+		q.addQueryItem(QStringLiteral("dns"), dns);
+	transport_.getQuery(http::kNetwork, q, jsonObjectCb(cb), 20000);
 }
 
 void ZcCameraClient::readSetting(const QString &key,

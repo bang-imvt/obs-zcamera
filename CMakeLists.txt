@@ -19,6 +19,9 @@ set(ENABLE_CAMERA_CONTROL "Build the embedded camera-control dock" ON)
 # It is used only as a software-decode fallback when no hardware path is
 # available.
 set(ENABLE_SW_DECODE "Software decode fallback via FFmpeg" ON)
+# The dock's request-log panel and its "Debug" button are a development aid;
+# they are left out of release builds unless this is switched on.
+option(ZC_ENABLE_DEBUG_PANEL "Show the control dock's debug log panel" OFF)
 
 include(compilerconfig)
 include(defaults)
@@ -145,6 +148,9 @@ if(ENABLE_ZERO_COPY)
 endif()
 if(ENABLE_CAMERA_CONTROL)
   target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ENABLE_CAMERA_CONTROL)
+endif()
+if(ZC_ENABLE_DEBUG_PANEL)
+  target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ZC_ENABLE_DEBUG_PANEL)
 endif()
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE mdns)
 

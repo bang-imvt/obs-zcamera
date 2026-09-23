@@ -57,6 +57,11 @@ extern "C" {
 
 #include "ssp-client-iso.h"
 #include "hwdecode/hw_decode.h"
+#ifdef ENABLE_SW_DECODE
+/* The audio path decodes AAC with the same helper the software video fallback
+   uses; it is only compiled into a build that has FFmpeg (bugs 10/11). */
+#include "ffmpeg-decode.h"
+#endif
 #include "obs-ssp.h"
 
 /* libavcodec is needed for the AVFrame handed out by the zero-copy backends
@@ -274,6 +279,22 @@ private:
 	gs_texture_t *cpuTex_ = nullptr;
 	enum video_format lastCpuFmt_ = VIDEO_FORMAT_NONE;
 	uint32_t cpuW_ = 0, cpuH_ = 0;
+
+	/* Audio (bugs 10/11). The camera sends AAC access units over SSP; they are
+	   decoded here and handed to OBS with obs_source_output_audio, which is
+	   what gives the source a real audio track and a mixer control. Guarded by
+	   audioMutex_: onAudioData runs on the SSP receive thread. Only a build
+	   with FFmpeg has a decoder to run them through. */
+#ifdef ENABLE_SW_DECODE
+	std::mutex audioMutex_;
+	struct ffmpeg_decode audioDec_ = {};
+	bool audioDecReady_ = false;
+	/* The encoder the camera reported in the audio meta. Only AAC is decoded;
+	   anything else is reported once instead of being fed to the wrong
+	   decoder. */
+	uint32_t audioEncoder_ = 0;
+	bool audioUnsupportedLogged_ = false;
+#endif
 };
 
 /* ------------------------------------------------------------------ */
@@ -517,6 +538,20 @@ void ZcSspSource::stop()
 		zc_hw_decoder_destroy(dead_dec);
 		obs_leave_graphics();
 	}
+
+	/* The AAC decoder holds no GPU resources, and the receive thread that
+	   feeds it has already been joined. */
+#ifdef ENABLE_SW_DECODE
+	{
+		std::lock_guard<std::mutex> lock(audioMutex_);
+		if (audioDecReady_) {
+			ffmpeg_decode_free(&audioDec_);
+			audioDecReady_ = false;
+		}
+		audioEncoder_ = 0;
+		audioUnsupportedLogged_ = false;
+	}
+#endif
 
 	std::lock_guard<std::mutex> lock(frameMutex_);
 	for (int i = 0; i < MAX_AV_PLANES; i++) {
@@ -1036,17 +1071,73 @@ void ZcSspSource::outputVideo(struct zc_decoded_frame *frame)
 
 void ZcSspSource::onAudioData(imf::SspAudioData *audio)
 {
-	/* AAC decode + output is delegated to a dedicated audio path in the
-	   software fallback; kept minimal here until the audio decoder module
-	   lands. */
+#ifdef ENABLE_SW_DECODE
+	if (!running_ || !audio || !audio->data || audio->len == 0)
+		return;
+
+	/* The decoder is built on the first frame and lives until stop(): the
+	   camera does not change its audio encoder mid-connection. */
+	std::lock_guard<std::mutex> lock(audioMutex_);
+	/* AAC is what the SSP stream carries. An encoder the camera did not report
+	   is assumed to be AAC rather than dropping the audio; a known other one
+	   (raw PCM) stays silent instead of being fed to the wrong decoder. */
+	if (audioEncoder_ != AUDIO_ENCODER_UNKNOWN &&
+	    audioEncoder_ != AUDIO_ENCODER_AAC) {
+		if (!audioUnsupportedLogged_) {
+			audioUnsupportedLogged_ = true;
+			blog(LOG_WARNING,
+			     "[obs-zcamera] SSP audio encoder %u is not supported; "
+			     "the source will have no audio",
+			     audioEncoder_);
+		}
+		return;
+	}
+	if (!audioDecReady_) {
+		if (ffmpeg_decode_init(&audioDec_, AV_CODEC_ID_AAC, false) != 0) {
+			blog(LOG_WARNING,
+			     "[obs-zcamera] could not open the AAC decoder; the "
+			     "source will have no audio");
+			return;
+		}
+		audioDecReady_ = true;
+	}
+
+	struct obs_source_audio out = {};
+	bool got = false;
+	if (!ffmpeg_decode_audio(&audioDec_, audio->data, audio->len, &out,
+				 &got))
+		return;
+	if (!got)
+		return;
+
+	/* Same clock convention as the video path: arrival time, unless the
+	   operator asked for the SSP timestamps (whose pts is microseconds). */
+	if (syncMode_ == SYNC_INTERNAL || audio->pts == 0)
+		out.timestamp = os_gettime_ns();
+	else
+		out.timestamp = audio->pts * 1000ULL;
+
+	/* `out.data` points into the decoder's frame, which the next decode
+	   overwrites: obs_source_output_audio copies it before returning. */
+	obs_source_output_audio(source_, &out);
+#else
+	/* This build has no FFmpeg, so the AAC stream cannot be decoded. */
 	(void)audio;
+#endif
 }
 
 void ZcSspSource::onMeta(imf::SspVideoMeta *v, imf::SspAudioMeta *a,
 			 imf::SspMeta *m)
 {
 	(void)m;
+#ifdef ENABLE_SW_DECODE
+	if (a) {
+		std::lock_guard<std::mutex> lock(audioMutex_);
+		audioEncoder_ = a->encoder;
+	}
+#else
 	(void)a;
+#endif
 	enum zc_codec_id codec =
 		(v->encoder == VIDEO_ENCODER_H264) ? ZC_CODEC_H264 : ZC_CODEC_HEVC;
 
@@ -1400,9 +1491,11 @@ struct obs_source_info create_ssp_source_info()
 	struct obs_source_info info = {};
 	info.id = "zcamera_source"; /* unique; avoids clash with legacy obs-ssp */
 	info.type = OBS_SOURCE_TYPE_INPUT;
-	/* No OBS_SOURCE_AUDIO: the SSP audio path is not implemented yet, so
-	   declaring it would only add a permanently silent audio track. */
-	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_DO_NOT_DUPLICATE;
+	/* The camera's audio arrives on the same SSP connection and is decoded into
+	   obs_source_output_audio, so the source carries a real audio track (and a
+	   mixer control) instead of a permanently silent one (bugs 10/11). */
+	info.output_flags =
+		OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE;
 	info.get_name = zc::zc_source_getname;
 	info.get_properties = zc::zc_source_getproperties;
 	info.get_defaults = zc::zc_source_getdefaults;

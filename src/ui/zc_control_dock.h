@@ -39,6 +39,9 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <QPixmap>
 #include <QVector>
 
+/* ZcCredentials, held per host for the session (bug 4). */
+#include "zc_http_transport.h"
+
 class QLabel;
 class QPushButton;
 class QSplitter;
@@ -162,6 +165,12 @@ public slots:
 	/* Re-read the stream bar and the visible group from the camera. */
 	void refreshGroup();
 
+signals:
+	/* A write the camera applies by restarting (HTTPS, identity auth) or by
+	   moving to another address (network type) was issued: the control
+	   connection is about to go away until the camera is back (bug 8). */
+	void cameraRestarting();
+
 private slots:
 	/* A catalog finished loading; rebuild the rows when it is the visible one. */
 	void onGroupRefreshed(const QString &catalog);
@@ -170,6 +179,12 @@ private slots:
 private:
 	void populateGroups();
 	void buildRows(const QString &catalog);
+	/* The static Ethernet address block shown under the network group
+	   (bug 15): /ctrl/network is not a settings catalog. */
+	void buildStaticNetworkBlock(QBoxLayout *rowLayout);
+	/* Write one setting and, when the camera applies it by restarting, tell the
+	   dock so it can wait for the camera and reconnect (bug 8). */
+	void writeKey(const QString &key, const QString &value);
 
 	/* The stream bar: the encoder's own document, always at the top of the tab
 	   rather than in the group list, because these are the settings that matter
@@ -351,6 +366,11 @@ public:
 	   client behind, so nothing can be operated — when the camera does not
 	   answer (spec §1, L11). */
 	bool openCamera(const QString &host);
+	/* Same, with Digest credentials (bug 4). */
+	bool openCamera(const QString &host, const ZcCredentials &creds);
+	/* Ask the operator for the camera's login and retry; true when the camera
+	   then answered (bug 4). */
+	bool promptForCredentials(const QString &host);
 
 	/* Re-evaluate every rail row's "already added" badge and the Add button.
 	   Public because the libobs source create/destroy/rename signals reach it
@@ -360,6 +380,11 @@ public:
 private slots:
 	void onCameraClicked(const QString &host);
 	void refreshCameras();
+	/* A setting write that restarts the camera: show a notice and start polling
+	   for it to come back (bug 8). */
+	void onCameraRestarting();
+	/* One poll tick of the restart wait. */
+	void tryReconnect();
 
 private:
 	/* Create/reuse an obs-zcamera source pointing at `host` and add it to the
@@ -394,6 +419,11 @@ private:
 	ZcDebugPanel *debugPanel_ = nullptr;
 	QSplitter *splitter_ = nullptr;
 	QString currentHost_;
+	/* Per-host Digest credentials entered for this session (bug 4). */
+	QHash<QString, ZcCredentials> creds_;
+	/* Whether the last openCamera() failure was a 401 rather than a timeout
+	   (bug 4). */
+	bool lastAuthRequired_ = false;
 	/* Hosts that answered a control connection although discovery does not
 	   advertise them. Keeps such a row usable instead of marking it offline on
 	   every refresh; a failed connect removes it again (spec §1, L11). */
@@ -404,6 +434,9 @@ private:
 	QSet<QString> unreachableHosts_;
 	/* mDNS discovery refresh. */
 	QTimer *scanTimer_ = nullptr;
+	/* Polls for a camera that a setting write made restart (bug 8). */
+	QTimer *restartTimer_ = nullptr;
+	int restartAttempts_ = 0;
 	/* libobs global signal handler, for source create/destroy/rename. */
 	signal_handler_t *obsSignals_ = nullptr;
 };
