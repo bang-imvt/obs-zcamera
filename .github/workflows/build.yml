@@ -35,8 +35,6 @@ jobs:
             artifact: macos
             deps: macos-deps-2024-09-12-universal.tar.xz
             qt: macos-deps-qt6-2024-09-12-universal.tar.xz
-          - os: ubuntu-22.04
-            artifact: linux
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -64,20 +62,14 @@ jobs:
           curl -fL \
             "https://github.com/obsproject/obs-deps/releases/download/2024-09-12/${{ matrix.deps }}" \
             -o "$RUNNER_TEMP/deps.pkg"
-          if [[ "${{ matrix.deps }}" == *.zip ]]; then
-            unzip -q "$RUNNER_TEMP/deps.pkg" -d "$DEPS"
-          else
-            tar -xJf "$RUNNER_TEMP/deps.pkg" -C "$DEPS"
-          fi
+          # bsdtar (present on Windows and macOS runners) reads both .zip and
+          # .tar.xz; unzip is not reliably on Windows-runner PATH.
+          tar -xf "$RUNNER_TEMP/deps.pkg" -C "$DEPS"
           # OBS's patched Qt6 (ABI-matching)
           curl -fL \
             "https://github.com/obsproject/obs-deps/releases/download/2024-09-12/${{ matrix.qt }}" \
             -o "$RUNNER_TEMP/qt.pkg"
-          if [[ "${{ matrix.qt }}" == *.zip ]]; then
-            unzip -q "$RUNNER_TEMP/qt.pkg" -d "$DEPS"
-          else
-            tar -xJf "$RUNNER_TEMP/qt.pkg" -C "$DEPS"
-          fi
+          tar -xf "$RUNNER_TEMP/qt.pkg" -C "$DEPS"
           echo "OBS_DEPS=$DEPS" >> "$GITHUB_ENV"
 
       - name: Configure (Windows)
