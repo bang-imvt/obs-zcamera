@@ -31,7 +31,7 @@ jobs:
             artifact: windows
             deps: windows-deps-2024-09-12-x64.zip
             qt: windows-deps-qt6-2024-09-12-x64.zip
-          - os: macos-13
+          - os: macos-latest
             artifact: macos
             deps: macos-deps-2024-09-12-universal.tar.xz
             qt: macos-deps-qt6-2024-09-12-universal.tar.xz
