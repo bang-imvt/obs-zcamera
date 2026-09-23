@@ -135,6 +135,7 @@ public:
 	void activate();
 	void deactivate();
 	void videoRender(gs_effect_t *effect);
+	void videoTick(float seconds);
 	void enumActiveSources(obs_source_enum_proc_t cb, void *param);
 	uint32_t getWidth();
 	uint32_t getHeight();
@@ -148,10 +149,6 @@ private:
 	void reconnectThread();
 	/* Rebuilds the connection when the stream goes silent. */
 	void watchdog();
-	/* video_tick hook for the async source (the render-driven source runs the
-	   watchdog from videoRender instead). */
-	void videoTick(float seconds);
-
 	/* Stop + clear client_. Serialized by lifecycleMutex_ so the OBS
 	   thread, the reconnect thread and the receive thread can never tear the
 	   connection down concurrently (double pthread_join). */
@@ -1290,7 +1287,8 @@ void ZcSspSource::videoRender(gs_effect_t *effect)
 					cpuTex_ = NULL;
 				}
 				cpuTex_ = gs_texture_create(c.width, c.height,
-							    GS_RGBA, 1, NULL, 0);
+							    GS_RGBA, 1, NULL,
+							    GS_DYNAMIC);
 				lastCpuFmt_ = c.format;
 				cpuW_ = c.width;
 				cpuH_ = c.height;
@@ -1357,6 +1355,12 @@ void ZcSspSource::videoRender(gs_effect_t *effect)
 			gs_effect_get_param_by_name(draw_effect, "image"), tex);
 		gs_draw_sprite(tex, 0, 0, 0);
 	}
+}
+
+void ZcSspSource::videoTick(float seconds)
+{
+	(void)seconds;
+	watchdog();
 }
 
 void ZcSspSource::enumActiveSources(obs_source_enum_proc_t cb, void *param)
@@ -1431,7 +1435,11 @@ static void zc_source_getdefaults(obs_data_t *settings)
 
 static void *zc_source_create(obs_data_t *settings, obs_source_t *source)
 {
+#ifdef __APPLE__
+	ZcSspSource *s = new (std::nothrow) ZcSspSource(source, true);
+#else
 	ZcSspSource *s = new (std::nothrow) ZcSspSource(source);
+#endif
 	if (!s)
 		return nullptr;
 	s->update(settings);
@@ -1461,6 +1469,11 @@ static void zc_source_deactivate(void *data)
 static void zc_source_video_render(void *data, gs_effect_t *effect)
 {
 	static_cast<ZcSspSource *>(data)->videoRender(effect);
+}
+
+static void zc_source_video_tick(void *data, float seconds)
+{
+	static_cast<ZcSspSource *>(data)->videoTick(seconds);
 }
 
 static uint32_t zc_source_get_width(void *data)
@@ -1494,8 +1507,15 @@ struct obs_source_info create_ssp_source_info()
 	/* The camera's audio arrives on the same SSP connection and is decoded into
 	   obs_source_output_audio, so the source carries a real audio track (and a
 	   mixer control) instead of a permanently silent one (bugs 10/11). */
+#ifdef __APPLE__
+	/* The OpenGL backend cannot import the camera's 420v IOSurface. Decode in
+	   software and let OBS upload/convert the frame asynchronously. */
+	info.output_flags =
+		OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE;
+#else
 	info.output_flags =
 		OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE;
+#endif
 	info.get_name = zc::zc_source_getname;
 	info.get_properties = zc::zc_source_getproperties;
 	info.get_defaults = zc::zc_source_getdefaults;
@@ -1504,7 +1524,11 @@ struct obs_source_info create_ssp_source_info()
 	info.update = zc::zc_source_update;
 	info.activate = zc::zc_source_activate;
 	info.deactivate = zc::zc_source_deactivate;
+#ifdef __APPLE__
+	info.video_tick = zc::zc_source_video_tick;
+#else
 	info.video_render = zc::zc_source_video_render;
+#endif
 	info.get_width = zc::zc_source_get_width;
 	info.get_height = zc::zc_source_get_height;
 	info.enum_active_sources = zc::zc_source_enum_active_sources;

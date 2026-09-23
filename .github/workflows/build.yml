@@ -96,8 +96,27 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          cmake -S . -B build -G "Unix Makefiles" \
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          AGL_FRAMEWORK_DIR=""
+          for sdk in /Library/Developer/CommandLineTools/SDKs/MacOSX*.sdk; do
+            if [ -f "$sdk/System/Library/Frameworks/AGL.framework/AGL.tbd" ]; then
+              AGL_FRAMEWORK_DIR="$sdk/System/Library/Frameworks"
+            fi
+          done
+          LINKER_FLAGS=()
+          if [ -n "$AGL_FRAMEWORK_DIR" ]; then
+            LINKER_FLAGS=(
+              "-DCMAKE_MODULE_LINKER_FLAGS=-F$AGL_FRAMEWORK_DIR"
+              "-DCMAKE_SHARED_LINKER_FLAGS=-F$AGL_FRAMEWORK_DIR"
+            )
+          fi
+          cmake -S . -B build -G Xcode \
+            -DCMAKE_FIND_FRAMEWORK=LAST \
             -DCMAKE_PREFIX_PATH="$OBS_DEPS" \
+            -DCMAKE_OSX_SYSROOT="$(xcrun --sdk macosx --show-sdk-path)" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            "${LINKER_FLAGS[@]}" \
             -DENABLE_ZERO_COPY=ON -DENABLE_SW_DECODE=ON -DENABLE_CAMERA_CONTROL=ON
 
       - name: Configure (Linux)
@@ -112,14 +131,14 @@ jobs:
 
       - name: Package bundle (macOS)
         if: runner.os == 'macOS'
-        run: cmake --install build --prefix "${{ runner.temp }}/install"
+        run: cmake --install build --config RelWithDebInfo --prefix "${{ runner.temp }}/install"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: obs-zcamera-${{ matrix.artifact }}
           path: |
-            build/RelWithDebInfo/obs-zcamera.*
+            build/RelWithDebInfo/obs-zcamera
             build/ssp_connector/RelWithDebInfo/ssp-connector*
             build/**/*.dylib
             build/**/*.so

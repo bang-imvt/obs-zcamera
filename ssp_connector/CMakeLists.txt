@@ -49,17 +49,10 @@ target_include_directories(ssp-connector PRIVATE libuv/include)
 if(OS_MACOS)
   set_target_properties(
     ssp-connector PROPERTIES
+    XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS
+    "${CMAKE_CURRENT_LIST_DIR}/../cmake/bundle/macOS/entitlements.plist"
     BUILD_RPATH "@loader_path/../Frameworks"
     INSTALL_RPATH "@loader_path/../Frameworks")
-  install(CODE "
-    execute_process(COMMAND install_name_tool
-      -id \"@rpath/libssp.dylib\"
-      \"${libssp_SOURCE_DIR}/lib/mac/libssp.dylib\")
-    execute_process(COMMAND install_name_tool
-      -change \"${libssp_SOURCE_DIR}/lib/mac/libssp.dylib\"
-      \"@rpath/libssp.dylib\"
-      \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_PROJECT_NAME}.plugin/Contents/MacOS/ssp-connector\")
-  ")
 endif()
 
 if(OS_WINDOWS)

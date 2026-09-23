@@ -52,6 +52,8 @@ extern "C" {
 extern "C" {
 #include <libavutil/hwcontext_d3d11va.h>
 }
+#elif defined(__APPLE__)
+#include <CoreVideo/CoreVideo.h>
 #endif
 
 #include <cstring>
@@ -426,19 +428,24 @@ static bool ffmpeg_import(struct zc_hw_decoder *dec,
 	AVFrame *avf = (AVFrame *)frame->avframe;
 
 #if defined(__APPLE__)
-	/* VideoToolbox: the CVPixelBuffer is an IOSurface. */
+	/* VideoToolbox gives data[3] as a CVPixelBufferRef. OBS needs the
+	   IOSurfaceRef behind it, not the CVPixelBuffer pointer itself. */
 	if (avf->format == AV_PIX_FMT_VIDEOTOOLBOX && avf->data[3]) {
-		obs_enter_graphics();
-		gs_texture_t *tex = gs_texture_create_from_iosurface(
-			(void *)avf->data[3]);
-		obs_leave_graphics();
-		if (tex) {
-			frame->texture = tex;
-			frame->owns_texture = true;
-			return true;
+		CVPixelBufferRef pixel_buffer = (CVPixelBufferRef)avf->data[3];
+		IOSurfaceRef surface = CVPixelBufferGetIOSurface(pixel_buffer);
+		if (surface) {
+			obs_enter_graphics();
+			gs_texture_t *tex =
+				gs_texture_create_from_iosurface((void *)surface);
+			obs_leave_graphics();
+			if (tex) {
+				frame->texture = tex;
+				frame->owns_texture = true;
+				return true;
+			}
 		}
-		return false;
 	}
+	return false;
 #endif
 
 #if defined(_WIN32)
@@ -706,6 +713,7 @@ struct zc_hw_decoder *zc_hw_ffmpeg_create(enum zc_hw_backend backend,
 			delete f;
 			return nullptr;
 		}
+#ifdef _WIN32
 		if (hw_type == AV_HWDEVICE_TYPE_D3D11VA) {
 			/* Only reachable when binding the OBS device failed; the
 			   decoder then runs on a private device whose surfaces can
@@ -720,6 +728,7 @@ struct zc_hw_decoder *zc_hw_ffmpeg_create(enum zc_hw_backend backend,
 			     "(%p, video_context=%p); zero-copy import will fail",
 			     (void *)d3d->device, (void *)d3d->video_context);
 		}
+#endif
 	}
 
 f->avcodec = avcodec_find_decoder(zc::zc_to_av_codec(codec));

@@ -219,6 +219,12 @@ endfunction()
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
 
+# macOS OBS plugins are bundles whose executable has no library prefix/suffix
+# (Contents/MacOS/obs-zcamera).
+if(OS_MACOS)
+  set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES PREFIX "" SUFFIX "")
+endif()
+
 # Add specific install instructions for the plugin itself
 if(OS_WINDOWS)
   if(EXISTS "${CMAKE_SOURCE_DIR}/data")

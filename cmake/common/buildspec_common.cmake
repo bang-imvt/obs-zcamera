@@ -52,6 +52,21 @@ function(_setup_obs_studio)
     set(_is_fresh --fresh)
   endif()
 
+  # OBS has its own .deps directory and would otherwise download the same
+  # pre-built dependencies again. Reuse the hashes verified by this project.
+  if(OS_MACOS)
+    set(_obs_deps_dir "${dependencies_dir}/${_obs_destination}/.deps")
+    file(MAKE_DIRECTORY "${_obs_deps_dir}")
+    foreach(_dependency IN ITEMS prebuilt qt6)
+      set(_parent_marker "${dependencies_dir}/.dependency_${_dependency}_${arch}.sha256")
+      if(EXISTS "${_parent_marker}")
+        file(READ "${_parent_marker}" _dependency_hash)
+        file(WRITE "${_obs_deps_dir}/.dependency_${_dependency}_${arch}.sha256"
+             "${_dependency_hash}")
+      endif()
+    endforeach()
+  endif()
+
   if(OS_WINDOWS)
     set(_cmake_generator "${CMAKE_GENERATOR}")
     set(_cmake_arch "-A ${arch},version=${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}")
@@ -59,7 +74,9 @@ function(_setup_obs_studio)
   elseif(OS_MACOS)
     set(_cmake_generator "Xcode")
     set(_cmake_arch "-DCMAKE_OSX_ARCHITECTURES:STRING='arm64;x86_64'")
-    set(_cmake_extra "-DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    set(_cmake_extra
+        "-DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET}"
+        "-DCMAKE_FIND_FRAMEWORK=LAST")
   endif()
 
   message(STATUS "Configure ${label} (${arch})")
