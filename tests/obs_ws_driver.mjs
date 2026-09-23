@@ -15,6 +15,12 @@
    Usage: node obs_ws_driver.mjs [--ip <addr>] [--backend <n>] [--port 4455]
                                 [--out <dir>] [--ready-timeout 25]
                                 [--record-seconds 5]
+
+   RULE (auto-test): this driver must NEVER change the camera's network mode
+   (e.g. /ctrl/network mode=direct|static). Switching the interface to a static
+   or direct address disconnects the camera and it cannot be automatically
+   recovered by the test, orphaning the device. The test only reads the render
+   path; any network-mode change is out of scope and must be rejected here.
 */
 
 import { createHash } from 'node:crypto';
