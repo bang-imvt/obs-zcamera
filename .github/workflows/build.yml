@@ -58,25 +58,29 @@ jobs:
           set -e
           DEPS="$RUNNER_TEMP/obs-deps"
           mkdir -p "$DEPS"
-          # libobs / obs-frontend-api / FFmpeg
-          curl -fL \
-            "https://github.com/obsproject/obs-deps/releases/download/2024-09-12/${{ matrix.deps }}" \
-            -o "$RUNNER_TEMP/deps.pkg"
-          # OBS's patched Qt6 (ABI-matching)
-          curl -fL \
-            "https://github.com/obsproject/obs-deps/releases/download/2024-09-12/${{ matrix.qt }}" \
-            -o "$RUNNER_TEMP/qt.pkg"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            # bsdtar on Windows misreads the drive-letter temp path (D:) as a
-            # remote host ("Cannot connect to D: resolve failed"); use
-            # PowerShell's native Expand-Archive for the .zip deps instead.
+            # PowerShell's Expand-Archive decides the format by FILE EXTENSION,
+            # so the downloads must be named .zip (a .pkg name is rejected).
+            curl -fL \
+              "https://github.com/obsproject/obs-deps/releases/download/2024-09-12/${{ matrix.deps }}" \
+              -o "$RUNNER_TEMP/deps.zip"
+            curl -fL \
+              "https://github.com/obsproject/obs-deps/releases/download/2024-09-12/${{ matrix.qt }}" \
+              -o "$RUNNER_TEMP/qt.zip"
             powershell -NoProfile -Command \
-              "Expand-Archive -LiteralPath '$RUNNER_TEMP/deps.pkg' -DestinationPath '$DEPS' -Force"
+              "Expand-Archive -LiteralPath '$RUNNER_TEMP/deps.zip' -DestinationPath '$DEPS' -Force"
             powershell -NoProfile -Command \
-              "Expand-Archive -LiteralPath '$RUNNER_TEMP/qt.pkg' -DestinationPath '$DEPS' -Force"
+              "Expand-Archive -LiteralPath '$RUNNER_TEMP/qt.zip' -DestinationPath '$DEPS' -Force"
           else
-            tar -xf "$RUNNER_TEMP/deps.pkg" -C "$DEPS"
-            tar -xf "$RUNNER_TEMP/qt.pkg" -C "$DEPS"
+            # bsdtar detects the format from content; the extension is irrelevant.
+            curl -fL \
+              "https://github.com/obsproject/obs-deps/releases/download/2024-09-12/${{ matrix.deps }}" \
+              -o "$RUNNER_TEMP/deps.txz"
+            curl -fL \
+              "https://github.com/obsproject/obs-deps/releases/download/2024-09-12/${{ matrix.qt }}" \
+              -o "$RUNNER_TEMP/qt.txz"
+            tar -xf "$RUNNER_TEMP/deps.txz" -C "$DEPS"
+            tar -xf "$RUNNER_TEMP/qt.txz" -C "$DEPS"
           fi
           echo "OBS_DEPS=$DEPS" >> "$GITHUB_ENV"
 
