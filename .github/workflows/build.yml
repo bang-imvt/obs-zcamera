@@ -1,0 +1,128 @@
+# GitHub Actions build for obs-zcamera (Windows / macOS / Linux).
+#
+# Builds the OBS plugin for all three platforms and uploads the artifacts so a
+# macOS bundle / Windows installer / Linux package can be produced without a
+# local machine of each OS. The OBS build dependencies come from the released
+# obs-deps (2024-09-12, matching buildspec.json); Qt6 is installed via aqtinstall
+# so the plugin's Qt dock links.
+#
+# NOTE: dep artifact names below are the published obs-deps names for
+# 2024-09-12. If a download 404s, adjust the name in the corresponding step.
+
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            artifact: windows
+            deps: obs-deps-2024-09-12-x64.zip
+            qt_arch: win64_msvc2019_64
+          - os: macos-13
+            artifact: macos
+            deps: obs-deps-2024-09-12-macos-universal.tar.gz
+            qt_arch: macos
+          - os: ubuntu-22.04
+            artifact: linux
+            deps: obs-deps-2024-09-12-ubuntu-24.04-x64.tar.gz
+            qt_arch: linux_gcc_64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxkbcommon-x11-0 libxcb-randr0-dev \
+            libxcb-xtest0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libwayland-dev libavcodec-dev libavutil-dev libswscale-dev
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+
+      - name: Set up Python (for aqtinstall)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install aqtinstall + Qt6
+        shell: bash
+        run: |
+          pip install aqtinstall
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            QT_HOST=mac
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            QT_HOST=linux
+          else
+            QT_HOST=windows
+          fi
+          aqt install-qt "$QT_HOST" desktop 6.6.3 "${{ matrix.qt_arch }}" \
+            -O "$RUNNER_TEMP/qt"
+
+      - name: Download OBS deps
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/obs-deps"
+          curl -fL \
+            "https://github.com/obsproject/obs-deps/releases/download/2024-09-12/${{ matrix.deps }}" \
+            -o "$RUNNER_TEMP/deps"
+          if [[ "${{ matrix.deps }}" == *.zip ]]; then
+            unzip -q "$RUNNER_TEMP/deps" -d "$RUNNER_TEMP/obs-deps"
+          else
+            tar -xzf "$RUNNER_TEMP/deps" -C "$RUNNER_TEMP/obs-deps"
+          fi
+          echo "OBS_DEP_DIR=$RUNNER_TEMP/obs-deps" >> "$GITHUB_ENV"
+          echo "QT_DIR=$RUNNER_TEMP/qt" >> "$GITHUB_ENV"
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_PREFIX_PATH="$OBS_DEP_DIR;$QT_DIR/6.6.3/${{ matrix.qt_arch }}" \
+            -DENABLE_ZERO_COPY=ON -DENABLE_SW_DECODE=ON -DENABLE_CAMERA_CONTROL=ON
+
+      - name: Configure (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cmake -S . -B build -G "Xcode" \
+            -DCMAKE_PREFIX_PATH="$OBS_DEP_DIR;$QT_DIR/6.6.3/${{ matrix.qt_arch }}" \
+            -DENABLE_ZERO_COPY=ON -DENABLE_SW_DECODE=ON -DENABLE_CAMERA_CONTROL=ON
+
+      - name: Configure (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cmake -S . -B build -G "Unix Makefiles" \
+            -DCMAKE_PREFIX_PATH="$OBS_DEP_DIR;$QT_DIR/6.6.3/${{ matrix.qt_arch }}" \
+            -DENABLE_ZERO_COPY=ON -DENABLE_SW_DECODE=ON -DENABLE_CAMERA_CONTROL=ON
+
+      - name: Build
+        run: cmake --build build --config RelWithDebInfo -j
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-zcamera-${{ matrix.artifact }}
+          path: |
+            build/${{ matrix.artifact == 'windows' && 'RelWithDebInfo' || '' }}/obs-zcamera.*
+            build/ssp_connector/RelWithDebInfo/ssp-connector*
+            build/**/*.dylib
+            build/**/*.so
+            build/obs-zcamera.plugin/**
+            build/obs-zcamera.app/**
+          if-no-files-found: warn

@@ -1,0 +1,56 @@
+# =====================================================================
+# obs-zcamera .gitignore
+# Tracks: source, build config, vendored third-party source, LICENSE.
+# Excludes: design docs, agent/assistant artifacts, build output, local deps.
+# =====================================================================
+
+# ---- Design / planning docs (kept out of the code repo) ----
+/doc/
+
+# ---- Build output (never commit) ----
+/build/
+/build*/
+/release/
+/out/
+/dist/
+/CMakeCache.txt
+/CMakeFiles/
+/cmake/.CMakeBuildNumber
+
+# ---- Local dependency fetches (obs-deps etc.) ----
+/.deps/
+
+# ---- Agent / assistant session artifacts ----
+/.zcode/
+/.agents/
+/.agent/
+/agent*/
+*zcode*
+*.tmp
+*.tmp.json
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+*.user
+.DS_Store
+Thumbs.db
+
+# ---- Misc ----
+*.lock.json
+*.log
+build_noffmpeg_*.txt
+build_x64_*.txt
+obsfe_*.log
+
+# ---- Standalone test build output (tests\build_tests.ps1) ----
+/tests/*.obj
+/tests/*.exe
+/tests/*.pdb
+/tests/*.lib
+/tests/*.exp
+/tests/moc_*.cpp
+/tests/*.dll
+
+# ---- OBS integration test output (tests\obs_integration_test.ps1) ----
+/tests/obs_out/
