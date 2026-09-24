@@ -89,6 +89,19 @@ public:
 	void ptzMoveAction(const QString &action, float fspeed);
 	void ptzStop();
 	void ptzHome();
+	/* Full PTZ state: current pan/tilt, flip, range limit (+ detail=y). */
+	void ptzQuery(bool detail, std::function<void(const QJsonObject &)> cb);
+	/* Move to an absolute (relative=0) or relative (relative=1) position. */
+	void ptzGoto(float pan, float tilt, float speed, bool relative,
+		     bool speedWithZoom);
+	/* Set one range-limit edge (direct 0..3) to the given pan/tilt position. */
+	void ptzSetLimit(int direct, float pan, float tilt);
+	/* Enable/disable the pan/tilt range limit (/ctrl/set?ptz_limit=On|Off). */
+	void ptzSetLimitEnabled(bool enabled);
+	/* Auto-framing: enable/disable detection and restart with a delay (s). */
+	void setFramingEnabled(bool enabled);
+	void setFramingRestart(int seconds);
+	void framingQuery(std::function<void(const QJsonObject &)> cb);
 	void ptzPresetSet(int index);
 	void ptzPresetRecall(int index);
 	void ptzPresetDelete(int index);

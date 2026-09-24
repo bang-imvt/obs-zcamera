@@ -39,6 +39,8 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <QToolButton>
 #include <QComboBox>
 #include <QSlider>
+#include <QSpinBox>
+#include <QCheckBox>
 #include <QLineEdit>
 #include <QStackedWidget>
 #include <QScrollArea>
@@ -1263,6 +1265,83 @@ ZcPtzPad::ZcPtzPad(QWidget *parent) : QWidget(parent)
 		if (client_)
 			client_->ptzStop();
 	});
+
+	/* Position / GOTO (bugs 8/13): current pan/tilt from /ctrl/pt?action=query
+	   &detail=y, plus an absolute (relative=0) or relative (1) GOTO. */
+	{
+		auto *posRow = new QHBoxLayout;
+		posRow->addWidget(new QLabel("Position", this));
+		QPointer<QLabel> posVal = new QLabel("—", this);
+		posVal->setObjectName("ptzPos");
+		posRow->addWidget(posVal, 1);
+		auto *refreshBtn = new QPushButton("Refresh", this);
+		posRow->addWidget(refreshBtn);
+		layout->addLayout(posRow);
+
+		auto *gRow = new QHBoxLayout;
+		auto *panSpin = new QDoubleSpinBox(this);
+		panSpin->setRange(-400, 400);
+		panSpin->setDecimals(1);
+		auto *tiltSpin = new QDoubleSpinBox(this);
+		tiltSpin->setRange(-400, 400);
+		tiltSpin->setDecimals(1);
+		auto *speedSpin = new QSpinBox(this);
+		speedSpin->setRange(1, 100);
+		speedSpin->setValue(50);
+		auto *relChk = new QCheckBox("rel", this);
+		auto *gotoBtn = new QPushButton("Goto", this);
+		gRow->addWidget(panSpin);
+		gRow->addWidget(tiltSpin);
+		gRow->addWidget(speedSpin);
+		gRow->addWidget(relChk);
+		gRow->addWidget(gotoBtn);
+		layout->addLayout(gRow);
+
+		const auto refreshPos = [this, posVal](const QJsonObject &o) {
+			if (posVal)
+				posVal->setText(
+				    QStringLiteral("pan %1  tilt %2")
+					.arg(o.value("pan_pos").toDouble(), 0, 'f', 1)
+					.arg(o.value("tilt_pos").toDouble(), 0, 'f', 1));
+		};
+		connect(refreshBtn, &QPushButton::clicked, this,
+			[this, refreshPos] {
+				if (client_)
+					client_->ptzQuery(true, refreshPos);
+			});
+		connect(gotoBtn, &QPushButton::clicked, this,
+			[this, panSpin, tiltSpin, speedSpin, relChk] {
+				if (client_)
+					client_->ptzGoto(
+					    panSpin->value(), tiltSpin->value(),
+					    (float)speedSpin->value(), relChk->isChecked(),
+					    false);
+			});
+	}
+
+	/* Auto-framing (bugs 12/13): enable + restart delay, matching the web's
+	   /ctrl/framing; the trace/preset panel greys its actions while detect is
+	   on. */
+	{
+		auto *fRow = new QHBoxLayout;
+		auto *detectChk = new QCheckBox(ztr("ZCameraPlugin.Ptz.AutoFraming"), this);
+		auto *restartSpin = new QSpinBox(this);
+		restartSpin->setRange(1, 600);
+		restartSpin->setValue(30);
+		restartSpin->setSuffix(" s");
+		auto *frameOk = new QPushButton(ztr("ZCameraPlugin.Ptz.ApplyFraming"), this);
+		fRow->addWidget(detectChk);
+		fRow->addWidget(restartSpin);
+		fRow->addWidget(frameOk);
+		layout->addLayout(fRow);
+		connect(frameOk, &QPushButton::clicked, this,
+			[this, detectChk, restartSpin] {
+				if (!client_)
+					return;
+				client_->setFramingEnabled(detectChk->isChecked());
+				client_->setFramingRestart(restartSpin->value());
+			});
+	}
 
 	layout->addStretch();
 }

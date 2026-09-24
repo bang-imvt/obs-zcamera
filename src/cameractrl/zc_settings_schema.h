@@ -76,6 +76,7 @@ constexpr const char *kAf = "/ctrl/af";
 constexpr const char *kPt = "/ctrl/pt";
 constexpr const char *kPreset = "/ctrl/preset";
 constexpr const char *kPtrace = "/ctrl/ptrace";
+constexpr const char *kFraming = "/ctrl/framing";
 constexpr const char *kStream = "/ctrl/stream_setting";
 constexpr const char *kRtmp = "/ctrl/rtmp";
 constexpr const char *kNickName = "/ctrl/nick_name";

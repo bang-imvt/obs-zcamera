@@ -155,6 +155,10 @@ void ZcCameraClient::setRecording(bool rec)
 		recording_ = rec;
 }
 
+/* Forward decl: defined later, but the PTZ/framing methods use it. */
+static std::function<void(const ZcHttpResponse &)>
+jsonObjectCb(std::function<void(const QJsonObject &)> cb);
+
 /* Convenience query helper. */
 static void sendQuery(ZcHttpTransport &tr, const char *path, const QString &pathSuffix,
 		      const QUrlQuery &query, int timeout = 20000)
@@ -265,6 +269,72 @@ void ZcCameraClient::ptzHome()
 	QUrlQuery q;
 	q.addQueryItem("action", "home");
 	sendQuery(transport_, http::kPt, "", q);
+}
+
+/* Full PTZ state; detail=y adds the current pan/tilt position and the range
+   limit, matching the camera's own web UI. */
+void ZcCameraClient::ptzQuery(bool detail,
+			      std::function<void(const QJsonObject &)> cb)
+{
+	QUrlQuery q;
+	q.addQueryItem("action", "query");
+	if (detail)
+		q.addQueryItem("detail", "y");
+	transport_.getQuery(http::kPt, q, jsonObjectCb(cb), 20000);
+}
+
+void ZcCameraClient::ptzGoto(float pan, float tilt, float speed,
+			     bool relative, bool speedWithZoom)
+{
+	QUrlQuery q;
+	q.addQueryItem("action", "goto");
+	q.addQueryItem("pan_pos", QString::number(pan, 'f', 2));
+	q.addQueryItem("tilt_pos", QString::number(tilt, 'f', 2));
+	q.addQueryItem("pan_speed", QString::number(speed, 'f', 2));
+	q.addQueryItem("tilt_speed", QString::number(speed, 'f', 2));
+	q.addQueryItem("relative", relative ? "1" : "0");
+	q.addQueryItem("speed_with_zoom", speedWithZoom ? "1" : "0");
+	sendQuery(transport_, http::kPt, "", q);
+}
+
+/* Set one range-limit edge. `direct` maps to the camera's limit edges; the web
+   keys it off which field is being edited. */
+void ZcCameraClient::ptzSetLimit(int direct, float pan, float tilt)
+{
+	QUrlQuery q;
+	q.addQueryItem("action", "limit");
+	q.addQueryItem("direct", QString::number(direct));
+	q.addQueryItem("pan_pos", QString::number(pan, 'f', 2));
+	q.addQueryItem("tilt_pos", QString::number(tilt, 'f', 2));
+	sendQuery(transport_, http::kPt, "", q);
+}
+
+/* The pan/tilt range limit is a plain settings key (/ctrl/set?ptz_limit=On). */
+void ZcCameraClient::ptzSetLimitEnabled(bool enabled)
+{
+	QUrlQuery q;
+	q.addQueryItem("ptz_limit", enabled ? "On" : "Off");
+	sendQuery(transport_, http::kPt, "", q);
+}
+
+/* Auto-framing: the web's /ctrl/framing/detect?enable=<0|1> + a restart delay. */
+void ZcCameraClient::setFramingEnabled(bool enabled)
+{
+	QUrlQuery q;
+	q.addQueryItem("enable", enabled ? "1" : "0");
+	sendQuery(transport_, http::kFraming, "/detect", q);
+}
+
+void ZcCameraClient::setFramingRestart(int seconds)
+{
+	QUrlQuery q;
+	q.addQueryItem("time", QString::number(seconds));
+	sendQuery(transport_, http::kFraming, "/detect_restart", q);
+}
+
+void ZcCameraClient::framingQuery(std::function<void(const QJsonObject &)> cb)
+{
+	transport_.getQuery(http::kFraming, QUrlQuery(), jsonObjectCb(cb), 20000);
 }
 
 void ZcCameraClient::ptzPresetSet(int index)
