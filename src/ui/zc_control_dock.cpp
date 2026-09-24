@@ -90,6 +90,8 @@ static QString ztr(const char *key)
    firmware adds is still usable. */
 static QString settingLabel(const QString &key)
 {
+	/* Readable labels following ZCamGuiOpen's settings-schema labels; a key
+	   without an entry shows its raw id. */
 	static const QHash<QString, const char *> kLabels = {
 		{QStringLiteral("http_auth"), "ZCameraPlugin.Setting.HttpAuth"},
 		{QStringLiteral("https_on"), "ZCameraPlugin.Setting.HttpsOn"},
@@ -99,6 +101,36 @@ static QString settingLabel(const QString &key)
 		{QStringLiteral("max_shutter"), "ZCameraPlugin.Setting.MaxShutter"},
 		{QStringLiteral("sht_operation"),
 		 "ZCameraPlugin.Setting.ShutterOperation"},
+		{QStringLiteral("flicker"), "ZCameraPlugin.Setting.Flicker"},
+		{QStringLiteral("meter_mode"), "ZCameraPlugin.Setting.MeterMode"},
+		{QStringLiteral("iris"), "ZCameraPlugin.Setting.Iris"},
+		{QStringLiteral("iso"), "ZCameraPlugin.Setting.Iso"},
+		{QStringLiteral("min_iso"), "ZCameraPlugin.Setting.MinIso"},
+		{QStringLiteral("max_iso"), "ZCameraPlugin.Setting.MaxIso"},
+		{QStringLiteral("iso_ctrl"), "ZCameraPlugin.Setting.IsoCtrl"},
+		{QStringLiteral("shutter_angle_ctrl"),
+		 "ZCameraPlugin.Setting.ShutterAngleCtrl"},
+		{QStringLiteral("eND"), "ZCameraPlugin.Setting.End"},
+		{QStringLiteral("lock_ae_in_rec"), "ZCameraPlugin.Setting.LockAeInRec"},
+		{QStringLiteral("ae_speed"), "ZCameraPlugin.Setting.AeSpeed"},
+		{QStringLiteral("bl_comp"), "ZCameraPlugin.Setting.BlComp"},
+		{QStringLiteral("primary_audio"), "ZCameraPlugin.Setting.PrimaryAudio"},
+		{QStringLiteral("audio_channel"), "ZCameraPlugin.Setting.AudioChannel"},
+		{QStringLiteral("audio_phantom_power"),
+		 "ZCameraPlugin.Setting.AudioPhantomPower"},
+		{QStringLiteral("audio_level_display"),
+		 "ZCameraPlugin.Setting.AudioLevelDisplay"},
+		{QStringLiteral("ain_gain_type"), "ZCameraPlugin.Setting.InputGainType"},
+		{QStringLiteral("audio_input_level"),
+		 "ZCameraPlugin.Setting.AudioInputLevel"},
+		{QStringLiteral("audio_input_gain"),
+		 "ZCameraPlugin.Setting.AudioInputGain"},
+		{QStringLiteral("audio_noise_reduction"),
+		 "ZCameraPlugin.Setting.AudioNoiseReduction"},
+		{QStringLiteral("audio_in_l_gain"), "ZCameraPlugin.Setting.AudioInLGain"},
+		{QStringLiteral("audio_in_r_gain"), "ZCameraPlugin.Setting.AudioInRGain"},
+		{QStringLiteral("audio_output_gain"),
+		 "ZCameraPlugin.Setting.AudioOutputGain"},
 	};
 	auto it = kLabels.constFind(key);
 	if (it == kLabels.constEnd())
