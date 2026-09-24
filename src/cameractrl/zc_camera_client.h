@@ -82,8 +82,11 @@ public:
 	void lensFocusStop();
 	void afOnePush();
 
-	/* PTZ. Preset indexes are 0-based, matching the camera's own web UI. */
-	void ptzMove(int panSpeed, int tiltSpeed);
+	/* PTZ. Preset indexes are 0-based, matching the camera's own web UI.
+	   Movement takes a direction action (up/down/left/right/rightup/...) and a
+	   0-1 speed: the camera's /ctrl/pt expects `action=<dir>&fspeed=<0-1>`,
+	   not separate pan/tilt numbers. */
+	void ptzMoveAction(const QString &action, float fspeed);
 	void ptzStop();
 	void ptzHome();
 	void ptzPresetSet(int index);

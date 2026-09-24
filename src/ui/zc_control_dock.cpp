@@ -1192,6 +1192,20 @@ constexpr qreal kPi = 3.1415926535897932384626433832795;
 constexpr int kPanDelta[8] = {1, 1, 0, -1, -1, -1, 0, 1};
 constexpr int kTiltDelta[8] = {0, 1, 1, 1, 0, -1, -1, -1};
 
+/* The camera's /ctrl/pt takes a direction action, not pan/tilt numbers. Map a
+   pan/tilt pair (each -1/0/1; +tilt = down, +pan = right) to that action. */
+static const char *ptzActionFor(int pan, int tilt)
+{
+	static const char *const kActions[3][3] = {
+		{"leftup", "up", "rightup"},       /* tilt -1 (up)   */
+		{"left", "stop", "right"},         /* tilt 0         */
+		{"leftdown", "down", "rightdown"}, /* tilt +1 (down) */
+	};
+	const int p = (pan > 0) - (pan < 0);
+	const int t = (tilt > 0) - (tilt < 0);
+	return kActions[t + 1][p + 1];
+}
+
 const QString kPtzPanelStyle =
     "QWidget#PtzPadWrapper { background:#1f2927; }"
     "QLabel { color:#8a9bb2; font-size:11px; letter-spacing:1px; }"
@@ -1375,25 +1389,28 @@ void ZcPtzPad::moveInDirection(int dirIndex)
 {
 	if (dirIndex < 0 || dirIndex > 7)
 		return;
-	int speed = speedSlider_->value();
-	int pan = kPanDelta[dirIndex] * speed;
-	int tilt = kTiltDelta[dirIndex] * speed;
+	const int pan = kPanDelta[dirIndex];
+	const int tilt = kTiltDelta[dirIndex];
+	/* fspeed is 0-1; the slider is 0-100. */
+	const float fspeed = speedSlider_->value() / 100.0f;
 	if (client_)
-		client_->ptzMove(pan, tilt);
+		client_->ptzMoveAction(QLatin1String(ptzActionFor(pan, tilt)), fspeed);
 	emit moveRequested(pan, tilt);
 }
 
 void ZcPtzPad::moveAnalog(const QPointF &offset)
 {
-	int speed = speedSlider_->value();
 	qreal px = offset.x() / joyOuterRadius_;
 	qreal py = offset.y() / joyOuterRadius_;
 	px = std::max<qreal>(-1.0, std::min<qreal>(1.0, px));
 	py = std::max<qreal>(-1.0, std::min<qreal>(1.0, py));
-	int pan = qRound(px * speed);
-	int tilt = qRound(py * speed);
+	/* Drag distance from centre is the speed (0-1); the direction is where the
+	   knob is dragged (bug 9). */
+	const float fspeed = (float)std::min<qreal>(1.0, std::hypot(px, py));
+	const int pan = (px > 0) - (px < 0);
+	const int tilt = (py > 0) - (py < 0);
 	if (client_)
-		client_->ptzMove(pan, tilt);
+		client_->ptzMoveAction(QLatin1String(ptzActionFor(pan, tilt)), fspeed);
 	emit moveRequested(pan, tilt);
 }
 

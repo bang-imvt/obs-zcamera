@@ -243,12 +243,13 @@ void ZcCameraClient::afOnePush()
 	sendQuery(transport_, http::kAf, "", QUrlQuery());
 }
 
-void ZcCameraClient::ptzMove(int panSpeed, int tiltSpeed)
+void ZcCameraClient::ptzMoveAction(const QString &action, float fspeed)
 {
 	QUrlQuery q;
-	q.addQueryItem("action", "pt");
-	q.addQueryItem("pan_speed", QString::number(panSpeed));
-	q.addQueryItem("tilt_speed", QString::number(tiltSpeed));
+	q.addQueryItem("action", action);
+	/* fspeed is 0-1: omit it for stop, and round so the wire value is short. */
+	if (fspeed > 0.0f)
+		q.addQueryItem("fspeed", QString::number(fspeed, 'f', 2));
 	sendQuery(transport_, http::kPt, "", q);
 }
 
