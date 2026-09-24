@@ -175,9 +175,16 @@ bool ZcHttpTransport::negotiateOrigin(const QString &host, int port,
 		   the right one. Ignore transport failures / redirects to other
 		   hosts; follow redirects within the camera. */
 		if (code >= 200 && code < 500) {
-			base_url_ = url.scheme() + "://" + host + ":" +
-				    QString::number(url.port());
-			(void)finalUrl;
+			/* Use the FINAL url (after Qt followed any internal redirect to
+			   https on the camera): the candidate may have been http:80 that a
+			   camera answered with a 307 to https:443, and keeping the http
+			   origin would make the WebSocket go plain ws instead of wss and
+			   every later request hit the wrong scheme. */
+			QUrl final(finalUrl);
+			base_url_ = final.scheme() + "://" + final.host() +
+				    (final.port() > 0
+					     ? ":" + QString::number(final.port())
+					     : QString());
 			return true;
 		}
 	}
