@@ -855,9 +855,12 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		ZcSettingValue def;
 		if (!client_->settingDefinition(key, &def))
 			continue;
-		/* Unsupported (code -1) and read-only keys are hidden. */
-		if (!def.supported || def.readOnly)
+		/* Unsupported (code -1) keys are hidden; read-only (ro=1) keys are shown
+		   but disabled (greyed) so the operator can see the value without being
+		   able to change it. */
+		if (!def.supported)
 			continue;
+		const bool readOnly = def.readOnly;
 
 		auto *row = new QHBoxLayout;
 		auto *label = new QLabel(settingLabel(key), rowsContainer_);
@@ -917,6 +920,9 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 			control = edit;
 		}
 
+		if (readOnly)
+			control->setEnabled(false);
+
 		control->setMinimumWidth(200);
 		control->setMaximumWidth(260);
 		row->addWidget(control);
@@ -971,7 +977,18 @@ void ZcSettingsPanel::buildStaticNetworkBlock(QBoxLayout *rowLayout)
 	/* Prefill from the camera, so the operator edits the current address
 	   instead of retyping it. The pointers are guarded: a group switch can
 	   rebuild these rows before the reply lands. */
-	client_->networkInfo([edits](const QJsonObject &info) {
+	QPointer<QPushButton> applyGuard = apply;
+	client_->networkInfo([edits, applyGuard](const QJsonObject &info) {
+		/* Bug 28: the static address is only meaningful in static mode; in
+		   DHCP/Direct the address fields and the apply button are greyed out. */
+		const bool isStatic =
+			info.value(QLatin1String("mode")).toString().compare(
+				QLatin1String("static"), Qt::CaseInsensitive) == 0;
+		for (int i = 0; i < 4; ++i)
+			if (edits[i])
+				edits[i]->setEnabled(isStatic);
+		if (applyGuard)
+			applyGuard->setEnabled(isStatic);
 		auto pick = [&info](const char *a, const char *b) {
 			QString v = info.value(QLatin1String(a)).toString();
 			if (v.isEmpty() && b)
