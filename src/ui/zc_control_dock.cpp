@@ -2378,6 +2378,40 @@ QSet<QString> ZcControlDock::sourceHosts()
 	return hosts;
 }
 
+/* Find a zcamera_source whose settings hold this camera's address. The rail's
+   "added" state keys off the source name ("ZCamera <ip>"), but a source can be
+   created from OBS's own Sources panel and only given the address in its
+   properties, in which case its name is the default "ZCamera". Matching by the
+   stored zc_source_ip makes that source count as "added" too and lets a second
+   dock add reuse it instead of stacking a duplicate (bug 15). Returns the
+   source addref'd, or null. */
+struct ZcHostMatch {
+	QString host;
+	obs_source_t *found = nullptr;
+};
+static bool findSourceByHostProc(void *param, obs_source_t *src)
+{
+	auto *m = static_cast<ZcHostMatch *>(param);
+	if (strcmp(obs_source_get_id(src), "zcamera_source") != 0)
+		return true;
+	obs_data_t *settings = obs_source_get_settings(src);
+	const char *ip = settings ? obs_data_get_string(settings, "zc_source_ip")
+				  : nullptr;
+	const bool match = ip && m->host == QString::fromUtf8(ip);
+	obs_data_release(settings);
+	if (match) {
+		m->found = obs_source_get_ref(src);
+		return false;
+	}
+	return true;
+}
+static obs_source_t *findSourceByHost(const QString &host)
+{
+	ZcHostMatch m{host, nullptr};
+	obs_enum_sources(findSourceByHostProc, &m);
+	return m.found;
+}
+
 /* Live presence query against OBS, never a cached flag (spec §1, L4). */
 bool ZcControlDock::isCameraAdded(const QString &host)
 {
@@ -2385,6 +2419,8 @@ bool ZcControlDock::isCameraAdded(const QString &host)
 		return false;
 	const QByteArray name = sourceNameForHost(host).toUtf8();
 	obs_source_t *src = obs_get_source_by_name(name.constData());
+	if (!src)
+		src = findSourceByHost(host);
 	if (!src)
 		return false;
 	obs_source_release(src);
@@ -2467,14 +2503,24 @@ void ZcControlDock::addCameraToSource(const QString &host)
 	if (src) {
 		obs_source_update(src, s);
 	} else {
-		/* First try to reclaim an unconfigured default source rather than
-		   stacking a second one. */
-		src = reclaimDefaultSource(name);
-		if (src)
+		/* A source may already carry this address under another name (e.g.
+		   added via the source-IP box as the default "ZCamera"): reuse it and
+		   give it the standard name so the rail's by-name check matches and no
+		   duplicate is created (bug 15). */
+		src = findSourceByHost(QString::fromStdString(ip));
+		if (src) {
+			obs_source_set_name(src, name.c_str());
 			obs_source_update(src, s);
-		else
-			src = obs_source_create("zcamera_source", name.c_str(), s,
-						nullptr);
+		} else {
+			/* First try to reclaim an unconfigured default source rather than
+			   stacking a second one. */
+			src = reclaimDefaultSource(name);
+			if (src)
+				obs_source_update(src, s);
+			else
+				src = obs_source_create("zcamera_source", name.c_str(), s,
+							nullptr);
+		}
 	}
 	obs_data_release(s);
 
