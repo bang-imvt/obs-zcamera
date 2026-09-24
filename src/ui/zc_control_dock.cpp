@@ -1343,6 +1343,38 @@ ZcPtzPad::ZcPtzPad(QWidget *parent) : QWidget(parent)
 			});
 	}
 
+	/* Range limit (bug 13): enable/disable, then store the current pan/tilt as
+	   one of the four edges. The edges are the camera's limit fields
+	   (Up/Down/Left/Right). */
+	{
+		auto *lRow = new QHBoxLayout;
+		auto *limitChk = new QCheckBox(ztr("ZCameraPlugin.Ptz.RangeLimit"), this);
+		lRow->addWidget(limitChk);
+		layout->addLayout(lRow);
+		connect(limitChk, &QCheckBox::toggled, this, [this](bool on) {
+			if (client_)
+				client_->ptzSetLimitEnabled(on);
+		});
+
+		auto *edgeRow = new QHBoxLayout;
+		const QStringList edgeNames = {"Up", "Down", "Left", "Right"};
+		for (int i = 0; i < 4; ++i) {
+			auto *b = new QPushButton(edgeNames[i], this);
+			edgeRow->addWidget(b);
+			connect(b, &QPushButton::clicked, this, [this, i]() {
+				if (!client_)
+					return;
+				/* Use the current position as the new edge. */
+				client_->ptzQuery(true, [this, i](const QJsonObject &o) {
+					const float pan = (float)o.value("pan_pos").toDouble();
+					const float tilt = (float)o.value("tilt_pos").toDouble();
+					client_->ptzSetLimit(i, pan, tilt);
+				});
+			});
+		}
+		layout->addLayout(edgeRow);
+	}
+
 	layout->addStretch();
 }
 
