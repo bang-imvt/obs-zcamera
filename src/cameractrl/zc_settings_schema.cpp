@@ -27,7 +27,7 @@ static std::vector<CatalogDef> makeCatalogs()
 {
 	/* Mirrors ZCamGuiOpen settings-schema.ts groups + catalogs. */
 	return {
-	    {"exposure", {}, {"ev", "ev_choice", "flicker", "meter_mode", "iris",
+	    {"exposure", {}, {"ev_choice", "flicker", "meter_mode", "iris",
 			      "iso", "min_iso", "max_iso", "iso_ctrl", "shutter",
 			      "max_shutter", "shutter_angle_ctrl", "sht_operation",
 			      "eND", "lock_ae_in_rec", "ae_speed", "bl_comp"}},
@@ -44,7 +44,7 @@ static std::vector<CatalogDef> makeCatalogs()
 			    "rec_fps", "preroll", "video_tl_interval",
 			    "record_meta", "camera_id", "reelname"}},
 	    {"video", {}, {"video_encoder", "bitrate_level", "record_mode",
-			   "compose_mode", "rec_proxy_file", "crop_sensor",
+			   "rec_proxy_file", "crop_sensor",
 			   "low_jello", "photo_q", "eis_on_off", "vid_rot"}},
 	    /* No stream group: the stream encoders are not a getbatch catalog, and
 	       their controls are not a group at all — they sit above the group list,
@@ -55,16 +55,6 @@ static std::vector<CatalogDef> makeCatalogs()
 			   "audio_input_gain", "audio_noise_reduction",
 			   "audio_in_l_gain", "audio_in_r_gain",
 			   "audio_output_gain"}},
-	    {"system", {}, {"hdmi_fmt", "hdmi_osd", "use_edid", "osd_layout",
-			    "led", "desqueeze", "usb_device_role", "tally_on",
-		    "ir", "ir_id", "color_bar_enable", "genlock",
-		    "sdi", "3g_sdi_mode", "visca_enable", "visca_id",
-		    "visca_baud_rate", "lcd_backlight",
-		    "gl_shf_coarse", "gl_shf_fine"}},
-	    {"security", "system", {"http_auth", "https_on",
-				    "https_cert_source"}},
-	    {"multicam", "system", {"union_ae", "union_awb", "ezlink_mode",
-				    "ezlink_trigger"}},
 	    {"ptz", {}, {"pt_speedmode", "ptz_flip", "ptz_limit",
 			 "ptz_preset_mode", "ptz_speed_mode",
 			 "freeze_during_preset", "pt_pwr_pos", "pt_priv_mode",
@@ -85,14 +75,12 @@ static std::vector<DependencyRule> makeDeps()
 	      "shutter_angle_ctrl", "shutter", "max_shutter", "ev", "ev_choice"},
 	     {"exposure"}},
 	    {{"lut"}, {"exposure"}},
-	    {{"compose_mode", "movvfr", "video_encoder", "record_mode"},
-	     {"record", "video"}},
+	    {{"movvfr", "video_encoder", "record_mode"}, {"record", "video"}},
 	    {{"bitrate_level"}, {"video"}},
 	    {{"resolution", "project_fps"}, {"record"}},
 	    {{"vfr_ctrl"}, {"record"}},
 	    {{"audio_channel"}, {"audio"}},
 	    {{"wb", "mwb", "tint"}, {"wb"}},
-	    {{"https_on"}, {"security"}},
 	};
 }
 
