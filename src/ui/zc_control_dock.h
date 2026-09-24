@@ -179,9 +179,6 @@ private slots:
 private:
 	void populateGroups();
 	void buildRows(const QString &catalog);
-	/* The static Ethernet address block shown under the network group
-	   (bug 15): /ctrl/network is not a settings catalog. */
-	void buildStaticNetworkBlock(QBoxLayout *rowLayout);
 	/* Write one setting and, when the camera applies it by restarting, tell the
 	   dock so it can wait for the camera and reconnect (bug 8). */
 	void writeKey(const QString &key, const QString &value);

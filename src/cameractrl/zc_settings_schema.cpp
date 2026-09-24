@@ -61,7 +61,6 @@ static std::vector<CatalogDef> makeCatalogs()
 		    "sdi", "3g_sdi_mode", "visca_enable", "visca_id",
 		    "visca_baud_rate", "lcd_backlight",
 		    "gl_shf_coarse", "gl_shf_fine"}},
-	    {"network", "system", {"wifi", "wifi_channel"}},
 	    {"security", "system", {"http_auth", "https_on",
 				    "https_cert_source"}},
 	    {"multicam", "system", {"union_ae", "union_awb", "ezlink_mode",
@@ -93,7 +92,6 @@ static std::vector<DependencyRule> makeDeps()
 	    {{"vfr_ctrl"}, {"record"}},
 	    {{"audio_channel"}, {"audio"}},
 	    {{"wb", "mwb", "tint"}, {"wb"}},
-	    {{"wifi"}, {"network"}},
 	    {{"https_on"}, {"security"}},
 	};
 }
