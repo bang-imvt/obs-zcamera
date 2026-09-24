@@ -64,6 +64,13 @@ void ZcSettingsEngine::readGroup(const QString &catalog,
 			      QJsonParseError err{};
 			      QJsonDocument doc = QJsonDocument::fromJson(
 				      rsp.body, &err);
+			      qInfo().noquote() << "[obs-zcamera] getbatch" << catalog
+						 << "http" << rsp.statusCode << "parse"
+						 << err.error << "bytes" << rsp.body.size();
+			      if (err.error == QJsonParseError::NoError && doc.isObject())
+				      qInfo().noquote() << "[obs-zcamera] getbatch" << catalog
+							 << "cfgs"
+							 << doc.object().value("cfgs").toArray().size();
 			      /* Old firmware has no /ctrl/getbatch at all: it answers
 				 404 (or any non-JSON body). Fall back to per-key reads so
 				 such a camera still shows its settings. */

@@ -21,6 +21,8 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
+#include <QSslConfiguration>
+#include <QSslSocket>
 #include <QNetworkReply>
 #include <QUrlQuery>
 #include <QEventLoop>
@@ -139,6 +141,11 @@ bool ZcHttpTransport::negotiateOrigin(const QString &host, int port,
 		   itself can be mistaken for a valid origin. */
 		req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
 				 QNetworkRequest::NoLessSafeRedirectPolicy);
+		/* Cameras ship a self-signed cert; accept it at the TLS layer so the
+		   handshake does not abort before the sslErrors signal is handled. */
+		QSslConfiguration ssl = QSslConfiguration::defaultConfiguration();
+		ssl.setPeerVerifyMode(QSslSocket::VerifyNone);
+		req.setSslConfiguration(ssl);
 		req.setRawHeader("User-Agent", "obs-zcamera");
 		req.setRawHeader("X-Requested-With", "XMLHttpRequest");
 		req.setRawHeader("Referer",
@@ -188,8 +195,15 @@ bool ZcHttpTransport::negotiateOrigin(const QString &host, int port,
 				    (final.port() > 0
 					     ? ":" + QString::number(final.port())
 					     : QString());
+			qInfo().noquote() << "[obs-zcamera] origin chosen:"
+					  << url.toString(QUrl::RemovePath)
+					  << "-> base" << base_url_
+					  << "(final code" << code << ")";
 			return true;
 		}
+		qWarning().noquote() << "[obs-zcamera] origin probe" << cand.scheme
+				     << "://" << host << ":" << cand.port
+				     << "returned" << code << "final" << finalUrl;
 	}
 	return false;
 }
@@ -276,6 +290,10 @@ QNetworkReply *ZcHttpTransport::send(const QUrl &url, const QByteArray &body,
 	req.setTransferTimeout(timeoutMs);
 	req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
 			 QNetworkRequest::NoLessSafeRedirectPolicy);
+	/* Accept the camera's self-signed certificate at the TLS layer. */
+	QSslConfiguration ssl = QSslConfiguration::defaultConfiguration();
+	ssl.setPeerVerifyMode(QSslSocket::VerifyNone);
+	req.setSslConfiguration(ssl);
 	req.setRawHeader("User-Agent", "obs-zcamera");
 	req.setRawHeader("X-Requested-With", "XMLHttpRequest");
 	if (!auth_header_.isEmpty())
