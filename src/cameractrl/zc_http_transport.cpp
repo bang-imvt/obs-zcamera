@@ -134,6 +134,11 @@ bool ZcHttpTransport::negotiateOrigin(const QString &host, int port,
 
 		QNetworkRequest req(url);
 		req.setTransferTimeout(timeoutMs);
+		/* Cameras with HTTPS enabled commonly answer the initial HTTP probe with
+		   307 -> https:443. Follow that redirect explicitly; otherwise the 307
+		   itself can be mistaken for a valid origin. */
+		req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+				 QNetworkRequest::NoLessSafeRedirectPolicy);
 		req.setRawHeader("User-Agent", "obs-zcamera");
 		req.setRawHeader("X-Requested-With", "XMLHttpRequest");
 		req.setRawHeader("Referer",
@@ -174,12 +179,10 @@ bool ZcHttpTransport::negotiateOrigin(const QString &host, int port,
 		/* Any HTTP answer (even 401 auth-required) means the origin is
 		   the right one. Ignore transport failures / redirects to other
 		   hosts; follow redirects within the camera. */
-		if (code >= 200 && code < 500) {
-			/* Use the FINAL url (after Qt followed any internal redirect to
-			   https on the camera): the candidate may have been http:80 that a
-			   camera answered with a 307 to https:443, and keeping the http
-			   origin would make the WebSocket go plain ws instead of wss and
-			   every later request hit the wrong scheme. */
+		if (code >= 200 && code < 300) {
+			/* Only accept the final non-redirect response. Use its URL after Qt
+			   followed the camera's internal redirect, so an HTTP probe that ends
+			   at HTTPS keeps the HTTPS origin and the notifier chooses wss. */
 			QUrl final(finalUrl);
 			base_url_ = final.scheme() + "://" + final.host() +
 				    (final.port() > 0
@@ -271,6 +274,8 @@ QNetworkReply *ZcHttpTransport::send(const QUrl &url, const QByteArray &body,
 
 	QNetworkRequest req(url);
 	req.setTransferTimeout(timeoutMs);
+	req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+			 QNetworkRequest::NoLessSafeRedirectPolicy);
 	req.setRawHeader("User-Agent", "obs-zcamera");
 	req.setRawHeader("X-Requested-With", "XMLHttpRequest");
 	if (!auth_header_.isEmpty())
