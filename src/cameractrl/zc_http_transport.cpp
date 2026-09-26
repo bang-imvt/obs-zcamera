@@ -175,12 +175,15 @@ bool ZcHttpTransport::negotiateOrigin(const QString &host, int port,
 		}
 		captureSession(reply);
 		QString finalUrl = reply->url().toString();
-		/* Surface the probe in the dock's request log: this runs before any
-		   base URL exists, so without it a failed origin negotiation leaves
-		   no trace of why (connect refused, TLS failure, timeout). */
+		/* Surface the probe result + the exact network error (TLS handshake vs
+		   timeout vs refused) so a failed HTTPS origin is not guesswork. */
 		emit requestLogged(QString("%1 %2  %3").arg(
 		    reply->request().url().toString(), QString::number(code),
 		    reply->errorString()));
+		qInfo().noquote() << "[obs-zcamera] origin probe" << cand.scheme << "://"
+				  << host << ":" << cand.port << "code" << code
+				  << "err" << reply->error() << reply->errorString()
+				  << "final" << finalUrl;
 		reply->deleteLater();
 
 		/* Any HTTP answer (even 401 auth-required) means the origin is
