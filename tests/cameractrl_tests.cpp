@@ -46,7 +46,10 @@ Exit code is non-zero when any check fails.
 #include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QNetworkAccessManager>
 #include <QNetworkProxy>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QRandomGenerator>
 #include <QSet>
 #include <QString>

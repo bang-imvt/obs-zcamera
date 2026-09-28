@@ -19,9 +19,8 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 
 #include "zc_ws_client.h"
 
-#include <QTcpSocket>
-#include <QSslSocket>
-#include <QSslError>
+#include "zc_tls_socket.h"
+
 #include <QUrl>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -74,29 +73,27 @@ void ZcWsClient::open(const QUrl &url, const QByteArray &extraHeaders)
 		socket_ = nullptr;
 	}
 	isTls_ = url.scheme() == "wss";
-	if (isTls_) {
-		QSslSocket *ssl = new QSslSocket(this);
-		socket_ = ssl;
-		/* Allow the camera's self-signed certificate (host-scoped trust is
-		   enforced by the caller via the connected camera allow-list). */
-		ssl->setPeerVerifyMode(QSslSocket::VerifyNone);
-		connect(ssl, &QSslSocket::sslErrors, this, &ZcWsClient::onSslErrors);
-	} else {
-		socket_ = new QTcpSocket(this);
-	}
+	host_ = url.host();
+	port_ = url.port();
 
-	connect(socket_, &QTcpSocket::connected, this, &ZcWsClient::onSocketConnected);
-	connect(socket_, &QTcpSocket::readyRead, this, &ZcWsClient::onSocketReadyRead);
-	connect(socket_, &QTcpSocket::disconnected, this,
+	socket_ = new ZcTlsSocket(this);
+	connect(socket_, &ZcTlsSocket::connected, this,
+		&ZcWsClient::onSocketConnected);
+	connect(socket_, &ZcTlsSocket::readyRead, this,
+		&ZcWsClient::onSocketReadyRead);
+	connect(socket_, &ZcTlsSocket::disconnected, this,
 		&ZcWsClient::onSocketDisconnected);
+	connect(socket_, &ZcTlsSocket::errorOccurred, this,
+		&ZcWsClient::onSocketError);
 
-	socket_->setSocketOption(QAbstractSocket::LowDelayOption, 1);
-	socket_->connectToHost(url.host(), url.port());
+	/* The camera's self-signed certificate is accepted inside ZcTlsSocket
+	   (host-scoped trust is enforced by the caller's camera allow-list). */
+	socket_->connectToHost(url.host(), (quint16)url.port(), isTls_);
 }
 
 void ZcWsClient::close()
 {
-	if (socket_ && socket_->state() != QAbstractSocket::UnconnectedState) {
+	if (socket_ && socket_->isConnected()) {
 		/* Send a close frame (0x8) then close. */
 		writeFrame(0x8, QByteArray());
 		socket_->disconnectFromHost();
@@ -105,36 +102,32 @@ void ZcWsClient::close()
 
 bool ZcWsClient::isOpen() const
 {
-	return socket_ && handshakeDone_ &&
-	       socket_->state() == QAbstractSocket::ConnectedState;
+	return socket_ && handshakeDone_ && socket_->isConnected();
 }
 
 void ZcWsClient::onSocketConnected()
 {
-	if (isTls_) {
-		QSslSocket *ssl = qobject_cast<QSslSocket *>(socket_);
-		if (ssl)
-			ssl->startClientEncryption();
-		return;
-	}
+	/* Reached only once the channel is usable: for wss, ZcTlsSocket already
+	   completed the TLS handshake before emitting connected(). */
 	sendHandshake();
 }
 
 void ZcWsClient::sendHandshake()
 {
-	/* Build the RFC 6455 upgrade request. */
-	const QByteArray key = QCryptographicHash::hash(
-				       QByteArray::number(
-					   QRandomGenerator::global()
-					       ->generate()),
-				       QCryptographicHash::Sha1)
-				       .toBase64()
-				       .left(16);
+	/* Build the RFC 6455 upgrade request. The key must be 16 random bytes
+	   base64-encoded (24 characters) — a truncated key is rejected. */
+	QByteArray keyBytes(16, '\0');
+	for (int i = 0; i < keyBytes.size(); ++i)
+		keyBytes[i] = (char)(QRandomGenerator::global()->bounded(256));
+	const QByteArray key = keyBytes.toBase64();
 	handshakeKey_ = key;
 
 	QByteArray req;
 	req += "GET / HTTP/1.1\r\n";
-	req += "Host: " + socket_->peerAddress().toString().toUtf8() + "\r\n";
+	/* The notification server always sits on a non-default port, so Host must
+	   carry it — the camera closes the connection without a reply otherwise. */
+	req += "Host: " + host_.toUtf8() + ':' + QByteArray::number(port_) +
+	       "\r\n";
 	req += "Upgrade: websocket\r\n";
 	req += "Connection: Upgrade\r\n";
 	req += "Sec-WebSocket-Key: " + key + "\r\n";
@@ -151,7 +144,6 @@ void ZcWsClient::sendHandshake()
 	}
 	req += "\r\n";
 	socket_->write(req);
-	socket_->flush();
 }
 
 void ZcWsClient::onSocketReadyRead()
@@ -170,7 +162,7 @@ void ZcWsClient::onSocketReadyRead()
 		/* Verify the 101 Switching Protocols response and Sec-WebSocket-Accept. */
 		if (!header.startsWith("HTTP/1.1 101") && !header.startsWith("HTTP/1.0 101")) {
 			emit error("WebSocket handshake failed: " + header.left(120));
-			socket_->close();
+			socket_->abort();
 			return;
 		}
 		const QByteArray expected = QCryptographicHash::hash(
@@ -183,7 +175,7 @@ void ZcWsClient::onSocketReadyRead()
 		if (accept.isEmpty() || accept != expected) {
 			emit error("WebSocket handshake failed: bad "
 				   "Sec-WebSocket-Accept");
-			socket_->close();
+			socket_->abort();
 			return;
 		}
 		handshakeDone_ = true;
@@ -205,12 +197,12 @@ void ZcWsClient::onSocketDisconnected()
 	emit disconnected();
 }
 
-void ZcWsClient::onSslErrors(const QList<QSslError> &)
+void ZcWsClient::onSocketError(const QString &error)
 {
-	/* Self-signed camera cert allowed (host trust enforced by caller). */
-	QSslSocket *ssl = qobject_cast<QSslSocket *>(socket_);
-	if (ssl)
-		ssl->ignoreSslErrors();
+	/* Connect/handshake failure or a dropped connection. The channel has
+	   already torn itself down; the notifier owns the reconnect policy. */
+	handshakeDone_ = false;
+	emit this->error(error);
 }
 
 void ZcWsClient::handleIncoming(const QByteArray &data)
@@ -269,7 +261,7 @@ void ZcWsClient::handleIncoming(const QByteArray &data)
 
 void ZcWsClient::writeFrame(int opcode, const QByteArray &payload)
 {
-	if (!socket_ || socket_->state() != QAbstractSocket::ConnectedState)
+	if (!socket_ || !socket_->isConnected())
 		return;
 	QByteArray frame;
 	frame += (char)(0x80 | (opcode & 0x0F)); /* FIN + opcode */
@@ -294,7 +286,6 @@ void ZcWsClient::writeFrame(int opcode, const QByteArray &payload)
 	for (int i = 0; i < len; ++i)
 		frame += (char)(payload[i] ^ mask[i % 4]);
 	socket_->write(frame);
-	socket_->flush();
 }
 
 } // namespace zc

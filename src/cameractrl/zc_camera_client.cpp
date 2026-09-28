@@ -51,14 +51,34 @@ bool ZcCameraClient::connect(const QString &host, int port,
 	if (!transport_.negotiateOrigin(host, port))
 		return false;
 
-	/* The camera requires Digest auth; without credentials nothing else we
-	   do can succeed, so fail fast instead of looping on 401s. The Digest
-	   handshake itself runs in the transport on the first real request. */
+	/* /info is public on some firmware, so the origin probe alone cannot tell
+	   whether a login is needed (bug: the prompt never appeared for such a
+	   camera). Probe a control endpoint; if it 401s and we have no credentials,
+	   fail fast so the dock asks for them instead of looping on 401s. */
+	transport_.probeAuthRequired();
+
+	/* The camera requires a login; without credentials nothing else we do can
+	   succeed, so fail fast so the dock asks the operator for them (bug 4). */
 	if (transport_.authRequired() && creds.username.isEmpty()) {
-		/* Remembered so the dock can tell "needs a login" from "unreachable"
-		   and ask the operator for credentials (bug 4). */
 		authRequired_ = true;
 		return false;
+	}
+
+	/* Credentials were supplied for a camera that needs a login: perform the
+	   web-UI session login now (POST /login/ + captured cookie). Firmware that
+	   accepts per-request Digest instead is a no-op here. A 401 here means the
+	   password was wrong — fail connect so the dock keeps the form up rather
+	   than showing empty settings behind an open 401 loop. */
+	if (!creds.username.isEmpty()) {
+		if (!transport_.login()) {
+			/* Only reject when the login actually challenged us. A camera that
+			   never needed a login returns "no challenge" as a no-op success,
+			   so reaching false here means credentials were wrong. */
+			if (transport_.authRequired()) {
+				authRequired_ = true;
+				return false;
+			}
+		}
 	}
 
 	/* Start the WebSocket notifications (wss when origin is https), carrying

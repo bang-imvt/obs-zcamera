@@ -61,6 +61,10 @@ public:
 	   camera is unreachable: the dock asks the operator for them (bug 4). */
 	bool authRequired() const { return authRequired_; }
 
+	/* The camera only answers over HTTPS but this Qt build cannot initialise
+	   TLS: the operator must switch the camera to HTTP to control it. */
+	bool tlsUnavailable() const { return transport_.tlsUnavailable(); }
+
 	/* Camera identity from the /info reply (fetched on connect). */
 	QString cameraModel() const { return model_; }
 	/* Whether the camera has a pan/tilt head: /info feature.lens_ctrl_ptz, or

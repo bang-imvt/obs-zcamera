@@ -88,19 +88,34 @@ try {
     & $QtMoc (Join-Path $Src 'zc_settings_engine.h') -o $mocEngine
     if ($LASTEXITCODE -ne 0) { throw "moc failed ($LASTEXITCODE)" }
 
+    $mocTls = Join-Path $Root 'moc_zc_tls_socket.cpp'
+    Write-Host '=== moc zc_tls_socket.h ==='
+    & $QtMoc (Join-Path $Src 'zc_tls_socket.h') -o $mocTls
+    if ($LASTEXITCODE -ne 0) { throw "moc failed ($LASTEXITCODE)" }
+
     # ---- cameractrl_tests.exe -------------------------------------------
+    # zc_http_transport.cpp drives its requests through ZcTlsSocket, which is
+    # the plugin's own TLS channel. The plugin compiles it with ZC_HAVE_MBEDTLS
+    # (see CMakeLists.txt), so the test uses the same define and the same
+    # libraries — otherwise it would silently link the Qt fallback and verify
+    # code that is not the code being shipped.
     $ctrlSources = @(
         (Join-Path $Root 'cameractrl_tests.cpp'),
         $mocOut,
         $mocEngine,
+        $mocTls,
         (Join-Path $Src 'zc_http_transport.cpp'),
+        (Join-Path $Src 'zc_tls_socket.cpp'),
         (Join-Path $Src 'zc_settings_schema.cpp'),
         (Join-Path $Src 'zc_settings_engine.cpp')
     )
     $ctrlOut = Join-Path $Root 'cameractrl_tests.exe'
     Write-Host '=== compiling cameractrl_tests.exe ==='
-    & cl @qtCxxFlags @qtIncArgs $srcIncArg @ctrlSources `
-        '/link' "/LIBPATH:$QtLib" 'Qt6Core.lib' 'Qt6Network.lib' `
+    & cl @qtCxxFlags @qtIncArgs $srcIncArg $depsIncArg '/DZC_HAVE_MBEDTLS' `
+        @ctrlSources `
+        '/link' "/LIBPATH:$QtLib" $depsLibArg 'Qt6Core.lib' 'Qt6Network.lib' `
+        'mbedtls.lib' 'mbedx509.lib' 'mbedcrypto.lib' 'bcrypt.lib' `
+        'advapi32.lib' 'ws2_32.lib' `
         "/OUT:$ctrlOut"
     if ($LASTEXITCODE -ne 0) { throw "cameractrl_tests build failed ($LASTEXITCODE)" }
 

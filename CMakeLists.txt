@@ -108,6 +108,7 @@ endif()
 
 if(ENABLE_CAMERA_CONTROL AND ENABLE_QT AND ENABLE_FRONTEND_API)
   list(APPEND obs-zcamera_SOURCES
+       src/cameractrl/zc_tls_socket.cpp
        src/cameractrl/zc_http_transport.cpp
        src/cameractrl/zc_ws_client.cpp
        src/cameractrl/zc_ws_notifier.cpp
@@ -117,6 +118,7 @@ if(ENABLE_CAMERA_CONTROL AND ENABLE_QT AND ENABLE_FRONTEND_API)
        src/ui/zc_control_dock.cpp
        src/ui/zc_debug_panel.cpp)
   list(APPEND obs-zcamera_HEADERS
+       src/cameractrl/zc_tls_socket.h
        src/cameractrl/zc_http_transport.h
        src/cameractrl/zc_ws_client.h
        src/cameractrl/zc_ws_notifier.h
@@ -125,6 +127,35 @@ if(ENABLE_CAMERA_CONTROL AND ENABLE_QT AND ENABLE_FRONTEND_API)
        src/cameractrl/zc_settings_schema.h
        src/ui/zc_control_dock.h
        src/ui/zc_debug_panel.h)
+
+  # HTTPS transport. Qt6's Network module has no TLS backend in OBS's runtime
+  # (OBS never deploys Qt's tls plugins), so QSslSocket/QNetworkAccessManager
+  # fail with "TLS initialization failed" and a camera reachable only over
+  # https cannot be controlled at all. The plugin therefore carries its own TLS:
+  # mbedTLS from obs-deps, statically linked, so no extra DLL is shipped.
+  # Where obs-deps has no mbedTLS (e.g. a platform that does not provide it),
+  # ZcTlsSocket falls back to Qt's own TLS backend.
+  find_path(ZC_MBEDTLS_INCLUDE_DIR mbedtls/ssl.h)
+  find_library(ZC_MBEDTLS_LIBRARY NAMES mbedtls)
+  find_library(ZC_MBEDX509_LIBRARY NAMES mbedx509)
+  find_library(ZC_MBEDCRYPTO_LIBRARY NAMES mbedcrypto)
+  if(ZC_MBEDTLS_INCLUDE_DIR
+     AND ZC_MBEDTLS_LIBRARY
+     AND ZC_MBEDX509_LIBRARY
+     AND ZC_MBEDCRYPTO_LIBRARY)
+    target_include_directories(${CMAKE_PROJECT_NAME}
+                               PRIVATE ${ZC_MBEDTLS_INCLUDE_DIR})
+    target_link_libraries(
+      ${CMAKE_PROJECT_NAME}
+      PRIVATE ${ZC_MBEDTLS_LIBRARY} ${ZC_MBEDX509_LIBRARY}
+              ${ZC_MBEDCRYPTO_LIBRARY})
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ZC_HAVE_MBEDTLS)
+    message(STATUS "obs-zcamera: mbedTLS -> ${ZC_MBEDTLS_LIBRARY}")
+  else()
+    message(
+      WARNING
+        "obs-zcamera: mbedTLS not found; HTTPS falls back to Qt's TLS backend, which OBS does not ship")
+  endif()
 endif()
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${obs-zcamera_SOURCES})

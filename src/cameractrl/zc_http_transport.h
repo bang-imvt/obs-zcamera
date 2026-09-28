@@ -30,18 +30,20 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
      drops concurrent requests, so all traffic to one camera runs one request
      at a time (a per-camera FIFO queue).
 
-   The Qt HTTP stack does not let us see the -X challenge header, so we do the
-   Digest dance with our own parser. Credentials are kept in memory only. */
+   The HTTP engine is our own (src/cameractrl/zc_tls_socket.*) rather than
+   Qt's: Qt's HTTP stack cannot complete a TLS handshake inside OBS (the Qt6
+   shipped with OBS has no tls backend plugin), which made every HTTPS-only
+   camera uncontrollable, and it also hides the non-standard challenge header.
+   Requests stay asynchronous — the socket is a non-blocking QTcpSocket driven
+   by the Qt event loop — so the UI thread is never blocked while a request is
+   in flight. Credentials are kept in memory only. */
 
 #pragma once
 
 #include <QObject>
-#include <QUrl>
 #include <QUrlQuery>
 #include <QString>
 #include <QByteArray>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
 #include <functional>
 #include <queue>
 
@@ -82,12 +84,35 @@ public:
 	/* Set credentials for Digest auth (session only). */
 	void setCredentials(const ZcCredentials &cred);
 
+	/* Some firmware (the P2/R1 family) does not accept Digest on each /ctrl/*
+	   request: it answers 401 with no WWW-Authenticate at all until a session
+	   has been opened. login() performs the web-UI login — GET /login/me for
+	   the Digest challenge, then POST /login/ with the computed Authorization —
+	   and captures the session cookie / x-auth-token so subsequent requests are
+	   authenticated. Returns true when a session is established. A camera that
+	   does not require a login (no /login challenge) is a no-op success. */
+	bool login(int timeoutMs = 8000);
+
+	/* Probe one control endpoint to find out whether the camera demands a login.
+	   /info is public on many firmware versions, so the origin probe cannot tell
+	   (bug: the login prompt never appeared for such a camera). Returns true and
+	   sets auth_required_ when the probe got a 401/403 challenge. */
+	bool probeAuthRequired(int timeoutMs = 1500);
+
 	/* Whether we believe authentication is required (got a 401 challenge). */
 	bool authRequired() const { return auth_required_; }
 
 	/* Base origin of the locked camera (e.g. http://192.168.1.2:80). */
 	QString baseUrl() const { return base_url_; }
 	QString host() const { return host_; }
+	/* Port the locked origin was reached on — the notification socket must
+	   reuse it for wss (the camera's TLS listener), not a fixed port. */
+	int port() const { return port_; }
+
+	/* True when the camera only answers over HTTPS and no TLS backend could be
+	   initialised — the operator must switch the camera to HTTP. With the
+	   built-in mbedTLS transport this stays false. */
+	bool tlsUnavailable() const { return tls_unavailable_; }
 
 	/* Session/auth state handed to the WebSocket upgrade (design §4.3): the
 	   cached Digest Authorization header, the session cookie and
@@ -110,31 +135,55 @@ signals:
 	void requestLogged(const QString &line); /* for the debug panel */
 
 private:
+	/* One parsed HTTP response, transport level. */
+	struct RawHttp {
+		int status = 0;
+		QByteArray headers; /* status line + header block, no blank line */
+		QByteArray body;
+		QString error; /* non-empty on transport/TLS failure */
+		bool timedOut = false;
+	};
+
+	using ExchangeDone = std::function<void(int status,
+						const QByteArray &headers,
+						const QByteArray &body,
+						const QString &error,
+						bool timedOut)>;
+
 	void enqueue(std::function<void()> run);
 	void pump();
-	QNetworkReply *send(const QUrl &url, const QByteArray &body,
-			    int timeoutMs);
-	/* Issue a request and process it when it actually finishes (a reply
-	   handled before `finished` has no status code and no body). */
-	void doRequest(const QUrl &url, const QByteArray &body, ZcHttpCallback cb,
-		       int timeoutMs, int retries);
-	void onFinished(QNetworkReply *reply, ZcHttpCallback cb, int retries,
-			const QUrl &url, const QByteArray &body, int timeoutMs);
-	/* Parse a Digest challenge (WWW-Authenticate-X preferred) and cache the
-	   request-independent parts. False when no usable challenge is present. */
-	bool parseChallenge(const QNetworkReply *reply);
+	/* Start one request on a fresh connection and report it through `done`. */
+	void dispatch(const char *method, const QString &pathWithQuery,
+		      const QByteArray &body, int timeoutMs, ExchangeDone done);
+	/* Event-loop-driven "synchronous" request for the probes, which the callers
+	   already treat as blocking. */
+	bool requestSync(const char *method, const QString &pathWithQuery,
+			 const QByteArray &body, RawHttp &out, int timeoutMs);
+	void doRequest(const char *method, const QString &pathWithQuery,
+		       const QByteArray &body, ZcHttpCallback cb, int timeoutMs,
+		       int retries);
+	QByteArray buildRequest(const char *method,
+				const QString &pathWithQuery,
+				const QByteArray &body) const;
+	QString hostHeader() const;
+	/* Parse a Digest challenge (WWW-Authenticate-X preferred) out of a raw
+	   response header block and cache the request-independent parts. False when
+	   no usable challenge is present. */
+	bool parseChallenge(const QByteArray &headers);
 	/* Build + cache the Authorization header for one request (nc counts up). */
 	void buildAuthorization(const QByteArray &method, const QByteArray &uri);
 	/* Remember Set-Cookie / x-auth-token for the WS upgrade. */
-	void captureSession(const QNetworkReply *reply);
+	void captureSession(const QByteArray &headers);
 
 	QString host_;
 	QString base_url_;
+	int port_ = 80;
+	bool tls_ = false;
 	bool auth_required_ = false;
+	bool tls_unavailable_ = false;
 	ZcCredentials creds_;
 	bool busy_ = false;
 	std::queue<std::function<void()>> queue_;
-	QNetworkAccessManager mgr_; /* per-transport, owned by this instance */
 
 	/* Digest state (memory only; never logged, never written to disk). */
 	QByteArray realm_;

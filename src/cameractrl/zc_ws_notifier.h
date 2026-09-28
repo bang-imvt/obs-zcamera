@@ -20,7 +20,8 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 /* Camera WebSocket notifications, ported from ZCamGuiOpen notifications.ts
    + camera-state.ts.
 
-   Socket: ws(s)://<address>:81/ (wss when the HTTP origin negotiated https).
+   Socket: wss://<address>:<httpsPort>/ when the HTTP origin negotiated https,
+   otherwise ws://<address>:81/.
    Messages are JSON objects dispatched on the `what` field.
 
    On disconnect we mark state stale, reconnect with backoff, and temporarily
@@ -43,10 +44,12 @@ class ZcWsNotifier : public QObject {
 public:
 	explicit ZcWsNotifier(QObject *parent = nullptr);
 
-	/* Start connecting to host:port81, using wss when httpsOrigin is true.
-	   extraHeaders carries the Digest Authorization / Cookie / x-auth-token
-	   lines for the upgrade request (from ZcHttpTransport). */
-	void start(const QString &host, bool httpsOrigin,
+	/* Start connecting to the camera's notification socket. The socket always
+	   lives on the camera's own port 81; only the scheme follows the HTTP origin
+	   (secure=false -> ws, secure=true -> wss). extraHeaders carries the Digest
+	   Authorization / Cookie / x-auth-token lines for the upgrade request (from
+	   ZcHttpTransport). */
+	void start(const QString &host, bool secure,
 		   const QByteArray &extraHeaders = QByteArray());
 	void stop();
 
@@ -73,7 +76,7 @@ private:
 	QTimer reconnectTimer_;
 	QString host_;
 	QByteArray extraHeaders_; /* upgrade request headers (auth/cookie) */
-	bool httpsOrigin_ = false;
+	bool secure_ = false;
 	bool live_ = false;
 	bool stopped_ = true;
 	int retry_ = 0;

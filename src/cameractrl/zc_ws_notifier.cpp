@@ -39,11 +39,11 @@ ZcWsNotifier::ZcWsNotifier(QObject *parent)
 		&ZcWsNotifier::doConnect);
 }
 
-void ZcWsNotifier::start(const QString &host, bool httpsOrigin,
+void ZcWsNotifier::start(const QString &host, bool secure,
 			 const QByteArray &extraHeaders)
 {
 	host_ = host;
-	httpsOrigin_ = httpsOrigin;
+	secure_ = secure;
 	extraHeaders_ = extraHeaders;
 	retry_ = 0;
 	stopped_ = false;
@@ -64,8 +64,12 @@ void ZcWsNotifier::doConnect()
 	if (host_.isEmpty() || stopped_)
 		return;
 	QUrl url;
-	url.setScheme(httpsOrigin_ ? "wss" : "ws");
+	url.setScheme(secure_ ? "wss" : "ws");
 	url.setHost(host_);
+	/* The notification server always listens on the camera's own port 81, even
+	   when the HTTP origin is HTTPS (only the scheme changes to wss). Pointing
+	   wss at the HTTPS port made the upgrade land on the web UI and come back
+	   301 -> /www/index.html. */
 	url.setPort(81);
 	url.setPath("/");
 

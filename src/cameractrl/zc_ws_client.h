@@ -21,22 +21,22 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 
    The Qt6 bundled with OBS does not ship Qt6WebSockets, so we implement the
    small subset needed by the camera notification socket (text frames,
-   close frames, mask outbound payloads) on top of QTcpSocket / QtNetwork,
-   which the bundled Qt does provide. Supports ws:// and wss:// (TLS via
-   QSslSocket). This keeps the plugin free of a dependency OBS does not carry. */
+   close frames, mask outbound payloads). The byte pipe is ZcTlsSocket, which
+   handles both ws:// (plain TCP) and wss:// (its own mbedTLS record layer, not
+   Qt's TLS — OBS ships no Qt tls backend plugin). This keeps the plugin free of
+   a dependency OBS does not carry. */
 
 #pragma once
 
 #include <QObject>
 #include <QByteArray>
 #include <QString>
-#include <QAbstractSocket>
 
-class QTcpSocket;
-class QSslError;
 class QUrl;
 
 namespace zc {
+
+class ZcTlsSocket;
 
 class ZcWsClient : public QObject {
 	Q_OBJECT
@@ -62,19 +62,21 @@ private slots:
 	void onSocketConnected();
 	void onSocketReadyRead();
 	void onSocketDisconnected();
-	void onSslErrors(const QList<QSslError> &errors);
+	void onSocketError(const QString &error);
 
 private:
 	void writeFrame(int opcode, const QByteArray &payload);
 	void handleIncoming(const QByteArray &data);
 	void sendHandshake();
 
-	QTcpSocket *socket_ = nullptr;
+	ZcTlsSocket *socket_ = nullptr;
 	bool handshakeDone_ = false;
 	QByteArray recvBuffer_;
 	QByteArray handshake_;
 	QByteArray handshakeKey_; /* Sec-WebSocket-Key, kept for Accept check */
 	QByteArray extraHeaders_;
+	QString host_;            /* Host header value, without the port */
+	int port_ = 81;           /* notification port, for the Host header */
 	bool isTls_ = false;
 };
 
