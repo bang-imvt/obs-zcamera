@@ -57,8 +57,6 @@ Section "Plugin"
     SetOutPath "$INSTDIR\data\obs-plugins\${PLUGIN_NAME}\locale"
     File "data\locale\en-US.ini"
     File "data\locale\zh-CN.ini"
-    File "data\locale\de-DE.ini"
-    File "data\locale\ru-RU.ini"
 
     WriteUninstaller "$INSTDIR\uninstall-${PLUGIN_NAME}.exe"
 SectionEnd
