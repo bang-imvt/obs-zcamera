@@ -159,8 +159,19 @@ void ZcCameraClient::handleWsEvent(const QString &what,
 		QString value = obj.value("value").toString();
 		if (value.isEmpty())
 			value = obj.value("v").toString();
-		if (!key.isEmpty())
+		if (!key.isEmpty()) {
 			emit configChanged(key, value);
+			/* A change made outside the plugin (the camera's own web UI, a
+			   second controller) arrives only here. Nothing in the UI listens
+			   to configChanged, and the settings panel repaints only from
+			   groupRefreshed, which an HTTP read produces — so without this
+			   the dock kept showing the stale value for both transports.
+			   Re-read the catalog the key belongs to; the panel's existing
+			   handler repaints it when it is the catalog on screen. */
+			const QString catalog = settings_.catalogFor(key);
+			if (!catalog.isEmpty())
+				settings_.readGroup(catalog, nullptr);
+		}
 	} else if (what == ws_events::kAfArea) {
 		emit afAreaChanged(obj.value("roi_x").toDouble(),
 				   obj.value("roi_y").toDouble(),

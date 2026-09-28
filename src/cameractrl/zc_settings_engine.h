@@ -80,6 +80,12 @@ public:
 	   and rejects whole catalogs it does not have). Empty until read. */
 	QStringList groupKeys(const QString &catalog) const;
 
+	/* The catalog the camera reported this key under, or an empty string when
+	   no read has seen the key yet. The camera, not the ported schema, decides
+	   which keys exist (it reports keys the schema never heard of), so this is
+	   what a notification handler has to ask to find the group to re-read. */
+	QString catalogFor(const QString &key) const;
+
 signals:
 	void valueChanged(const QString &key, const QString &value);
 	void groupRefreshed(const QString &catalog);

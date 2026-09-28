@@ -20,8 +20,8 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 /* Camera WebSocket notifications, ported from ZCamGuiOpen notifications.ts
    + camera-state.ts.
 
-   Socket: wss://<address>:<httpsPort>/ when the HTTP origin negotiated https,
-   otherwise ws://<address>:81/.
+   Socket: <scheme>://<address>:81/ — always the camera's notification port, on
+   ws:// or wss:// depending on whether the HTTP origin negotiated https.
    Messages are JSON objects dispatched on the `what` field.
 
    On disconnect we mark state stale, reconnect with backoff, and temporarily
@@ -80,6 +80,7 @@ private:
 	bool live_ = false;
 	bool stopped_ = true;
 	int retry_ = 0;
+	bool failureLogged_ = false; /* one log line per failure streak */
 };
 
 } // namespace zc

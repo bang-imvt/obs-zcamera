@@ -19,6 +19,7 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 
 #include "zc_ws_notifier.h"
 
+#include <QDebug>
 #include <QJsonDocument>
 #include <QUrl>
 
@@ -73,6 +74,12 @@ void ZcWsNotifier::doConnect()
 	url.setPort(81);
 	url.setPath("/");
 
+	/* One line per reconnect cycle: the OBS log then shows that the plugin did
+	   try the notification socket, without listing every backoff attempt. */
+	if (retry_ == 0)
+		qInfo().noquote()
+			<< "[obs-zcamera] notifications connecting:" << url.toString();
+
 	/* The upgrade carries Digest Authorization, x-auth-token and the
 	   session cookie, supplied by the HTTP transport. */
 	socket_.open(url, extraHeaders_);
@@ -82,6 +89,9 @@ void ZcWsNotifier::onConnected()
 {
 	live_ = true;
 	retry_ = 0;
+	failureLogged_ = false;
+	qInfo().noquote() << "[obs-zcamera] notifications connected:"
+			  << (secure_ ? "wss" : "ws") << host_ << "port 81";
 	emit socketStateChanged(true);
 }
 
@@ -89,6 +99,8 @@ void ZcWsNotifier::onDisconnected()
 {
 	if (live_) {
 		live_ = false;
+		qInfo().noquote() << "[obs-zcamera] notifications disconnected:"
+				  << host_;
 		emit socketStateChanged(false);
 	}
 	scheduleReconnect();
@@ -114,6 +126,13 @@ void ZcWsNotifier::onTextMessage(const QString &msg)
 void ZcWsNotifier::onSocketError(const QString &error)
 {
 	/* Backoff and reconnect. Never issue camera commands during recovery. */
+	/* Once per failure streak: a camera that stays off would otherwise put a
+	   line in the log at every backoff interval. */
+	if (!failureLogged_) {
+		failureLogged_ = true;
+		qWarning().noquote()
+			<< "[obs-zcamera] notifications failed:" << error;
+	}
 	live_ = false;
 	emit socketStateChanged(false);
 	scheduleReconnect();

@@ -268,6 +268,16 @@ QString ZcSettingsEngine::value(const QString &key) const
 	return values_.value(key).toString();
 }
 
+QString ZcSettingsEngine::catalogFor(const QString &key) const
+{
+	for (auto it = groupKeys_.constBegin(); it != groupKeys_.constEnd();
+	     ++it) {
+		if (it.value().contains(key))
+			return it.key();
+	}
+	return QString();
+}
+
 QJsonObject ZcSettingsEngine::snapshot() const
 {
 	return values_;
