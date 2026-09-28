@@ -50,6 +50,8 @@ class QToolButton;
 class QComboBox;
 class QSlider;
 class QLineEdit;
+class QCheckBox;
+class QSpinBox;
 class QFrame;
 class QBoxLayout;
 class QTabWidget;
@@ -161,6 +163,13 @@ public:
 	void setClient(ZcCameraClient *client);
 	void selectGroup(const QString &catalog);
 
+	/* Show an in-page login form (setClient has no client because the camera
+	   answered 401) or a "switch to http" notice (HTTPS-only camera, no TLS
+	   backend). hidden again by hidePrompts() once connected. */
+	void showLoginPrompt(const QString &host);
+	void showTlsPrompt(const QString &host);
+	void hidePrompts();
+
 public slots:
 	/* Re-read the stream bar and the visible group from the camera. */
 	void refreshGroup();
@@ -170,6 +179,8 @@ signals:
 	   moving to another address (network type) was issued: the control
 	   connection is about to go away until the camera is back (bug 8). */
 	void cameraRestarting();
+	/* The operator filled in the in-page login form. */
+	void loginRequested(const QString &user, const QString &password);
 
 private slots:
 	/* A catalog finished loading; rebuild the rows when it is the visible one. */
@@ -202,6 +213,18 @@ private:
 	/* The catalog currently rendered, so a late getbatch reply knows whether
 	   it still owns the rows pane. */
 	QString catalog_;
+
+	/* In-page login / HTTPS fallback notice (shown until the camera is
+	   connected; hidden once it is). */
+	QWidget *loginPage_ = nullptr;
+	QLabel *promptHint_ = nullptr;
+	/* The username/password fields + login button, wrapped as one unit so the
+	   HTTPS notice can hide the whole form at once (labels included). */
+	QWidget *loginFields_ = nullptr;
+	QLineEdit *loginUser_ = nullptr;
+	QLineEdit *loginPass_ = nullptr;
+	QPushButton *loginBtn_ = nullptr;
+	QString loginHost_;
 
 	/* Stream bar controls. */
 	QWidget *streamBar_ = nullptr;
@@ -271,6 +294,90 @@ private:
 	JoystickMode mode_ = JoystickMode::None;
 	int activeDir_ = -1;
 	QPointF dragOffset_;
+};
+
+/* Auto-framing, split out of the PTZ joystick into its own tab (the camera's web
+   UI keeps a matching panel too).
+
+   DEFERRED FROM THE UI: this panel speaks the whole /ctrl/framing API, but its
+   layout is still far from the camera's own page — that one drives a
+   framing-box canvas, a FOV composition preview and EzFraming
+   click-to-centre/zoom — so ZcControlDock keeps the tab out of the tab bar
+   (kFramingPanelVisible in zc_control_dock.cpp). The class, its client calls and
+   its WebSocket wiring are all retained so re-enabling is a one-line change.
+
+   This mirrors that panel's non-canvas controls:
+   the switches, the scene / start-position / target-number / lost-action
+   dropdowns, the speed and timeout spinners, the "restart now" button and the
+   composition-preset list. The canvas-only parts of the web page (the framing
+   box drag, the FOV preview, EzFraming click-to-centre) are deliberately not
+   here. Reads come from one /ctrl/framing/all_status snapshot; writes are the
+   same /ctrl/framing/<sub> calls the web UI makes. */
+class ZcFramingPanel : public QWidget {
+	Q_OBJECT
+public:
+	explicit ZcFramingPanel(QWidget *parent = nullptr);
+
+	void setClient(ZcCameraClient *client);
+
+public slots:
+	/* Re-read the framing snapshot and the preset list, then repaint. */
+	void refresh();
+	/* Paint from a framing snapshot (/ctrl/framing/all_status) or a live
+	   FramingStatusChanged payload: only the fields present are applied. */
+	void applyStatus(const QJsonObject &doc);
+
+private:
+	/* Write every control to the camera in one go (the Apply button). */
+	void apply();
+	/* Re-read /ctrl/framing/preset and rebuild the tile list. */
+	void refreshPresets();
+	void rebuildPresets(const QJsonObject &doc);
+	/* Repaint the status line from the live switches. */
+	void updateStatusLabel();
+
+	/* Switches. */
+	QCheckBox *detectChk_ = nullptr;
+	QCheckBox *traceChk_ = nullptr;
+	QCheckBox *autoTargetChk_ = nullptr;
+	QCheckBox *zoomLockChk_ = nullptr;
+	QCheckBox *tiltLockChk_ = nullptr;
+	QCheckBox *faceTrackChk_ = nullptr;
+	QCheckBox *autoStartChk_ = nullptr;
+	QCheckBox *tallyChk_ = nullptr;
+	QCheckBox *trackingRecordChk_ = nullptr;
+	QCheckBox *maskChk_ = nullptr;
+	QCheckBox *wavingChk_ = nullptr;
+	QCheckBox *gestureFovChk_ = nullptr;
+
+	/* Dropdowns. */
+	QComboBox *sceneCombo_ = nullptr;
+	QComboBox *startPosCombo_ = nullptr;
+	QComboBox *targetNumCombo_ = nullptr;
+	QComboBox *lostActionCombo_ = nullptr;
+
+	/* Numbers. */
+	QSpinBox *restartSpin_ = nullptr;
+	QSpinBox *lostTimeoutSpin_ = nullptr;
+	QSpinBox *waitTimeSpin_ = nullptr;
+	QSpinBox *sensitivitySpin_ = nullptr;
+	QSpinBox *accelerationSpin_ = nullptr;
+
+	QPushButton *restartNowBtn_ = nullptr;
+
+	/* Composition presets. */
+	QListWidget *presetList_ = nullptr;
+	QPushButton *presetAddBtn_ = nullptr;
+	QLabel *presetHint_ = nullptr;
+	/* index -> name, as the camera last reported them. */
+	QStringList presetNames_;
+	int presetCount_ = 0;
+	int presetMaxCount_ = 0;
+	int presetMaxNameBytes_ = 0;
+
+	QLabel *statusLabel_ = nullptr;
+
+	ZcCameraClient *client_ = nullptr;
 };
 
 /* PTZ slot list, covering both slot families the camera exposes: presets
@@ -365,9 +472,6 @@ public:
 	bool openCamera(const QString &host);
 	/* Same, with Digest credentials (bug 4). */
 	bool openCamera(const QString &host, const ZcCredentials &creds);
-	/* Ask the operator for the camera's login and retry; true when the camera
-	   then answered (bug 4). */
-	bool promptForCredentials(const QString &host);
 
 	/* Re-evaluate every rail row's "already added" badge and the Add button.
 	   Public because the libobs source create/destroy/rename signals reach it
@@ -377,6 +481,9 @@ public:
 private slots:
 	void onCameraClicked(const QString &host);
 	void refreshCameras();
+	/* The in-page login form was submitted: store the credentials for the host
+	   and reconnect (bug 4). */
+	void onLoginSubmitted(const QString &user, const QString &password);
 	/* A setting write that restarts the camera: show a notice and start polling
 	   for it to come back (bug 8). */
 	void onCameraRestarting();
@@ -394,7 +501,8 @@ private:
 	static QString sourceNameForHost(const QString &host);
 	/* Whether OBS currently holds a source for this camera (spec §1, L4). */
 	static bool isCameraAdded(const QString &host);
-	/* Show the PTZ tab only for a camera that reports PTZ support (spec §3). */
+	/* Show the PTZ and auto-framing tabs only for a camera that reports PTZ
+	   support (spec §3). */
 	void updatePtzTab();
 	/* libobs source create/destroy/rename handler; hops to the dock thread. */
 	static void onObsSourceSignal(void *data, calldata_t *params);
@@ -406,9 +514,12 @@ private:
 	ZcSettingsPanel *settings_ = nullptr;
 	ZcPtzPad *ptz_ = nullptr;
 	ZcPresetPanel *presets_ = nullptr;
+	ZcFramingPanel *framing_ = nullptr;
 	/* Container for the PTZ tab (joystick + preset list); only inserted into
 	   the tab bar when the camera supports PTZ. */
 	QWidget *ptzTab_ = nullptr;
+	/* Container for the auto-framing tab, shown alongside the PTZ tab. */
+	QWidget *framingTab_ = nullptr;
 	QTabWidget *tabs_ = nullptr;
 	ZcCameraClient *client_ = nullptr;
 	QLabel *statusBarLabel_ = nullptr;
@@ -421,6 +532,9 @@ private:
 	/* Whether the last openCamera() failure was a 401 rather than a timeout
 	   (bug 4). */
 	bool lastAuthRequired_ = false;
+	/* Whether it failed because the camera only answers over HTTPS and this Qt
+	   build cannot do TLS (the operator must switch the camera to HTTP). */
+	bool lastTlsUnavailable_ = false;
 	/* Hosts that answered a control connection although discovery does not
 	   advertise them. Keeps such a row usable instead of marking it offline on
 	   every refresh; a failed connect removes it again (spec §1, L11). */

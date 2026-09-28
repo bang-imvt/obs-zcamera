@@ -70,6 +70,9 @@ public:
 	/* Whether the camera has a pan/tilt head: /info feature.lens_ctrl_ptz, or
 	   a model name that says "ptz". The PTZ tab is gated on this. */
 	bool cameraSupportsPtz() const { return supportsPtz_; }
+	/* Whether the camera does auto framing: /info feature.autoFraming. The
+	   auto-framing tab is gated on this, independently of the PTZ tab. */
+	bool cameraSupportsAutoFraming() const { return supportsAutoFraming_; }
 
 	/* ---- Commands (each returns when the request completes) ---- */
 	void startRecording();
@@ -98,14 +101,50 @@ public:
 	/* Move to an absolute (relative=0) or relative (relative=1) position. */
 	void ptzGoto(float pan, float tilt, float speed, bool relative,
 		     bool speedWithZoom);
-	/* Set one range-limit edge (direct 0..3) to the given pan/tilt position. */
-	void ptzSetLimit(int direct, float pan, float tilt);
-	/* Enable/disable the pan/tilt range limit (/ctrl/set?ptz_limit=On|Off). */
-	void ptzSetLimitEnabled(bool enabled);
-	/* Auto-framing: enable/disable detection and restart with a delay (s). */
+	/* Auto-framing. One snapshot read — GET /ctrl/framing/all_status — carries the
+	   whole state (detect, trace, detect_restart, ...), which is also what the
+	   camera's own web UI falls back to. The switches are written one at a time,
+	   exactly as the web UI does. */
 	void setFramingEnabled(bool enabled);
+	void setFramingTrace(bool enabled);
 	void setFramingRestart(int seconds);
+	/* Restart detection right now (the web UI's Restart button). */
+	void setFramingRestartNow();
 	void framingQuery(std::function<void(const QJsonObject &)> cb);
+
+	/* The rest of the camera's framing page — the same calls its web UI makes.
+	   Every one of these is a GET on a /ctrl/framing/<sub> endpoint. */
+	void setFramingScene(int scene);          /* /scene?scene= */
+	void setFramingStartPos(int index);       /* /start_position?index= */
+	void setFramingTargetNum(int num);        /* /target_num?num= */
+	void setFramingAutoTarget(bool enabled);  /* /auto_target?enable= */
+	void setFramingAutoStart(bool enabled);   /* /auto_start?enable= */
+	void setFramingZoomLock(bool enabled);    /* /zoom_lock?enable= */
+	void setFramingTiltLock(bool enabled);    /* /tilt_lock?enable= */
+	void setFramingTrackActiveFace(bool enabled); /* /track_active_face?enable= */
+	void setFramingTrackingRecord(bool enabled);  /* /tracking_record?enable= */
+	void setFramingTally(bool enabled);       /* /tally?enable= */
+	void setFramingSensitivity(int value);    /* /speed?sensitivity= */
+	void setFramingAcceleration(int value);   /* /speed?acceleration= */
+	void setFramingLostAction(int action);    /* /target_lost?action= */
+	void setFramingLostTimeout(int seconds);  /* /target_lost?timeout_sec= */
+	void setFramingMaskEnable(bool enabled);  /* /mask_area?enable= */
+	void setFramingWaitTime(int seconds);     /* /manual_target?wait_time= */
+	void setFramingWaving(bool enabled);      /* /gesture?waving= */
+	/* The web UI's "View Angle Adjustment" writes all three gesture FOV
+	   switches (fullbody/waist/closeup) to the same value at once. */
+	void setFramingGestureFov(bool enabled);
+
+	/* Composition presets (/ctrl/framing/preset): the row of tiles the web UI
+	   draws under the framing controls. The reply carries `presets` (each with
+	   index/name/…), `default_count`, `max_count` and `max_name_len`. */
+	void framingPresetQuery(std::function<void(const QJsonObject &)> cb);
+	void framingPresetAdd();
+	void framingPresetRecall(int index);
+	void framingPresetUpdate(int index, const QString &name);
+	void framingPresetRename(int index, const QString &name);
+	void framingPresetReset(int index);
+	void framingPresetDelete(int index);
 	void ptzPresetSet(int index);
 	void ptzPresetRecall(int index);
 	void ptzPresetDelete(int index);
@@ -206,6 +245,13 @@ signals:
 	   support may have changed. */
 	void cameraInfoChanged();
 
+	/* Auto-framing notifications (ws_events::kFramingStatus / kFramingSetting).
+	   The status payload carries the live switches (detect/trace) so the panel
+	   repaints without another round-trip; the setting event only says the
+	   stored values changed, so the listener re-reads the snapshot. */
+	void framingStatusChanged(const QJsonObject &status);
+	void framingSettingsChanged();
+
 	void connectionStateChanged(bool connected);
 	void statusMessage(const QString &msg);
 
@@ -237,6 +283,7 @@ private:
 	double temperature_ = -1.0;
 	QString model_;
 	bool supportsPtz_ = false;
+	bool supportsAutoFraming_ = false;
 
 	/* Cached values for HUD display. */
 	QJsonObject hudValues_;

@@ -97,6 +97,10 @@ constexpr const char *kTemp = "TempUpdate";
 constexpr const char *kStreamChanged = "UpdateStreamSetting";
 constexpr const char *kConfigChanged = "ConfigChanged";
 constexpr const char *kAfArea = "UpdateAfArea";
+/* Auto framing. The status event carries the live switches (detect/trace, as
+   1/0); the setting event means the stored configuration changed. */
+constexpr const char *kFramingStatus = "FramingStatusChanged";
+constexpr const char *kFramingSetting = "FramingSettingChanged";
 constexpr const char *kBasicInfo = "basicInfo";
 constexpr const char *kShutdown = "Shutdown";
 constexpr const char *kHeartbeat = "hb";
@@ -111,6 +115,12 @@ constexpr const char *kHeartbeat = "hb";
    "ptz" is the fallback for firmware that omits the flag. The dock shows the
    PTZ tab only when this is true. */
 bool cameraSupportsPtz(const QJsonObject &info);
+
+/* Whether an /info reply describes a camera with auto framing. The
+   `feature.autoFraming` flag is authoritative. Framing is independent of the
+   pan/tilt head, so the dock gates the auto-framing tab on this flag rather
+   than on cameraSupportsPtz(). */
+bool cameraSupportsAutoFraming(const QJsonObject &info);
 
 /* Query for one /ctrl/preset action. Preset indexes are 0-based (the camera's
    own web UI uses the same indexing). */

@@ -177,6 +177,14 @@ void ZcCameraClient::handleWsEvent(const QString &what,
 				   obj.value("roi_y").toDouble(),
 				   obj.value("roi_w").toDouble(),
 				   obj.value("roi_h").toDouble());
+	} else if (what == ws_events::kFramingStatus) {
+		/* The live switches ride on this message (detect/trace as 1/0), so the
+		   panel repaints straight from it — no extra request to the camera's
+		   single-threaded HTTP server. */
+		emit framingStatusChanged(obj);
+	} else if (what == ws_events::kFramingSetting) {
+		/* Stored configuration changed elsewhere: let listeners re-read. */
+		emit framingSettingsChanged();
 	}
 }
 
@@ -328,32 +336,19 @@ void ZcCameraClient::ptzGoto(float pan, float tilt, float speed,
 	sendQuery(transport_, http::kPt, "", q);
 }
 
-/* Set one range-limit edge. `direct` maps to the camera's limit edges; the web
-   keys it off which field is being edited. */
-void ZcCameraClient::ptzSetLimit(int direct, float pan, float tilt)
-{
-	QUrlQuery q;
-	q.addQueryItem("action", "limit");
-	q.addQueryItem("direct", QString::number(direct));
-	q.addQueryItem("pan_pos", QString::number(pan, 'f', 2));
-	q.addQueryItem("tilt_pos", QString::number(tilt, 'f', 2));
-	sendQuery(transport_, http::kPt, "", q);
-}
-
-/* The pan/tilt range limit is a plain settings key (/ctrl/set?ptz_limit=On). */
-void ZcCameraClient::ptzSetLimitEnabled(bool enabled)
-{
-	QUrlQuery q;
-	q.addQueryItem("ptz_limit", enabled ? "On" : "Off");
-	sendQuery(transport_, http::kPt, "", q);
-}
-
 /* Auto-framing: the web's /ctrl/framing/detect?enable=<0|1> + a restart delay. */
 void ZcCameraClient::setFramingEnabled(bool enabled)
 {
 	QUrlQuery q;
 	q.addQueryItem("enable", enabled ? "1" : "0");
 	sendQuery(transport_, http::kFraming, "/detect", q);
+}
+
+void ZcCameraClient::setFramingTrace(bool enabled)
+{
+	QUrlQuery q;
+	q.addQueryItem("enable", enabled ? "1" : "0");
+	sendQuery(transport_, http::kFraming, "/trace", q);
 }
 
 void ZcCameraClient::setFramingRestart(int seconds)
@@ -363,9 +358,186 @@ void ZcCameraClient::setFramingRestart(int seconds)
 	sendQuery(transport_, http::kFraming, "/detect_restart", q);
 }
 
+void ZcCameraClient::setFramingRestartNow()
+{
+	sendQuery(transport_, http::kFraming, "/restart", QUrlQuery());
+}
+
+/* The framing page's switches/dropdowns. The web UI writes these one at a time
+   on change; each helper is the same `?<param>=<value>` shape. */
+static void framingFlag(ZcHttpTransport &tr, const char *sub, bool enabled)
+{
+	QUrlQuery q;
+	q.addQueryItem("enable", enabled ? "1" : "0");
+	sendQuery(tr, http::kFraming, sub, q);
+}
+
+static void framingIndex(ZcHttpTransport &tr, const char *sub, const char *param,
+			 int value)
+{
+	QUrlQuery q;
+	q.addQueryItem(param, QString::number(value));
+	sendQuery(tr, http::kFraming, sub, q);
+}
+
+void ZcCameraClient::setFramingScene(int scene)
+{
+	framingIndex(transport_, "/scene", "scene", scene);
+}
+
+void ZcCameraClient::setFramingStartPos(int index)
+{
+	framingIndex(transport_, "/start_position", "index", index);
+}
+
+void ZcCameraClient::setFramingTargetNum(int num)
+{
+	framingIndex(transport_, "/target_num", "num", num);
+}
+
+void ZcCameraClient::setFramingAutoTarget(bool enabled)
+{
+	framingFlag(transport_, "/auto_target", enabled);
+}
+
+void ZcCameraClient::setFramingAutoStart(bool enabled)
+{
+	framingFlag(transport_, "/auto_start", enabled);
+}
+
+void ZcCameraClient::setFramingZoomLock(bool enabled)
+{
+	framingFlag(transport_, "/zoom_lock", enabled);
+}
+
+void ZcCameraClient::setFramingTiltLock(bool enabled)
+{
+	framingFlag(transport_, "/tilt_lock", enabled);
+}
+
+void ZcCameraClient::setFramingTrackActiveFace(bool enabled)
+{
+	framingFlag(transport_, "/track_active_face", enabled);
+}
+
+void ZcCameraClient::setFramingTrackingRecord(bool enabled)
+{
+	framingFlag(transport_, "/tracking_record", enabled);
+}
+
+void ZcCameraClient::setFramingTally(bool enabled)
+{
+	framingFlag(transport_, "/tally", enabled);
+}
+
+void ZcCameraClient::setFramingSensitivity(int value)
+{
+	framingIndex(transport_, "/speed", "sensitivity", value);
+}
+
+void ZcCameraClient::setFramingAcceleration(int value)
+{
+	framingIndex(transport_, "/speed", "acceleration", value);
+}
+
+void ZcCameraClient::setFramingLostAction(int action)
+{
+	framingIndex(transport_, "/target_lost", "action", action);
+}
+
+void ZcCameraClient::setFramingLostTimeout(int seconds)
+{
+	framingIndex(transport_, "/target_lost", "timeout_sec", seconds);
+}
+
+void ZcCameraClient::setFramingMaskEnable(bool enabled)
+{
+	framingFlag(transport_, "/mask_area", enabled);
+}
+
+void ZcCameraClient::setFramingWaitTime(int seconds)
+{
+	framingIndex(transport_, "/manual_target", "wait_time", seconds);
+}
+
+void ZcCameraClient::setFramingWaving(bool enabled)
+{
+	QUrlQuery q;
+	q.addQueryItem("waving", enabled ? "1" : "0");
+	sendQuery(transport_, http::kFraming, "/gesture", q);
+}
+
+void ZcCameraClient::setFramingGestureFov(bool enabled)
+{
+	framingIndex(transport_, "/gesture", "fullbody", enabled ? 1 : 0);
+	framingIndex(transport_, "/gesture", "waist", enabled ? 1 : 0);
+	framingIndex(transport_, "/gesture", "closeup", enabled ? 1 : 0);
+}
+
+void ZcCameraClient::framingPresetQuery(
+    std::function<void(const QJsonObject &)> cb)
+{
+	transport_.getQuery(QString(http::kFraming) + "/preset", QUrlQuery(),
+			    jsonObjectCb(cb), 20000);
+}
+
+void ZcCameraClient::framingPresetAdd()
+{
+	QUrlQuery q;
+	q.addQueryItem("action", "add");
+	sendQuery(transport_, http::kFraming, "/preset", q);
+}
+
+void ZcCameraClient::framingPresetRecall(int index)
+{
+	QUrlQuery q;
+	q.addQueryItem("action", "recall");
+	q.addQueryItem("index", QString::number(index));
+	sendQuery(transport_, http::kFraming, "/preset", q);
+}
+
+void ZcCameraClient::framingPresetUpdate(int index, const QString &name)
+{
+	QUrlQuery q;
+	q.addQueryItem("action", "update");
+	q.addQueryItem("index", QString::number(index));
+	q.addQueryItem("name", name);
+	sendQuery(transport_, http::kFraming, "/preset", q);
+}
+
+void ZcCameraClient::framingPresetRename(int index, const QString &name)
+{
+	QUrlQuery q;
+	q.addQueryItem("action", "rename");
+	q.addQueryItem("index", QString::number(index));
+	q.addQueryItem("name", name);
+	sendQuery(transport_, http::kFraming, "/preset", q);
+}
+
+void ZcCameraClient::framingPresetReset(int index)
+{
+	QUrlQuery q;
+	q.addQueryItem("action", "reset");
+	q.addQueryItem("index", QString::number(index));
+	sendQuery(transport_, http::kFraming, "/preset", q);
+}
+
+void ZcCameraClient::framingPresetDelete(int index)
+{
+	QUrlQuery q;
+	q.addQueryItem("action", "del");
+	q.addQueryItem("index", QString::number(index));
+	sendQuery(transport_, http::kFraming, "/preset", q);
+}
+
+/* One snapshot call: /ctrl/framing/all_status returns every framing field
+   (detect, trace, detect_restart, ...) in a single object, and is what the
+   camera's web UI reads. There is no GET on /ctrl/framing itself — it answers
+   an empty body, which is why the panel could never paint before. */
 void ZcCameraClient::framingQuery(std::function<void(const QJsonObject &)> cb)
 {
-	transport_.getQuery(http::kFraming, QUrlQuery(), jsonObjectCb(cb), 20000);
+	transport_.getQuery(QString(http::kFraming) + "/all_status", QUrlQuery(),
+			    jsonObjectCb(cb), 20000);
 }
 
 void ZcCameraClient::ptzPresetSet(int index)
@@ -655,6 +827,7 @@ void ZcCameraClient::refreshCameraInfo()
 
 		/* Qualified: the class has a same-named accessor. */
 		supportsPtz_ = zc::cameraSupportsPtz(info);
+		supportsAutoFraming_ = zc::cameraSupportsAutoFraming(info);
 		emit cameraInfoChanged();
 	});
 }

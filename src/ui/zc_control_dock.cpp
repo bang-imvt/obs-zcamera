@@ -52,8 +52,8 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QPointer>
-#include <QMessageBox>
 #include <QInputDialog>
+#include <QMessageBox>
 #include <QApplication>
 #include <QStyledItemDelegate>
 #include <QStyle>
@@ -612,6 +612,46 @@ ZcSettingsPanel::ZcSettingsPanel(QWidget *parent) : QWidget(parent)
 	   most, so it must be there without navigating to a group (spec §2). */
 	buildStreamBar(layout);
 
+	/* In-page login / HTTPS fallback: shown when the camera answers 401 (need a
+	   login) or is HTTPS-only with no TLS backend; hidden once connected. */
+	loginPage_ = new QWidget(this);
+	{
+		auto *lp = new QVBoxLayout(loginPage_);
+		lp->setContentsMargins(8, 8, 8, 8);
+		promptHint_ = new QLabel(loginPage_);
+		promptHint_->setWordWrap(true);
+		promptHint_->setStyleSheet(
+		    "color:#eef2ed;background:#2b3a38;border-radius:4px;padding:8px;");
+		lp->addWidget(promptHint_);
+		/* The username/password rows (labels + inputs) + login button live in
+		   their own widget so the HTTPS notice can hide the entire form at once
+		   without leaving the column labels behind. */
+		loginFields_ = new QWidget(loginPage_);
+		auto *lf = new QVBoxLayout(loginFields_);
+		lf->setContentsMargins(0, 0, 0, 0);
+		auto *uRow = new QHBoxLayout;
+		uRow->addWidget(new QLabel(ztr("ZCameraPlugin.Dock.AuthUsername"),
+					  loginFields_));
+		loginUser_ = new QLineEdit(loginFields_);
+		uRow->addWidget(loginUser_, 1);
+		lf->addLayout(uRow);
+		auto *pRow = new QHBoxLayout;
+		pRow->addWidget(new QLabel(ztr("ZCameraPlugin.Dock.AuthPassword"),
+					  loginFields_));
+		loginPass_ = new QLineEdit(loginFields_);
+		loginPass_->setEchoMode(QLineEdit::Password);
+		pRow->addWidget(loginPass_, 1);
+		lf->addLayout(pRow);
+		loginBtn_ = new QPushButton(ztr("ZCameraPlugin.Dock.AuthLogin"), loginFields_);
+		lf->addWidget(loginBtn_, 0, Qt::AlignRight);
+		lp->addWidget(loginFields_);
+		connect(loginBtn_, &QPushButton::clicked, this, [this]() {
+			emit loginRequested(loginUser_->text(), loginPass_->text());
+		});
+	}
+	loginPage_->hide();
+	layout->addWidget(loginPage_);
+
 	subtabList_ = new QListWidget(this);
 	subtabList_->setMaximumWidth(150);
 	populateGroups();
@@ -640,6 +680,39 @@ ZcSettingsPanel::ZcSettingsPanel(QWidget *parent) : QWidget(parent)
 	   connection above must already exist or the group would never load. */
 	if (subtabList_->count() > 0)
 		subtabList_->setCurrentRow(0);
+}
+
+/* The camera answered 401: show the in-page login form and hide the settings
+   rows until a login is entered and accepted. */
+void ZcSettingsPanel::showLoginPrompt(const QString &host)
+{
+	loginHost_ = host;
+	promptHint_->setText(ztr("ZCameraPlugin.Dock.AuthNeeded").arg(host));
+	loginFields_->show();
+	loginPage_->show();
+	subtabList_->hide();
+	rowsContainer_->hide();
+	loginUser_->setFocus();
+}
+
+/* HTTPS-only camera with no TLS backend: tell the operator to switch to HTTP,
+   in the pane (no modal dialog). */
+void ZcSettingsPanel::showTlsPrompt(const QString &host)
+{
+	loginHost_ = host;
+	promptHint_->setText(ztr("ZCameraPlugin.Dock.TlsHttpHint").arg(host));
+	loginFields_->hide();
+	loginPage_->show();
+	subtabList_->hide();
+	rowsContainer_->hide();
+}
+
+void ZcSettingsPanel::hidePrompts()
+{
+	if (loginPage_)
+		loginPage_->hide();
+	subtabList_->show();
+	rowsContainer_->show();
 }
 
 void ZcSettingsPanel::setClient(ZcCameraClient *client)
@@ -1319,61 +1392,12 @@ ZcPtzPad::ZcPtzPad(QWidget *parent) : QWidget(parent)
 			});
 	}
 
-	/* Auto-framing (bugs 12/13): enable + restart delay, matching the web's
-	   /ctrl/framing; the trace/preset panel greys its actions while detect is
-	   on. */
-	{
-		auto *fRow = new QHBoxLayout;
-		auto *detectChk = new QCheckBox(ztr("ZCameraPlugin.Ptz.AutoFraming"), this);
-		auto *restartSpin = new QSpinBox(this);
-		restartSpin->setRange(1, 600);
-		restartSpin->setValue(30);
-		restartSpin->setSuffix(" s");
-		auto *frameOk = new QPushButton(ztr("ZCameraPlugin.Ptz.ApplyFraming"), this);
-		fRow->addWidget(detectChk);
-		fRow->addWidget(restartSpin);
-		fRow->addWidget(frameOk);
-		layout->addLayout(fRow);
-		connect(frameOk, &QPushButton::clicked, this,
-			[this, detectChk, restartSpin] {
-				if (!client_)
-					return;
-				client_->setFramingEnabled(detectChk->isChecked());
-				client_->setFramingRestart(restartSpin->value());
-			});
-	}
+	/* No auto-framing controls here: they moved to the dock's dedicated
+	   ZcFramingPanel tab, matching the camera's web UI layout. */
 
-	/* Range limit (bug 13): enable/disable, then store the current pan/tilt as
-	   one of the four edges. The edges are the camera's limit fields
-	   (Up/Down/Left/Right). */
-	{
-		auto *lRow = new QHBoxLayout;
-		auto *limitChk = new QCheckBox(ztr("ZCameraPlugin.Ptz.RangeLimit"), this);
-		lRow->addWidget(limitChk);
-		layout->addLayout(lRow);
-		connect(limitChk, &QCheckBox::toggled, this, [this](bool on) {
-			if (client_)
-				client_->ptzSetLimitEnabled(on);
-		});
-
-		auto *edgeRow = new QHBoxLayout;
-		const QStringList edgeNames = {"Up", "Down", "Left", "Right"};
-		for (int i = 0; i < 4; ++i) {
-			auto *b = new QPushButton(edgeNames[i], this);
-			edgeRow->addWidget(b);
-			connect(b, &QPushButton::clicked, this, [this, i]() {
-				if (!client_)
-					return;
-				/* Use the current position as the new edge. */
-				client_->ptzQuery(true, [this, i](const QJsonObject &o) {
-					const float pan = (float)o.value("pan_pos").toDouble();
-					const float tilt = (float)o.value("tilt_pos").toDouble();
-					client_->ptzSetLimit(i, pan, tilt);
-				});
-			});
-		}
-		layout->addLayout(edgeRow);
-	}
+	/* No range-limit controls here: the enable flag and the four edge buttons
+	   were never finished (bug 13 is deferred), and a lone checkbox that does
+	   nothing but flip a camera flag is worse than no control at all. */
 
 	layout->addStretch();
 }
@@ -1605,6 +1629,605 @@ void ZcPtzPad::mouseReleaseEvent(QMouseEvent *event)
 		update();
 	}
 	event->accept();
+}
+
+/* ---------------------------------------------------------------- */
+/* ZcFramingPanel                                                    */
+/* ---------------------------------------------------------------- */
+
+namespace {
+/* Re-read the framing state a moment after an apply, once the camera has
+   stored it. */
+constexpr int kFramingReloadMs = 400;
+
+/* The auto-framing panel below is finished on the wire side — it speaks the
+   whole /ctrl/framing API the camera's own web page uses — but its UI is still
+   far behind that page, which drives a framing-box canvas, a FOV composition
+   preview and EzFraming click-to-centre/zoom. Rather than ship a panel that
+   looks unrelated to the web UI, the tab is built, kept alive and kept wired
+   but left out of the tab bar. Flip this to true to show the "Auto framing" tab
+   again; nothing else needs to change. */
+constexpr bool kFramingPanelVisible = false;
+
+/* Option lists lifted from the camera's web UI (framing.js constants
+   AI_FRAMING_SCENE / AI_TARET_NUM / AI_TARGET_LOST_ACTION); /ctrl/framing/config
+   reports the same lists. */
+const char *const kFramingScenes[] = {"General", "Sports"};
+const char *const kFramingLostActions[] = {"Hold Position", "Wide",
+					   "Start Position"};
+constexpr int kFramingTargetNumMin = 1;
+constexpr int kFramingTargetNumMax = 8;
+/* The camera's speed sliders run the full signed range on this firmware. */
+constexpr int kFramingSpeedMin = -100;
+constexpr int kFramingSpeedMax = 100;
+/* Fallback start-position labels by index, used when all_status carries no
+   start_pos_opts (the camera's own list is zero-padded: "Preset 001"…). */
+const char *const kFramingStartPosFallback[] = {
+    "Home", "Preset 001", "Preset 002", "Preset 003", "Preset 004",
+    "Preset 005"};
+
+/* The camera limits preset names by UTF-8 byte count (max_name_len), so a
+   Chinese name has fewer characters than an English one. Clamp whole
+   characters until it fits, like the web UI does. */
+QString framingClampName(const QString &name, int maxBytes)
+{
+	if (maxBytes <= 0 || name.toUtf8().size() <= maxBytes)
+		return name;
+	QString out = name;
+	while (!out.isEmpty() && out.toUtf8().size() > maxBytes)
+		out.chop(1);
+	return out;
+}
+
+const QString kFramingPanelStyle =
+    "QWidget#FramingPanel { background:#1f2927; }"
+    "QLabel { color:#8a9bb2; font-size:11px; letter-spacing:1px; }"
+    "QLabel#FramingStatus { color:#d8b878; font-size:11px; letter-spacing:0px; }"
+    "QPushButton { color:#eef2ed; background:#2b3a38; border:1px solid "
+    "#3c514e; border-radius:4px; padding:6px 12px; font-size:11px; }"
+    "QPushButton:hover { background:#354845; }"
+    "QPushButton:pressed { background:#d8b878; color:#1f2927; }"
+    "QPushButton:disabled { color:#5d6b7d; background:#242f2d; }"
+    "QCheckBox { color:#eef2ed; font-size:11px; spacing:6px; }"
+    "QGroupBox { color:#d8b878; font-size:11px; border:1px solid #33413f; "
+    "border-radius:4px; margin-top:8px; padding:8px 6px 6px 6px; }"
+    "QGroupBox::title { subcontrol-origin: margin; left:8px; padding:0 4px; }"
+    "QComboBox, QSpinBox, QLineEdit { color:#eef2ed; background:#2b3a38; "
+    "border:1px solid #3c514e; border-radius:4px; padding:3px 6px; "
+    "font-size:11px; }"
+    "QListWidget { color:#eef2ed; background:#232e2c; "
+    "border:1px solid #3c514e; border-radius:4px; font-size:11px; }"
+    "QListWidget::item:selected { background:#3c514e; }";
+}
+
+/* Auto-framing controls in their own tab, split out of the PTZ joystick to match
+   the camera's web UI. Every control here is one of the non-canvas controls on
+   that page's "Auto Framing" panel; the writes are the same /ctrl/framing/<sub>
+   calls, and the reads come from a single /ctrl/framing/all_status snapshot.
+   The page's canvas-only parts (framing-box drag, FOV preview, EzFraming
+   click-to-centre) are deliberately absent. */
+ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
+{
+	setObjectName("FramingPanel");
+	setStyleSheet(kFramingPanelStyle);
+
+	auto *outer = new QVBoxLayout(this);
+	outer->setContentsMargins(0, 0, 0, 0);
+	outer->setSpacing(0);
+
+	/* The panel is taller than the dock, so it scrolls instead of clipping. */
+	auto *scroll = new QScrollArea(this);
+	scroll->setWidgetResizable(true);
+	scroll->setFrameShape(QFrame::NoFrame);
+	outer->addWidget(scroll);
+
+	auto *body = new QWidget;
+	scroll->setWidget(body);
+	auto *layout = new QVBoxLayout(body);
+	layout->setContentsMargins(10, 10, 10, 10);
+	layout->setSpacing(8);
+
+	auto *title = new QLabel(ztr("ZCameraPlugin.Framing.Title"), body);
+	layout->addWidget(title, 0, Qt::AlignHCenter);
+
+	/* What the camera reports right now, kept in sync on refresh and after an
+	   apply. */
+	statusLabel_ = new QLabel(ztr("ZCameraPlugin.Framing.Reading"), body);
+	statusLabel_->setObjectName("FramingStatus");
+	statusLabel_->setWordWrap(true);
+	layout->addWidget(statusLabel_);
+
+	/* ---- Tracking: the two live switches and the restart button. ---- */
+	auto *trackBox = new QGroupBox(ztr("ZCameraPlugin.Framing.GroupTrack"), body);
+	auto *trackLay = new QVBoxLayout(trackBox);
+	trackLay->setSpacing(6);
+	detectChk_ = new QCheckBox(ztr("ZCameraPlugin.Framing.Detect"), trackBox);
+	traceChk_ = new QCheckBox(ztr("ZCameraPlugin.Framing.Trace"), trackBox);
+	trackLay->addWidget(detectChk_);
+	trackLay->addWidget(traceChk_);
+	restartNowBtn_ =
+	    new QPushButton(ztr("ZCameraPlugin.Framing.RestartNow"), trackBox);
+	restartNowBtn_->setToolTip(ztr("ZCameraPlugin.Framing.RestartNowTip"));
+	{
+		auto *row = new QHBoxLayout;
+		row->addWidget(restartNowBtn_);
+		row->addStretch(1);
+		trackLay->addLayout(row);
+	}
+	layout->addWidget(trackBox);
+
+	/* ---- Framing: which subject to keep, and how fast to move. ---- */
+	auto *framingBox = new QGroupBox(ztr("ZCameraPlugin.Framing.GroupFraming"), body);
+	auto *framingLay = new QGridLayout(framingBox);
+	framingLay->setHorizontalSpacing(8);
+	framingLay->setVerticalSpacing(6);
+	framingLay->setColumnStretch(1, 1);
+
+	autoTargetChk_ = new QCheckBox(ztr("ZCameraPlugin.Framing.AutoTarget"), framingBox);
+	zoomLockChk_ = new QCheckBox(ztr("ZCameraPlugin.Framing.ZoomLock"), framingBox);
+	tiltLockChk_ = new QCheckBox(ztr("ZCameraPlugin.Framing.TiltLock"), framingBox);
+	framingLay->addWidget(autoTargetChk_, 0, 0, 1, 2);
+	framingLay->addWidget(zoomLockChk_, 1, 0);
+	framingLay->addWidget(tiltLockChk_, 1, 1);
+
+	framingLay->addWidget(new QLabel(ztr("ZCameraPlugin.Framing.Sensitivity"), framingBox), 2, 0);
+	sensitivitySpin_ = new QSpinBox(framingBox);
+	sensitivitySpin_->setRange(kFramingSpeedMin, kFramingSpeedMax);
+	framingLay->addWidget(sensitivitySpin_, 2, 1);
+
+	framingLay->addWidget(new QLabel(ztr("ZCameraPlugin.Framing.Acceleration"), framingBox), 3, 0);
+	accelerationSpin_ = new QSpinBox(framingBox);
+	accelerationSpin_->setRange(kFramingSpeedMin, kFramingSpeedMax);
+	framingLay->addWidget(accelerationSpin_, 3, 1);
+	layout->addWidget(framingBox);
+
+	/* ---- Composition: where the subject sits in the frame. ---- */
+	auto *sceneBox = new QGroupBox(ztr("ZCameraPlugin.Framing.GroupScene"), body);
+	auto *sceneLay = new QGridLayout(sceneBox);
+	sceneLay->setHorizontalSpacing(8);
+	sceneLay->setVerticalSpacing(6);
+	sceneLay->setColumnStretch(1, 1);
+	int row = 0;
+
+	sceneLay->addWidget(new QLabel(ztr("ZCameraPlugin.Framing.Scene"), sceneBox), row, 0);
+	sceneCombo_ = new QComboBox(sceneBox);
+	for (const char *s : kFramingScenes)
+		sceneCombo_->addItem(QString::fromUtf8(s));
+	sceneLay->addWidget(sceneCombo_, row++, 1);
+
+	sceneLay->addWidget(new QLabel(ztr("ZCameraPlugin.Framing.StartPos"), sceneBox), row, 0);
+	startPosCombo_ = new QComboBox(sceneBox);
+	for (int i = 0;
+	     i < int(sizeof(kFramingStartPosFallback) / sizeof(kFramingStartPosFallback[0]));
+	     i++)
+		startPosCombo_->addItem(QString::fromUtf8(kFramingStartPosFallback[i]), i);
+	sceneLay->addWidget(startPosCombo_, row++, 1);
+
+	sceneLay->addWidget(new QLabel(ztr("ZCameraPlugin.Framing.TargetNum"), sceneBox), row, 0);
+	targetNumCombo_ = new QComboBox(sceneBox);
+	for (int i = kFramingTargetNumMin; i <= kFramingTargetNumMax; i++)
+		targetNumCombo_->addItem(QString::number(i), i);
+	sceneLay->addWidget(targetNumCombo_, row++, 1);
+
+	sceneLay->addWidget(new QLabel(ztr("ZCameraPlugin.Framing.LostAction"), sceneBox), row, 0);
+	lostActionCombo_ = new QComboBox(sceneBox);
+	for (const char *s : kFramingLostActions)
+		lostActionCombo_->addItem(QString::fromUtf8(s));
+	sceneLay->addWidget(lostActionCombo_, row++, 1);
+
+	sceneLay->addWidget(new QLabel(ztr("ZCameraPlugin.Framing.LostTimeout"), sceneBox), row, 0);
+	lostTimeoutSpin_ = new QSpinBox(sceneBox);
+	lostTimeoutSpin_->setRange(0, 60);
+	lostTimeoutSpin_->setSuffix(ztr("ZCameraPlugin.Framing.SecondsSuffix"));
+	sceneLay->addWidget(lostTimeoutSpin_, row++, 1);
+
+	sceneLay->addWidget(new QLabel(ztr("ZCameraPlugin.Framing.WaitTime"), sceneBox), row, 0);
+	waitTimeSpin_ = new QSpinBox(sceneBox);
+	waitTimeSpin_->setRange(0, 60);
+	waitTimeSpin_->setSuffix(ztr("ZCameraPlugin.Framing.SecondsSuffix"));
+	sceneLay->addWidget(waitTimeSpin_, row++, 1);
+
+	sceneLay->addWidget(new QLabel(ztr("ZCameraPlugin.Framing.Restart"), sceneBox), row, 0);
+	restartSpin_ = new QSpinBox(sceneBox);
+	restartSpin_->setRange(0, 600);
+	restartSpin_->setValue(30);
+	restartSpin_->setSuffix(ztr("ZCameraPlugin.Framing.SecondsSuffix"));
+	sceneLay->addWidget(restartSpin_, row++, 1);
+
+	maskChk_ = new QCheckBox(ztr("ZCameraPlugin.Framing.MaskArea"), sceneBox);
+	faceTrackChk_ = new QCheckBox(ztr("ZCameraPlugin.Framing.FaceTrack"), sceneBox);
+	sceneLay->addWidget(maskChk_, row++, 0, 1, 2);
+	sceneLay->addWidget(faceTrackChk_, row++, 0, 1, 2);
+	layout->addWidget(sceneBox);
+
+	/* ---- Power-on behaviour, tally and gesture triggers. ---- */
+	auto *powerBox = new QGroupBox(ztr("ZCameraPlugin.Framing.GroupPower"), body);
+	auto *powerLay = new QVBoxLayout(powerBox);
+	powerLay->setSpacing(6);
+	autoStartChk_ = new QCheckBox(ztr("ZCameraPlugin.Framing.AutoStart"), powerBox);
+	tallyChk_ = new QCheckBox(ztr("ZCameraPlugin.Framing.Tally"), powerBox);
+	trackingRecordChk_ = new QCheckBox(ztr("ZCameraPlugin.Framing.TrackingRecord"), powerBox);
+	wavingChk_ = new QCheckBox(ztr("ZCameraPlugin.Framing.Waving"), powerBox);
+	gestureFovChk_ = new QCheckBox(ztr("ZCameraPlugin.Framing.GestureFov"), powerBox);
+	powerLay->addWidget(autoStartChk_);
+	powerLay->addWidget(tallyChk_);
+	powerLay->addWidget(trackingRecordChk_);
+	powerLay->addWidget(wavingChk_);
+	powerLay->addWidget(gestureFovChk_);
+	layout->addWidget(powerBox);
+
+	/* ---- Apply / refresh. ---- */
+	auto *actionRow = new QHBoxLayout;
+	actionRow->setSpacing(6);
+	auto *applyBtn = new QPushButton(ztr("ZCameraPlugin.Framing.Apply"), body);
+	auto *refreshBtn = new QPushButton(ztr("ZCameraPlugin.Framing.Refresh"), body);
+	actionRow->addWidget(applyBtn);
+	actionRow->addWidget(refreshBtn);
+	actionRow->addStretch(1);
+	layout->addLayout(actionRow);
+
+	/* ---- Composition presets. ---- */
+	auto *presetBox = new QGroupBox(ztr("ZCameraPlugin.Framing.GroupPreset"), body);
+	auto *presetLay = new QVBoxLayout(presetBox);
+	presetLay->setSpacing(6);
+
+	presetList_ = new QListWidget(presetBox);
+	presetList_->setFixedHeight(110);
+	presetLay->addWidget(presetList_);
+
+	presetHint_ = new QLabel(presetBox);
+	presetHint_->setWordWrap(true);
+	presetLay->addWidget(presetHint_);
+
+	{
+		auto *row1 = new QHBoxLayout;
+		row1->setSpacing(6);
+		auto *recallBtn = new QPushButton(ztr("ZCameraPlugin.Dock.Recall"), presetBox);
+		auto *replaceBtn = new QPushButton(ztr("ZCameraPlugin.Dock.Replace"), presetBox);
+		auto *renameBtn = new QPushButton(ztr("ZCameraPlugin.Dock.Rename"), presetBox);
+		row1->addWidget(recallBtn);
+		row1->addWidget(replaceBtn);
+		row1->addWidget(renameBtn);
+		presetLay->addLayout(row1);
+
+		auto *row2 = new QHBoxLayout;
+		row2->setSpacing(6);
+		auto *resetBtn = new QPushButton(ztr("ZCameraPlugin.Framing.PresetReset"), presetBox);
+		auto *deleteBtn = new QPushButton(ztr("ZCameraPlugin.Dock.Delete"), presetBox);
+		presetAddBtn_ = new QPushButton(ztr("ZCameraPlugin.Framing.PresetAdd"), presetBox);
+		row2->addWidget(resetBtn);
+		row2->addWidget(deleteBtn);
+		row2->addStretch(1);
+		row2->addWidget(presetAddBtn_);
+		presetLay->addLayout(row2);
+
+		/* The camera re-reads and rewrites its preset table asynchronously, so
+		   every mutation is followed by a fresh read. */
+		const auto reloadPresetsSoon = [this]() {
+			QTimer::singleShot(kFramingReloadMs, this,
+					   [this]() { refreshPresets(); });
+		};
+		const auto selectedRow = [this]() { return presetList_->currentRow(); };
+		const auto askConfirm = [this](const QString &text) {
+			return QMessageBox::question(
+				   this, ztr("ZCameraPlugin.Framing.GroupPreset"), text,
+				   QMessageBox::Yes | QMessageBox::No, QMessageBox::No) ==
+			       QMessageBox::Yes;
+		};
+
+		connect(presetList_, &QListWidget::itemDoubleClicked, this,
+			[this, selectedRow](QListWidgetItem *) {
+				const int i = selectedRow();
+				if (client_ && i >= 0)
+					client_->framingPresetRecall(i);
+			});
+		connect(recallBtn, &QPushButton::clicked, this, [this, selectedRow]() {
+			const int i = selectedRow();
+			if (client_ && i >= 0)
+				client_->framingPresetRecall(i);
+		});
+		connect(replaceBtn, &QPushButton::clicked, this,
+			[this, selectedRow, reloadPresetsSoon]() {
+				const int i = selectedRow();
+				if (!client_ || i < 0 || i >= presetNames_.size())
+					return;
+				client_->framingPresetUpdate(i, presetNames_.at(i));
+				reloadPresetsSoon();
+			});
+		connect(renameBtn, &QPushButton::clicked, this,
+			[this, selectedRow, reloadPresetsSoon]() {
+				const int i = selectedRow();
+				if (!client_ || i < 0 || i >= presetNames_.size())
+					return;
+				bool ok = false;
+				const QString name = QInputDialog::getText(
+				    this, ztr("ZCameraPlugin.Framing.PresetRenameTitle"),
+				    ztr("ZCameraPlugin.Framing.PresetName"), QLineEdit::Normal,
+				    presetNames_.at(i), &ok);
+				if (!ok)
+					return;
+				const QString trimmed = name.trimmed();
+				if (trimmed.isEmpty())
+					return;
+				client_->framingPresetRename(
+				    i, framingClampName(trimmed, presetMaxNameBytes_));
+				reloadPresetsSoon();
+			});
+		connect(resetBtn, &QPushButton::clicked, this,
+			[this, selectedRow, askConfirm, reloadPresetsSoon]() {
+				const int i = selectedRow();
+				if (!client_ || i < 0)
+					return;
+				if (!askConfirm(ztr("ZCameraPlugin.Framing.PresetResetConfirm")
+						    .arg(presetNames_.value(i))))
+					return;
+				client_->framingPresetReset(i);
+				reloadPresetsSoon();
+			});
+		connect(deleteBtn, &QPushButton::clicked, this,
+			[this, selectedRow, askConfirm, reloadPresetsSoon]() {
+				const int i = selectedRow();
+				if (!client_ || i < 0)
+					return;
+				if (!askConfirm(ztr("ZCameraPlugin.Framing.PresetDeleteConfirm")
+						    .arg(presetNames_.value(i))))
+					return;
+				client_->framingPresetDelete(i);
+				reloadPresetsSoon();
+			});
+		connect(presetAddBtn_, &QPushButton::clicked, this,
+			[this, reloadPresetsSoon]() {
+				if (!client_)
+					return;
+				client_->framingPresetAdd();
+				reloadPresetsSoon();
+			});
+	}
+	layout->addWidget(presetBox);
+
+	connect(restartNowBtn_, &QPushButton::clicked, this, [this]() {
+		if (!client_)
+			return;
+		client_->setFramingRestartNow();
+		QTimer::singleShot(kFramingReloadMs, this, [this]() { refresh(); });
+	});
+
+	connect(applyBtn, &QPushButton::clicked, this, &ZcFramingPanel::apply);
+	connect(refreshBtn, &QPushButton::clicked, this, &ZcFramingPanel::refresh);
+
+	layout->addStretch(1);
+}
+
+/* Write every control in one go: the camera stores each one as its own
+   /ctrl/framing/<sub> call, exactly like the web UI changing a control. */
+void ZcFramingPanel::apply()
+{
+	if (!client_)
+		return;
+	client_->setFramingEnabled(detectChk_->isChecked());
+	client_->setFramingTrace(traceChk_->isChecked());
+	client_->setFramingRestart(restartSpin_->value());
+	client_->setFramingAutoTarget(autoTargetChk_->isChecked());
+	client_->setFramingZoomLock(zoomLockChk_->isChecked());
+	client_->setFramingTiltLock(tiltLockChk_->isChecked());
+	client_->setFramingSensitivity(sensitivitySpin_->value());
+	client_->setFramingAcceleration(accelerationSpin_->value());
+	client_->setFramingScene(sceneCombo_->currentIndex());
+	client_->setFramingStartPos(startPosCombo_->currentData().toInt());
+	client_->setFramingTargetNum(targetNumCombo_->currentData().toInt());
+	client_->setFramingLostAction(lostActionCombo_->currentIndex());
+	client_->setFramingLostTimeout(lostTimeoutSpin_->value());
+	client_->setFramingWaitTime(waitTimeSpin_->value());
+	client_->setFramingMaskEnable(maskChk_->isChecked());
+	client_->setFramingTrackActiveFace(faceTrackChk_->isChecked());
+	client_->setFramingAutoStart(autoStartChk_->isChecked());
+	client_->setFramingTally(tallyChk_->isChecked());
+	client_->setFramingTrackingRecord(trackingRecordChk_->isChecked());
+	client_->setFramingWaving(wavingChk_->isChecked());
+	client_->setFramingGestureFov(gestureFovChk_->isChecked());
+	/* The camera may take a moment; re-read to confirm what it stored. */
+	QTimer::singleShot(kFramingReloadMs, this, [this]() { refresh(); });
+}
+
+void ZcFramingPanel::setClient(ZcCameraClient *client)
+{
+	client_ = client;
+	/* A different camera: reset to the defaults and let the first refresh paint
+	   what this camera actually has. */
+	if (!client_) {
+		for (QCheckBox *chk : findChildren<QCheckBox *>()) {
+			QSignalBlocker block(chk);
+			chk->setChecked(false);
+		}
+		for (QSpinBox *spin : findChildren<QSpinBox *>()) {
+			QSignalBlocker block(spin);
+			spin->setValue(spin->minimum());
+		}
+		for (QComboBox *combo : findChildren<QComboBox *>()) {
+			QSignalBlocker block(combo);
+			combo->setCurrentIndex(0);
+		}
+		presetList_->clear();
+		presetNames_.clear();
+		presetCount_ = 0;
+		presetHint_->clear();
+		presetAddBtn_->setEnabled(false);
+		statusLabel_->setText(ztr("ZCameraPlugin.Framing.Reading"));
+		return;
+	}
+	refresh();
+}
+
+void ZcFramingPanel::refresh()
+{
+	if (!client_ || !client_->isConnected())
+		return;
+	statusLabel_->setText(ztr("ZCameraPlugin.Framing.Reading"));
+	/* One snapshot read carries every framing field. */
+	client_->framingQuery(
+	    [this](const QJsonObject &doc) { applyStatus(doc); });
+	refreshPresets();
+}
+
+void ZcFramingPanel::refreshPresets()
+{
+	if (!client_ || !client_->isConnected())
+		return;
+	client_->framingPresetQuery(
+	    [this](const QJsonObject &doc) { rebuildPresets(doc); });
+}
+
+void ZcFramingPanel::rebuildPresets(const QJsonObject &doc)
+{
+	const QJsonArray presets = doc.value("presets").toArray();
+	presetMaxCount_ = doc.value("max_count").toInt();
+	presetMaxNameBytes_ = doc.value("max_name_len").toInt();
+
+	const int selected = presetList_->currentRow();
+	presetNames_.clear();
+	presetList_->clear();
+	for (const QJsonValue &v : presets) {
+		const QString name = v.toObject().value("name").toString();
+		presetNames_ << name;
+		presetList_->addItem(name);
+	}
+	presetCount_ = presetNames_.size();
+	if (selected >= 0 && selected < presetCount_)
+		presetList_->setCurrentRow(selected);
+
+	/* The camera refuses an add once the table is full. */
+	presetAddBtn_->setEnabled(presetMaxCount_ <= 0 ||
+				  presetCount_ < presetMaxCount_);
+	presetHint_->setText(ztr("ZCameraPlugin.Framing.PresetHint")
+				 .arg(presetCount_)
+				 .arg(presetMaxCount_));
+}
+
+/* Paint the panel from a framing snapshot (/ctrl/framing/all_status) or from a
+   live FramingStatusChanged payload. Only the fields actually present are
+   touched, so the same method serves both: the live payload carries the two
+   switches but not the stored settings. A flag can arrive as a bool or as 1/0
+   depending on the endpoint, so both are accepted. Never stored — the panel
+   only ever shows what the camera has. */
+void ZcFramingPanel::applyStatus(const QJsonObject &doc)
+{
+	const auto asBool = [&doc](const char *key, bool fallback) {
+		const QJsonValue v = doc.value(QLatin1String(key));
+		if (v.isBool())
+			return v.toBool();
+		if (v.isDouble())
+			return v.toInt() != 0;
+		return fallback;
+	};
+	const auto asInt = [&doc](const char *key, int fallback) {
+		const QJsonValue v = doc.value(QLatin1String(key));
+		if (v.isDouble())
+			return v.toInt();
+		if (v.isBool())
+			return v.toBool() ? 1 : 0;
+		return fallback;
+	};
+	const auto bindBool = [&doc, &asBool](const char *key, QCheckBox *chk) {
+		if (chk && doc.contains(QLatin1String(key))) {
+			QSignalBlocker block(chk);
+			chk->setChecked(asBool(key, false));
+		}
+	};
+	const auto bindInt = [&doc, &asInt](const char *key, QSpinBox *spin,
+					    int min, int max) {
+		if (spin && doc.contains(QLatin1String(key))) {
+			QSignalBlocker block(spin);
+			spin->setValue(qBound(min, asInt(key, min), max));
+		}
+	};
+
+	bindBool("detect", detectChk_);
+	bindBool("trace", traceChk_);
+	bindBool("auto_target", autoTargetChk_);
+	bindBool("zoom_lock", zoomLockChk_);
+	bindBool("tilt_lock", tiltLockChk_);
+	bindBool("track_active_face", faceTrackChk_);
+	bindBool("auto_start", autoStartChk_);
+	bindBool("tally", tallyChk_);
+	bindBool("tracking_record", trackingRecordChk_);
+	bindBool("maskarea", maskChk_);
+	bindBool("waving", wavingChk_);
+	if (doc.contains("fullbody") || doc.contains("waist") ||
+	    doc.contains("closeup")) {
+		/* The web UI shows the three FOV switches as one segment, so the
+		   checkbox is on when any of them is. */
+		QSignalBlocker block(gestureFovChk_);
+		gestureFovChk_->setChecked(asBool("fullbody", false) ||
+					   asBool("waist", false) ||
+					   asBool("closeup", false));
+	}
+
+	bindInt("detect_restart", restartSpin_, 0, 600);
+	bindInt("lost_timeout", lostTimeoutSpin_, 0, 60);
+	bindInt("wait_time", waitTimeSpin_, 0, 60);
+	bindInt("sensitivity", sensitivitySpin_, kFramingSpeedMin,
+		kFramingSpeedMax);
+	bindInt("acceleration", accelerationSpin_, kFramingSpeedMin,
+		kFramingSpeedMax);
+
+	if (doc.contains("scene")) {
+		QSignalBlocker block(sceneCombo_);
+		sceneCombo_->setCurrentIndex(
+		    qBound(0, asInt("scene", 0),
+			   int(sizeof(kFramingScenes) / sizeof(kFramingScenes[0])) - 1));
+	}
+	if (doc.contains("lost_action")) {
+		QSignalBlocker block(lostActionCombo_);
+		lostActionCombo_->setCurrentIndex(
+		    qBound(0, asInt("lost_action", 0),
+			   int(sizeof(kFramingLostActions) /
+			       sizeof(kFramingLostActions[0])) -
+			       1));
+	}
+	if (doc.contains("target_num")) {
+		QSignalBlocker block(targetNumCombo_);
+		const int idx =
+		    targetNumCombo_->findData(asInt("target_num", kFramingTargetNumMin));
+		if (idx >= 0)
+			targetNumCombo_->setCurrentIndex(idx);
+	}
+	if (doc.contains("start_pos") || doc.contains("start_pos_opts")) {
+		/* The camera names the slots itself (start_pos_opts) and pads the list
+		   with empty strings, so fall back to the built-in labels. */
+		const QJsonArray opts = doc.value("start_pos_opts").toArray();
+		const int fallbackCount =
+		    int(sizeof(kFramingStartPosFallback) /
+			sizeof(kFramingStartPosFallback[0]));
+		const int count = opts.isEmpty() ? fallbackCount : int(opts.size());
+		QSignalBlocker block(startPosCombo_);
+		startPosCombo_->clear();
+		for (int i = 0; i < count; i++) {
+			QString label =
+			    i < opts.size() ? opts.at(i).toString().trimmed() : QString();
+			if (label.isEmpty() && i < fallbackCount)
+				label = QString::fromUtf8(kFramingStartPosFallback[i]);
+			if (label.isEmpty())
+				label = QString::number(i);
+			startPosCombo_->addItem(label, i);
+		}
+		const int idx = startPosCombo_->findData(asInt("start_pos", 0));
+		if (idx >= 0)
+			startPosCombo_->setCurrentIndex(idx);
+	}
+
+	updateStatusLabel();
+}
+
+void ZcFramingPanel::updateStatusLabel()
+{
+	const auto onOff = [this](bool on) {
+		return on ? ztr("ZCameraPlugin.Framing.On")
+			  : ztr("ZCameraPlugin.Framing.Off");
+	};
+	statusLabel_->setText(ztr("ZCameraPlugin.Framing.Status")
+				      .arg(onOff(detectChk_->isChecked()))
+				      .arg(onOff(traceChk_->isChecked()))
+				      .arg(restartSpin_->value()));
 }
 
 /* ---------------------------------------------------------------- */
@@ -2333,11 +2956,23 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 	auto *ptzLayout = new QHBoxLayout(ptzTab_);
 	ptzLayout->setContentsMargins(0, 0, 0, 0);
 	ptzLayout->setSpacing(0);
-	ptz_ = new ZcPtzPad(ptzTab_);
+		ptz_ = new ZcPtzPad(ptzTab_);
 	presets_ = new ZcPresetPanel(ptzTab_);
 	ptzLayout->addWidget(ptz_, 0);
 	ptzLayout->addWidget(presets_, 1);
 	rightLayout->addWidget(tabs_, 1);
+
+	/* The auto-framing tab is built up front and hidden like the PTZ tab, but —
+	   unlike it — deliberately never inserted into the tab bar for now: the
+	   panel works, yet it does not look like the camera's own framing page (see
+	   kFramingPanelVisible). Building it anyway keeps the widget, its client
+	   calls and its WebSocket handlers alive and ready to re-enable. */
+	framingTab_ = new QWidget(tabs_);
+	framingTab_->hide();
+	auto *framingLayout = new QVBoxLayout(framingTab_);
+	framingLayout->setContentsMargins(0, 0, 0, 0);
+	framing_ = new ZcFramingPanel(framingTab_);
+	framingLayout->addWidget(framing_, 1);
 
 	splitter_->addWidget(rail_);
 	splitter_->addWidget(right);
@@ -2420,6 +3055,8 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 	   control connection until it comes back (bug 8). */
 	connect(settings_, &ZcSettingsPanel::cameraRestarting, this,
 		&ZcControlDock::onCameraRestarting);
+	connect(settings_, &ZcSettingsPanel::loginRequested, this,
+		&ZcControlDock::onLoginSubmitted);
 	restartTimer_ = new QTimer(this);
 	restartTimer_->setInterval(4000);
 	connect(restartTimer_, &QTimer::timeout, this, &ZcControlDock::tryReconnect);
@@ -2699,21 +3336,43 @@ ZcControlDock::~ZcControlDock()
 	delete client_;
 }
 
-/* Spec §3: the PTZ tab exists only for a camera that reports PTZ support. */
+/* Spec §3: the PTZ tab exists only for a camera that reports PTZ support, and
+   the auto-framing tab only for one that reports auto framing
+   (feature.autoFraming). The two capabilities are independent, so each tab is
+   added/removed on its own gate and only when the camera changed. */
 void ZcControlDock::updatePtzTab()
 {
 	if (!tabs_ || !ptzTab_)
 		return;
-	const bool want = client_ && client_->cameraSupportsPtz();
-	const int index = tabs_->indexOf(ptzTab_);
-	if (want && index < 0) {
+
+	/* Remember what was on screen: removing a tab does not fall back cleanly,
+	   so switch to Settings if the visible pane just went away. */
+	QWidget *shown = tabs_->currentWidget();
+
+	const bool wantPtz = client_ && client_->cameraSupportsPtz();
+	const int ptzIndex = tabs_->indexOf(ptzTab_);
+	if (wantPtz && ptzIndex < 0)
 		tabs_->addTab(ptzTab_, ztr("ZCameraPlugin.Dock.Ptz"));
-	} else if (!want && index >= 0) {
-		/* removeTab keeps the widget alive; it is re-inserted on the next
-		   PTZ-capable camera. */
-		tabs_->removeTab(index);
-		tabs_->setCurrentWidget(settings_);
+	else if (!wantPtz && ptzIndex >= 0)
+		tabs_->removeTab(ptzIndex);
+
+	/* The auto-framing pane stays out of the tab bar until its layout matches the
+	   camera's web page (see kFramingPanelVisible). The gate lives here, not at
+	   construction, so re-enabling it is a one-line change. */
+	if (framingTab_ && kFramingPanelVisible) {
+		const bool wantFraming =
+		    client_ && client_->cameraSupportsAutoFraming();
+		const int framingIndex = tabs_->indexOf(framingTab_);
+		if (wantFraming && framingIndex < 0)
+			tabs_->addTab(framingTab_,
+				      ztr("ZCameraPlugin.Dock.Framing"));
+		else if (!wantFraming && framingIndex >= 0)
+			tabs_->removeTab(framingIndex);
 	}
+
+	/* Never leave the pane on a tab that just went away. */
+	if (shown && tabs_->indexOf(shown) < 0)
+		tabs_->setCurrentWidget(settings_);
 }
 
 /* Connect the control client to `host`. Returns false when the camera does not
@@ -2732,6 +3391,7 @@ bool ZcControlDock::openCamera(const QString &host, const ZcCredentials &creds)
 		settings_->setClient(nullptr);
 		ptz_->setClient(nullptr);
 		presets_->setClient(nullptr);
+		framing_->setClient(nullptr);
 		delete client_;
 		client_ = nullptr;
 	}
@@ -2739,6 +3399,7 @@ bool ZcControlDock::openCamera(const QString &host, const ZcCredentials &creds)
 	settings_->setClient(client_);
 	ptz_->setClient(client_);
 	presets_->setClient(client_);
+	framing_->setClient(client_);
 
 	bool ok = client_->connect(host, 80, creds);
 	if (!ok) {
@@ -2746,9 +3407,11 @@ bool ZcControlDock::openCamera(const QString &host, const ZcCredentials &creds)
 		   camera is not there", so the caller can ask for credentials
 		   (bug 4) instead of reporting it offline. */
 		lastAuthRequired_ = client_->authRequired();
+		lastTlsUnavailable_ = client_->tlsUnavailable();
 		settings_->setClient(nullptr);
 		ptz_->setClient(nullptr);
 		presets_->setClient(nullptr);
+		framing_->setClient(nullptr);
 		delete client_;
 		client_ = nullptr;
 		/* No client: the PTZ tab must go, and every control is inert. */
@@ -2758,8 +3421,10 @@ bool ZcControlDock::openCamera(const QString &host, const ZcCredentials &creds)
 		return false;
 	}
 	lastAuthRequired_ = false;
+	lastTlsUnavailable_ = false;
 
 	statusBarLabel_->setText(ztr("ZCameraPlugin.Dock.Connected").arg(host));
+	settings_->hidePrompts();
 	client_->refreshStatus();
 	settings_->refreshGroup();
 
@@ -2774,7 +3439,21 @@ bool ZcControlDock::openCamera(const QString &host, const ZcCredentials &creds)
 		updatePtzTab();
 		if (client_ && client_->cameraSupportsPtz())
 			presets_->refresh();
+		if (client_ && client_->cameraSupportsAutoFraming())
+			framing_->refresh();
 	});
+	/* Live framing notifications: the status event carries the switches, so the
+	   panel repaints straight from it; a settings change just means re-read. */
+	connect(client_, &ZcCameraClient::framingStatusChanged, this,
+		[this](const QJsonObject &status) {
+			if (framing_)
+				framing_->applyStatus(status);
+		});
+	connect(client_, &ZcCameraClient::framingSettingsChanged, this,
+		[this]() {
+			if (framing_)
+				framing_->refresh();
+		});
 	/* A camera change must not leave the previous camera's PTZ tab behind. */
 	updatePtzTab();
 	return true;
@@ -2820,11 +3499,14 @@ void ZcControlDock::tryReconnect()
 	   than polling for a camera that will keep answering 401 (bug 4). */
 	if (lastAuthRequired_) {
 		restartTimer_->stop();
-		if (promptForCredentials(host)) {
-			reachableHosts_.insert(host);
-			unreachableHosts_.remove(host);
-			refreshRailPresence();
-		}
+		settings_->showLoginPrompt(host);
+		return;
+	}
+	/* HTTPS-only camera with no TLS backend: point the operator to http, in the
+	   pane. */
+	if (lastTlsUnavailable_) {
+		restartTimer_->stop();
+		settings_->showTlsPrompt(host);
 		return;
 	}
 	/* openCamera() reported the failed attempt; keep the restarting notice up
@@ -2833,33 +3515,24 @@ void ZcControlDock::tryReconnect()
 	    ztr("ZCameraPlugin.Dock.CameraRestarting").arg(host));
 }
 
-/* Bug 4: the camera's control API is behind a login (identity authentication
-   was switched on, or HTTPS with auth). Ask for the login the operator set on
-   the camera and retry, so the pane is usable again instead of showing empty
-   settings. The credentials are kept for this session only. */
-bool ZcControlDock::promptForCredentials(const QString &host)
+/* The in-page login form was submitted: keep the credentials for this session
+   and reconnect so the settings pane appears (bug 4). */
+void ZcControlDock::onLoginSubmitted(const QString &user, const QString &password)
 {
-	bool accepted = false;
-	const QString user = QInputDialog::getText(
-	    this, ztr("ZCameraPlugin.Dock.AuthTitle"),
-	    ztr("ZCameraPlugin.Dock.AuthUser").arg(host), QLineEdit::Normal,
-	    QString(), &accepted);
-	if (!accepted || user.isEmpty())
-		return false;
-	const QString pass = QInputDialog::getText(
-	    this, ztr("ZCameraPlugin.Dock.AuthTitle"),
-	    ztr("ZCameraPlugin.Dock.AuthPassword"), QLineEdit::Password,
-	    QString(), &accepted);
-	if (!accepted)
-		return false;
-
+	if (currentHost_.isEmpty())
+		return;
 	ZcCredentials creds;
 	creds.username = user;
-	creds.password = pass;
-	if (!openCamera(host, creds))
-		return false;
-	creds_.insert(host, creds);
-	return true;
+	creds.password = password;
+	creds_[currentHost_] = creds;
+	if (openCamera(currentHost_, creds)) {
+		reachableHosts_.insert(currentHost_);
+		unreachableHosts_.remove(currentHost_);
+	} else {
+		/* Still no login: keep the form up so the operator can correct it. */
+		settings_->showLoginPrompt(currentHost_);
+	}
+	refreshRailPresence();
 }
 
 /* Spec §1, L2: selecting a camera connects the control client only. Adding it
@@ -2873,9 +3546,17 @@ void ZcControlDock::onCameraClicked(const QString &host)
 		restartTimer_->stop();
 	currentHost_ = host;
 	bool ok = openCamera(host);
-	/* The camera answered 401: it wants a login we do not have yet (bug 4). */
+	qWarning().noquote() << "[obs-zcamera] click" << host << "ok" << ok
+			     << "authReq" << lastAuthRequired_
+			     << "tlsUnavail" << lastTlsUnavailable_;
+	/* The camera answered 401: it wants a login we do not have. Show the in-page
+	   login form instead of a modal dialog. */
 	if (!ok && lastAuthRequired_)
-		ok = promptForCredentials(host);
+		settings_->showLoginPrompt(host);
+	/* HTTPS-only camera with no TLS backend: show the switch-to-http notice in
+	   the pane. */
+	else if (!ok && lastTlsUnavailable_)
+		settings_->showTlsPrompt(host);
 	if (ok) {
 		reachableHosts_.insert(host);
 		unreachableHosts_.remove(host);

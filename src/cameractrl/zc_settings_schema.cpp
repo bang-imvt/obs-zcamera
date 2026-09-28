@@ -121,6 +121,16 @@ bool cameraSupportsPtz(const QJsonObject &info)
 	return model.contains("ptz", Qt::CaseInsensitive);
 }
 
+/* Auto framing rides on the /info `feature.autoFraming` flag: it is a product
+   capability of the tracking firmware, not of the pan/tilt head, so it has no
+   model-name fallback (a fixed PTZ box may lack it, and a box without PTZ may
+   have it). Absent flag reads false. */
+bool cameraSupportsAutoFraming(const QJsonObject &info)
+{
+	const QJsonObject feature = info.value("feature").toObject();
+	return feature.value("autoFraming").toBool(false);
+}
+
 QUrlQuery presetQuery(const QString &action, int index,
 		      const QList<QPair<QString, QString>> &extra)
 {
