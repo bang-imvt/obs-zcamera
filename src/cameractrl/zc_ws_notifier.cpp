@@ -75,9 +75,11 @@ void ZcWsNotifier::doConnect()
 	url.setPath("/");
 
 	/* One line per reconnect cycle: the OBS log then shows that the plugin did
-	   try the notification socket, without listing every backoff attempt. */
+	   try the notification socket, without listing every backoff attempt.
+	   qWarning, not qInfo: OBS's message handler drops a plugin's qInfo
+	   output, so a qInfo line here would never reach the log. */
 	if (retry_ == 0)
-		qInfo().noquote()
+		qWarning().noquote()
 			<< "[obs-zcamera] notifications connecting:" << url.toString();
 
 	/* The upgrade carries Digest Authorization, x-auth-token and the
@@ -90,8 +92,8 @@ void ZcWsNotifier::onConnected()
 	live_ = true;
 	retry_ = 0;
 	failureLogged_ = false;
-	qInfo().noquote() << "[obs-zcamera] notifications connected:"
-			  << (secure_ ? "wss" : "ws") << host_ << "port 81";
+	qWarning().noquote() << "[obs-zcamera] notifications connected:"
+			     << (secure_ ? "wss" : "ws") << host_ << "port 81";
 	emit socketStateChanged(true);
 }
 
@@ -99,8 +101,8 @@ void ZcWsNotifier::onDisconnected()
 {
 	if (live_) {
 		live_ = false;
-		qInfo().noquote() << "[obs-zcamera] notifications disconnected:"
-				  << host_;
+		qWarning().noquote() << "[obs-zcamera] notifications disconnected:"
+				     << host_;
 		emit socketStateChanged(false);
 	}
 	scheduleReconnect();

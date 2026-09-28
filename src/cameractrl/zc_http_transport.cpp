@@ -191,8 +191,8 @@ public:
 				       false);
 			else if (closeDelimited_)
 				/* Connection: close — EOF delimits the body. */
-				finish(status_, headers_, bodyRaw_, QString(),
-				       false);
+				finish(status_, headers_, raw_.mid(bodyStart_),
+				       QString(), false);
 		});
 		connect(sock_, &ZcTlsSocket::errorOccurred, this,
 			[this](const QString &e) {
@@ -230,7 +230,7 @@ private:
 				return;
 			}
 			headers_ = raw_.left(idx);
-			bodyRaw_ = raw_.mid(idx + 4);
+			bodyStart_ = idx + 4;
 			headersDone_ = true;
 			status_ = statusOf(headers_);
 
@@ -253,6 +253,14 @@ private:
 				}
 			}
 		}
+
+		/* The body arrives across as many TCP reads as the network decides, and
+		   raw_ keeps growing while it does. Re-slice on every call: slicing only
+		   once, when the header block was seen, freezes bodyRaw_ at whatever
+		   share of the body happened to be bundled with the headers, so a body
+		   that spans more than one read can never reach contentLength_ and the
+		   request dies in its timeout. */
+		bodyRaw_ = raw_.mid(bodyStart_);
 
 		if (chunked_) {
 			QByteArray in = bodyRaw_;
@@ -298,6 +306,7 @@ private:
 	QByteArray raw_;
 	QByteArray headers_;
 	QByteArray bodyRaw_;
+	int bodyStart_ = -1; /* offset of the body inside raw_ (-1 until parsed) */
 	Done done_;
 	int status_ = 0;
 	int contentLength_ = 0;
