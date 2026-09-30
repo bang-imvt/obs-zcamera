@@ -33,6 +33,11 @@ ZcCameraClient::ZcCameraClient(QObject *parent) : QObject(parent)
 {
 	QObject::connect(&notifier_, &ZcWsNotifier::eventReceived, this,
 			 &ZcCameraClient::handleWsEvent);
+	/* The notification socket dropping is the camera going away on the wire
+	   (power loss / network drop), independent of any click; re-emit it so the
+	   rail can mark the row offline (bug 49). */
+	QObject::connect(&notifier_, &ZcWsNotifier::socketStateChanged, this,
+			 &ZcCameraClient::notifierStateChanged);
 	settings_.setTransport(&transport_);
 	QObject::connect(&settings_, &ZcSettingsEngine::groupRefreshed, this,
 			 &ZcCameraClient::groupRefreshed);
@@ -65,7 +70,7 @@ bool ZcCameraClient::connect(const QString &host, int port,
 	}
 
 	/* Credentials were supplied for a camera that needs a login: perform the
-	   web-UI session login now (POST /login/ + captured cookie). Firmware that
+	   web-UI session login now (GET /login/ + captured cookie). Firmware that
 	   accepts per-request Digest instead is a no-op here. A 401 here means the
 	   password was wrong — fail connect so the dock keeps the form up rather
 	   than showing empty settings behind an open 401 loop. */

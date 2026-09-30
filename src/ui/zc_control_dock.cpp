@@ -959,6 +959,14 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 	}
 
 	for (const QString &key : keys) {
+		/* The WDR setting is not offered by the camera's web UI (it is reported
+		   under the raw id `compose_mode`); showing it here only confuses, so it
+		   is hidden (bug list "remove WDR setting"). Likewise the raw `ev` row
+		   duplicates `ev_choice` (both set EV, and editing one does not update the
+		   other); only `ev_choice` is shown (bug list "keep EV Choice"). */
+		if (key == QLatin1String("compose_mode") ||
+		    key == QLatin1String("ev"))
+			continue;
 		ZcSettingValue def;
 		if (!client_->settingDefinition(key, &def))
 			continue;
@@ -967,7 +975,14 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		   able to change it. */
 		if (!def.supported)
 			continue;
-		const bool readOnly = def.readOnly;
+		const bool readOnly = def.readOnly ||
+				      /* A time-lapse interval only matters when the camera
+					 is actually time-lapsing; in the normal record mode the
+					 field is meaningless and must be greyed (bug list
+					 "Video_tl_interval grey when record_mode = Normal"). */
+				      (key == QLatin1String("video_tl_interval") &&
+				       client_->settingValue(QLatin1String("record_mode")) ==
+					       QLatin1String("Normal"));
 
 		auto *row = new QHBoxLayout;
 		auto *label = new QLabel(settingLabel(key), rowsContainer_);
@@ -1237,8 +1252,20 @@ void ZcSettingsPanel::updateStreamBar()
 	fillChoice(streamFps_, jsonStringList(streamDoc_.value("fpsList")),
 		   QString::number(streamDoc_.value("fps").toInt()),
 		   streamDoc_.value("fpsRo").toBool());
-	fillChoice(streamCodec_,
-		   jsonStringList(streamDoc_.value("videoEncoderList")),
+	/* The H.265 10-bit encoder is offered by newer firmware but selecting it
+	   does not take effect on the camera side (bug list "H265_10bit cannot be
+	   selected"); it is blocked here until the camera accepts it. The camera's
+	   own label for it is not fixed, so match on the 10-bit marker. */
+	QStringList encoders = jsonStringList(streamDoc_.value("videoEncoderList"));
+	encoders.erase(std::remove_if(encoders.begin(), encoders.end(),
+				      [](const QString &e) {
+					      const QString low = e.toLower();
+					      return low.contains(QStringLiteral("10bit")) ||
+						     low.contains(QStringLiteral("10-bit")) ||
+						     low.contains(QStringLiteral("10_bit"));
+				      }),
+		       encoders.end());
+	fillChoice(streamCodec_, encoders,
 		   streamDoc_.value("encoderType").toString(),
 		   streamDoc_.value("encoderRo").toBool());
 
@@ -2233,6 +2260,13 @@ ZcPresetPanel::ZcPresetPanel(QWidget *parent) : QWidget(parent)
 	setObjectName("PresetPanel");
 	setStyleSheet(kPresetPanelStyle);
 	buildUi();
+	/* The camera's trace transport advances on its own (a playback ends without
+	   the operator clicking Stop). Poll its state while it is busy so the buttons
+	   follow the camera (bug 24). Started/stopped in onTraceState(). */
+	tracePollTimer_ = new QTimer(this);
+	tracePollTimer_->setInterval(800);
+	connect(tracePollTimer_, &QTimer::timeout, this,
+		&ZcPresetPanel::refreshTraceState);
 }
 
 void ZcPresetPanel::buildUi()
@@ -2498,6 +2532,8 @@ void ZcPresetPanel::refresh()
 	maxSpeed_ = 0;
 	maxTime_ = 0;
 	traceState_ = 0;
+	if (tracePollTimer_)
+		tracePollTimer_->stop();
 	showPage(page_);
 
 	if (!client_)
@@ -2525,6 +2561,8 @@ void ZcPresetPanel::setTraceMode(bool trace)
 	info_.clear();
 	thumbs_.clear();
 	traceState_ = 0;
+	if (tracePollTimer_)
+		tracePollTimer_->stop();
 	presetModeBtn_->setChecked(!trace);
 	traceModeBtn_->setChecked(trace);
 	modeLabel_->setText(trace ? ztr("ZCameraPlugin.Dock.Traces") : ztr("ZCameraPlugin.Dock.Presets"));
@@ -2552,6 +2590,20 @@ void ZcPresetPanel::onTraceState(int stCode)
 		return;
 	traceState_ = stCode;
 	updateActions();
+
+	/* The trace transport runs on the camera and advances on its own: while it
+	   is busy (recording / preparing / playing / deleting) keep polling so the
+	   buttons follow it — e.g. a playback that ends returns to "Prepare" without
+	   the operator clicking Stop (bug 24). Once it is idle the poll is dropped. */
+	const TraceState state = traceStateFromInt(stCode);
+	const bool busy = (state == TraceState::Recording ||
+			   state == TraceState::Preparing ||
+			   state == TraceState::Playing ||
+			   state == TraceState::Deleting);
+	if (tracePollTimer_ && busy && !tracePollTimer_->isActive())
+		tracePollTimer_->start();
+	else if (tracePollTimer_ && !busy)
+		tracePollTimer_->stop();
 }
 
 QString ZcPresetPanel::defaultName(int index) const
@@ -2709,15 +2761,18 @@ void ZcPresetPanel::updateActions()
 
 	if (!traceMode_) {
 		primaryBtn_->setText(ztr("ZCameraPlugin.Dock.Recall"));
-		primaryBtn_->setEnabled(has);
+		/* Recall / Delete / Rename act on a preset that already exists, so a
+		   selected-but-empty slot must grey them; "Add" writes a new preset and
+		   stays available (the camera's web UI toggles Add/Replace similarly). */
+		primaryBtn_->setEnabled(named);
 		/* "Add" writes a new preset, "Replace" overwrites a named one — the
 		   same label toggle the camera's web UI uses. */
 		secondaryBtn_->setText(named ? ztr("ZCameraPlugin.Dock.Replace") : ztr("ZCameraPlugin.Dock.Add"));
 		secondaryBtn_->setEnabled(has);
-		deleteBtn_->setEnabled(has);
-		renameBtn_->setEnabled(has);
-		unitCombo_->setEnabled(has);
-		speedCombo_->setEnabled(has && speedCombo_->count() > 0);
+		deleteBtn_->setEnabled(named);
+		renameBtn_->setEnabled(named);
+		unitCombo_->setEnabled(named);
+		speedCombo_->setEnabled(named && speedCombo_->count() > 0);
 		for (QPushButton *btn : pageButtons_)
 			btn->setEnabled(true);
 		return;
@@ -3385,6 +3440,25 @@ bool ZcControlDock::openCamera(const QString &host, const ZcCredentials &creds)
 			if (client_)
 				statusBarLabel_->setText(ztr("ZCameraPlugin.Dock.ConnectedMode").arg(currentHost_).arg(client_->mode()));
 		});
+	/* The camera's notification socket is a live heartbeat: when it drops (power
+	   loss / network drop) the row must show offline without the operator
+	   clicking or refreshing (bug 49), and when it comes back the row clears. The
+	   WS layer auto-reconnects, so a blip marks offline briefly then online
+	   again — which is what actually happened. */
+	connect(client_, &ZcCameraClient::notifierStateChanged, this,
+		[this](bool live) {
+			if (!client_ || currentHost_.isEmpty())
+				return;
+			if (live) {
+				reachableHosts_.insert(currentHost_);
+				unreachableHosts_.remove(currentHost_);
+			} else {
+				reachableHosts_.remove(currentHost_);
+				unreachableHosts_.insert(currentHost_);
+			}
+			if (rail_)
+				rail_->setHostOffline(currentHost_, !live);
+		});
 	/* /info arrives asynchronously: the tab appears (or disappears) and the
 	   preset list loads once the model is known. */
 	connect(client_, &ZcCameraClient::cameraInfoChanged, this, [this]() {
@@ -3485,6 +3559,20 @@ void ZcControlDock::onLoginSubmitted(const QString &user, const QString &passwor
 		settings_->showLoginPrompt(currentHost_);
 	}
 	refreshRailPresence();
+}
+
+/* Select the camera an OBS source represents. The source's Properties dialog
+   opens the dock for that camera, so it must follow the source the operator
+   clicked rather than leave the last one selected (bug 27). Selecting the same
+   host again is a no-op: re-opening Properties must not reset the page or drop a
+   half-entered login. */
+void ZcControlDock::selectCamera(const QString &host)
+{
+	if (host.isEmpty())
+		return;
+	if (host == currentHost_ && client_)
+		return;
+	onCameraClicked(host);
 }
 
 /* Spec §1, L2: selecting a camera connects the control client only. Adding it

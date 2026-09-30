@@ -72,7 +72,7 @@ static std::vector<DependencyRule> makeDeps()
 	    {{"caf", "caf_sens", "live_caf", "af_mode", "af_area", "af_speed",
 	      "af_adjust_with_ptz", "mf_mag", "mf_recording"}, {"lens"}},
 	    {{"iso", "iso_ctrl", "min_iso", "max_iso", "sht_operation",
-	      "shutter_angle_ctrl", "shutter", "max_shutter", "ev", "ev_choice"},
+	      "shutter_angle_ctrl", "shutter", "max_shutter", "ev_choice"},
 	     {"exposure"}},
 	    {{"lut"}, {"exposure"}},
 	    {{"movvfr", "video_encoder", "record_mode"}, {"record", "video"}},

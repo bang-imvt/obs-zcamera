@@ -20,6 +20,7 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #define OBSSSP_H
 
 #include <string>
+#include <QString>
 #include "imf/ISspClient.h"
 #include <stdint.h>
 #include "plugin-support.h"
@@ -51,7 +52,9 @@ extern create_loop_class_ptr create_loop_class;
 /* Show/raise the ZCamera control dock. Safe to call from any thread; the dock
    is Qt and this marshals the show onto the Qt (OBS frontend) thread. Used by
    the source's properties dialog so "Properties" lands on the control dock, the
-   real surface for a ZCamera source. */
-void zc_show_control_dock();
+   real surface for a ZCamera source. `host` (may be empty) is the camera that
+   source represents: the dock selects it so "Properties" shows that camera, not
+   the last one opened (bug 27). */
+void zc_show_control_dock(const QString &host = QString());
 
 #endif // OBSSSP_H

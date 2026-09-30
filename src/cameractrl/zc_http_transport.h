@@ -86,11 +86,16 @@ public:
 
 	/* Some firmware (the P2/R1 family) does not accept Digest on each /ctrl/*
 	   request: it answers 401 with no WWW-Authenticate at all until a session
-	   has been opened. login() performs the web-UI login — GET /login/me for
-	   the Digest challenge, then POST /login/ with the computed Authorization —
+	   has been opened. login() performs the web-UI login — GET /login/ for the
+	   Digest challenge, then GET /login/ with the computed Authorization (the
+	   camera's own login.min.js uses method:'GET'; older edgem4 sw 1.0.16
+	   firmware rejects a POST here, so GET is the safe common denominator) —
 	   and captures the session cookie / x-auth-token so subsequent requests are
-	   authenticated. Returns true when a session is established. A camera that
-	   does not require a login (no /login challenge) is a no-op success. */
+	   authenticated. Both legs run on ONE connection, because some firmware
+	   binds the nonce to the connection that issued the challenge, so a retry on
+	   a fresh connection is answered 401 no matter how correct the digest is.
+	   Returns true when a session is established. A camera that does not require
+	   a login (no /login challenge) is a no-op success. */
 	bool login(int timeoutMs = 8000);
 
 	/* Probe one control endpoint to find out whether the camera demands a login.
@@ -165,6 +170,16 @@ private:
 	QByteArray buildRequest(const char *method,
 				const QString &pathWithQuery,
 				const QByteArray &body) const;
+	/* One leg of the login handshake: GET /login/, optionally with the cached
+	   Digest Authorization, over a keep-alive connection. */
+	QByteArray buildLoginRequest(bool withAuth) const;
+	/* Run the two-step Digest login on a SINGLE connection (the nonce of some
+	   firmware is bound to the connection that issued the challenge). Sets
+	   `challenged` when leg 1 offered a Digest challenge and `continued` when the
+	   authenticated leg 2 was actually sent on that same socket; `out` is the
+	   final response (leg 2 when continued, otherwise leg 1). */
+	void loginSync(RawHttp &out, bool &challenged, bool &continued,
+		       int timeoutMs);
 	QString hostHeader() const;
 	/* Parse a Digest challenge (WWW-Authenticate-X preferred) out of a raw
 	   response header block and cache the request-independent parts. False when

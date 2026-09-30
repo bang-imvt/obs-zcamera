@@ -453,6 +453,13 @@ private:
 	/* Last /ctrl/ptrace st_code; only meaningful in trace mode. */
 	int traceState_ = 0;
 
+	/* While the camera's trace transport is busy (recording, preparing or
+	   playing), the UI polls its state so it self-transitions when the camera
+	   finishes on its own — a finished playback must return the button to
+	   "Prepare" without the operator clicking anything (bug 24). Owned here so
+	   the panel can start/stop it as the transport state changes. */
+	QTimer *tracePollTimer_ = nullptr;
+
 	int page_ = 0;
 	int selected_ = -1;
 	int maxSpeed_ = 0;
@@ -477,6 +484,13 @@ public:
 	   Public because the libobs source create/destroy/rename signals reach it
 	   through a file-scope callback. Runs on the Qt main thread. */
 	void refreshRailPresence();
+
+	/* Select the camera behind an OBS source (spec §1, L2): the source's
+	   Properties dialog opens the dock for the camera that source represents, so
+	   the selected host must follow the source the operator clicked, not stay on
+	   the last one they opened (bug 27). A no-op when the host is empty or is
+	   already current. Runs on the Qt main thread. */
+	void selectCamera(const QString &host);
 
 private slots:
 	void onCameraClicked(const QString &host);

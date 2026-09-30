@@ -71,9 +71,10 @@ void ZcSettingsEngine::readGroup(const QString &catalog,
 				      qInfo().noquote() << "[obs-zcamera] getbatch" << catalog
 							 << "cfgs"
 							 << doc.object().value("cfgs").toArray().size();
-			      /* Old firmware has no /ctrl/getbatch at all: it answers
-				 404 (or any non-JSON body). Fall back to per-key reads so
-				 such a camera still shows its settings. */
+			      /* Old firmware without /ctrl/getbatch support (e.g. edgem4
+				 sw 1.0.16) answers 404 or a non-JSON body here. Fall
+				 back to per-key reads so such a camera still shows its
+				 settings. */
 			      if (err.error != QJsonParseError::NoError ||
 				  !doc.isObject()) {
 				      readGroupByKeys(catalog, cb);

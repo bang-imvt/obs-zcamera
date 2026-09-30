@@ -29,14 +29,14 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 
 #include <QAction>
 #include <QMainWindow>
-#include <QMessageBox>
 #include <QPointer>
 
 #include "obs-ssp.h"
 #include "ssp-mdns.h"
 #include "ui/zc_control_dock.h"
 
-// Minimum OBS version required for this plugin (from buildspec.json)
+/* Minimum OBS version this plugin is built and tested against (mirrors
+   buildspec.json). Advisory only — see check_obs_version_compatibility(). */
 #define MIN_OBS_VERSION_MAJOR 31
 #define MIN_OBS_VERSION_MINOR 0
 #define MIN_OBS_VERSION_PATCH 0
@@ -71,16 +71,27 @@ static void show_zcamera_control_dock(void *, obs_data_t *)
 	zc_control_dock->activateWindow();
 }
 
+static void show_zcamera_control_dock_for(const QString &host)
+{
+	show_zcamera_control_dock(nullptr, nullptr);
+	/* Selecting the camera an OBS source represents keeps "Properties" on that
+	   camera instead of leaving the last one open (bug 27). */
+	if (zc_control_dock && !host.isEmpty())
+		zc_control_dock->selectCamera(host);
+}
+
 /* Called by the source's properties dialog (get_properties), which can run off
-   the Qt thread; marshal the show onto the OBS frontend (Qt) thread. */
-void zc_show_control_dock()
+   the Qt thread; marshal the show onto the OBS frontend (Qt) thread. `host` is
+   the camera that source represents (may be empty). */
+void zc_show_control_dock(const QString &host)
 {
 	QMainWindow *main_window =
 		(QMainWindow *)obs_frontend_get_main_window();
 	if (!main_window)
 		return;
 	QMetaObject::invokeMethod(
-		main_window, []() { show_zcamera_control_dock(nullptr, nullptr); },
+		main_window,
+		[host]() { show_zcamera_control_dock_for(host); },
 		Qt::QueuedConnection);
 }
 
@@ -117,7 +128,7 @@ static void on_source_created(void *, calldata_t *params)
 		Qt::QueuedConnection);
 }
 
-static bool check_obs_version_compatibility()
+static void check_obs_version_compatibility()
 {
 	uint32_t obs_version = obs_get_version();
 	uint8_t obs_major = (obs_version >> 24) & 0xFF;
@@ -126,30 +137,25 @@ static bool check_obs_version_compatibility()
 	ssp_blog(LOG_INFO, "OBS Studio version: %d.%d",
 		 obs_major, obs_minor);
 
-	if (obs_major < MIN_OBS_VERSION_MAJOR)
-		return false;
-	if (obs_major == MIN_OBS_VERSION_MAJOR &&
-	    obs_minor < MIN_OBS_VERSION_MINOR)
-		return false;
-	return true;
+	/* Advisory only: libobs itself refuses to load a plugin built against a
+	   newer OBS (obs_module_ver() / LIBOBS_API_VER, OBS 32 and later), so an
+	   untested older host must not block loading — it is only reported. */
+	if (obs_major < MIN_OBS_VERSION_MAJOR ||
+	    (obs_major == MIN_OBS_VERSION_MAJOR &&
+	     obs_minor < MIN_OBS_VERSION_MINOR))
+		ssp_blog(LOG_WARNING,
+			 "obs-zcamera is built for OBS %d.%d or newer but is "
+			 "running on OBS %d.%d; continuing, but some features "
+			 "may be unavailable.",
+			 MIN_OBS_VERSION_MAJOR, MIN_OBS_VERSION_MINOR, obs_major,
+			 obs_minor);
 }
 
 bool obs_module_load(void)
 {
 	ssp_blog(LOG_INFO, "obs-zcamera %s loading", PLUGIN_VERSION);
 
-	if (!check_obs_version_compatibility()) {
-		QMainWindow *main_window =
-			(QMainWindow *)obs_frontend_get_main_window();
-		QMetaObject::invokeMethod(main_window, [main_window]() {
-			QMessageBox::critical(
-				main_window,
-				obs_module_text("SSPPlugin.VersionCheck.Title"),
-				obs_module_text("SSPPlugin.VersionCheck.Error"),
-				QMessageBox::Ok);
-		}, Qt::QueuedConnection);
-		return false;
-	}
+	check_obs_version_compatibility();
 
 	/* mDNS camera discovery. */
 	create_mdns_loop();

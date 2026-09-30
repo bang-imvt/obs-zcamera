@@ -164,11 +164,17 @@ class HttpExchange : public QObject {
 public:
 	using Done = std::function<void(int, const QByteArray &,
 					const QByteArray &, const QString &, bool)>;
+	/* Called with the first response; return a follow-up request to send on the
+	   SAME socket (empty to finish). This is what lets the Digest login keep its
+	   challenge and its authenticated retry on one connection. */
+	using Continue = std::function<QByteArray(int, const QByteArray &,
+						  const QByteArray &)>;
 
 	HttpExchange(const QString &host, quint16 port, bool tls,
 		     const QByteArray &request, int timeoutMs, Done done,
-		     QObject *parent)
-		: QObject(parent), request_(request), done_(std::move(done))
+		     QObject *parent, Continue cont = nullptr)
+		: QObject(parent), request_(request), done_(std::move(done)),
+		  cont_(std::move(cont)), timeoutMs_(timeoutMs)
 	{
 		sock_ = new ZcTlsSocket(this);
 		connect(sock_, &ZcTlsSocket::connected, this,
@@ -271,15 +277,47 @@ private:
 				       QStringLiteral("malformed chunked body"),
 				       false);
 			} else if (complete) {
-				finish(status_, headers_, out, QString(), false);
+				complete_(status_, headers_, out);
 			}
 			return;
 		}
 		if (closeDelimited_)
 			return; /* completed on EOF */
 		if (bodyRaw_.size() >= contentLength_)
-			finish(status_, headers_, bodyRaw_.left(contentLength_),
-			       QString(), false);
+			complete_(status_, headers_,
+				  bodyRaw_.left(contentLength_));
+	}
+
+	/* A full response is in. Hand it to the continuation (if any) and let it
+	   produce a second request on THIS socket: the firmware on some models binds
+	   the Digest nonce to the connection that issued the challenge, so an
+	   authenticated retry on a fresh connection is answered 401. Finish normally
+	   when there is no continuation or the socket is already gone. */
+	void complete_(int status, const QByteArray &headers,
+		       const QByteArray &body)
+	{
+		if (finished_)
+			return;
+		if (cont_ && sock_ && sock_->isConnected()) {
+			QByteArray next = cont_(status, headers, body);
+			if (!next.isEmpty()) {
+				cont_ = nullptr; /* at most one continuation */
+				raw_.clear();
+				headers_.clear();
+				bodyRaw_.clear();
+				bodyStart_ = -1;
+				status_ = 0;
+				contentLength_ = 0;
+				headersDone_ = chunked_ = closeDelimited_ = false;
+				if (tt_) {
+					tt_->stop();
+					tt_->start(timeoutMs_);
+				}
+				sock_->write(next);
+				return;
+			}
+		}
+		finish(status, headers, body, QString(), false);
 	}
 
 	void finish(int status, const QByteArray &headers, const QByteArray &body,
@@ -308,6 +346,8 @@ private:
 	QByteArray bodyRaw_;
 	int bodyStart_ = -1; /* offset of the body inside raw_ (-1 until parsed) */
 	Done done_;
+	Continue cont_;
+	int timeoutMs_ = 0;
 	int status_ = 0;
 	int contentLength_ = 0;
 	bool headersDone_ = false;
@@ -449,49 +489,97 @@ bool ZcHttpTransport::login(int timeoutMs)
 	    creds_.password.isEmpty())
 		return false;
 
-	/* Step 1: ask /login/ for the Digest challenge. The P2/R1 firmware answers
-	   401 with a WWW-Authenticate-X Digest challenge here even though /ctrl/*
-	   never offers one (the session must exist first). */
-	{
-		RawHttp ch;
-		requestSync("GET", QStringLiteral("/login/"), QByteArray(), ch,
+	/* Start from a clean Digest state so leg 2 is computed from the nonce the
+	   camera issues on leg 1, with nc restarting at 1 — exactly what the
+	   camera's own login.min.js does. */
+	nonce_.clear();
+	nc_ = 0;
+	auth_header_.clear();
+
+	/* Step 1 + 2 on ONE connection: GET /login/ -> 401 Digest challenge, then
+	   GET /login/ with the Authorization computed from that challenge. Some
+	   firmware (edgem4 sw 1.0.16) binds the nonce to the TCP connection that
+	   issued it, so the authenticated retry MUST reuse the socket; sending it on
+	   a fresh connection is answered 401 no matter how correct the digest is. */
+	RawHttp rsp;
+	bool challenged = false;
+	bool continued = false;
+	loginSync(rsp, challenged, continued, timeoutMs);
+
+	/* A challenge was seen but no authenticated retry reached the camera — the
+	   server closed the connection after challenging, or leg 2 died at the
+	   transport level. Retry once on a fresh connection, which is what firmware
+	   that does NOT bind the nonce to a connection expects. */
+	if (challenged && (!continued || rsp.status == 0)) {
+		buildAuthorization("GET", "/login/");
+		requestSync("GET", QStringLiteral("/login/"), QByteArray(), rsp,
 			    timeoutMs);
-		/* No challenge: this build does not gate /login/ behind auth — either
-		   the camera needs no login (already authed or public) or it answers
-		   404 (not a web-UI camera). Treat "no Digest challenge" as success and
-		   let the per-request path decide. */
-		const bool challenged =
-			(ch.status == 401 && parseChallenge(ch.headers));
-		captureSession(ch.headers);
-		qWarning().noquote() << "[obs-zcamera] login challenge"
-				     << base_url_ + "/login/"
-				     << "code" << ch.status << "challenged"
-				     << challenged << "realm"
-				     << QString::fromLatin1(realm_);
-		if (!challenged)
-			return true;
+		captureSession(rsp.headers);
 	}
 
-	/* Step 2: POST /login/ with the computed Digest Authorization. */
-	buildAuthorization("POST", "/login/");
-	RawHttp lp;
-	requestSync("POST", QStringLiteral("/login/"), QByteArray(), lp,
-		    timeoutMs);
-	captureSession(lp.headers);
-	qWarning().noquote() << "[obs-zcamera] login post"
-			     << base_url_ + "/login/" << "code" << lp.status
-			     << "setcookie" << !cookie_.isEmpty() << "token"
+	qWarning().noquote() << "[obs-zcamera] login" << base_url_ + "/login/"
+			     << "code" << rsp.status << "challenged" << challenged
+			     << "sameconn" << continued << "setcookie"
+			     << !cookie_.isEmpty() << "token"
 			     << !x_auth_token_.isEmpty();
 
-	/* 2xx (or any redirect) opens the session; the session cookie/token is now
-	   on file for every /ctrl/* request. An UNAUTHORIZED with no cookie means a
-	   wrong password — the dock keeps the form up. */
-	const bool ok = (lp.status >= 200 && lp.status < 300);
+	/* No Digest challenge at all: this build does not gate /login/ behind auth —
+	   either the camera needs no login (already authed or public) or it is not a
+	   web-UI camera. Treat it as a no-op success and let the per-request path
+	   decide. */
+	if (!challenged)
+		return true;
+
+	/* 2xx (or any redirect) opens the session; the session cookie/token is now on
+	   file for every /ctrl/* request. An UNAUTHORIZED here means the password was
+	   wrong — the dock keeps the form up. */
+	const bool ok = (rsp.status >= 200 && rsp.status < 300);
 	if (ok) {
 		auth_required_ = false;
-		auth_header_.clear(); /* session replaces per-request Digest */
+		auth_header_.clear(); /* the session replaces per-request Digest */
 	}
 	return ok;
+}
+
+void ZcHttpTransport::loginSync(RawHttp &out, bool &challenged, bool &continued,
+				int timeoutMs)
+{
+	QEventLoop loop;
+	bool done = false;
+
+	new HttpExchange(
+		host_, (quint16)port_, tls_, buildLoginRequest(false), timeoutMs,
+		[&](int status, const QByteArray &headers, const QByteArray &body,
+		    const QString &error, bool timedOut) {
+			out.status = status;
+			out.headers = headers;
+			out.body = body;
+			out.error = error;
+			out.timedOut = timedOut;
+			captureSession(headers);
+			done = true;
+			loop.quit();
+		},
+		this,
+		[&](int status, const QByteArray &headers,
+		    const QByteArray &) -> QByteArray {
+			/* Leg 1 answered. Keep any session bits it carried, and when it is
+			   a Digest challenge compute the Authorization for leg 2 — which
+			   HttpExchange sends on this same socket. Returning an empty array
+			   finishes with leg 1's response (no challenge: nothing to do). */
+			captureSession(headers);
+			if (status != 401 || !parseChallenge(headers))
+				return QByteArray();
+			challenged = true;
+			buildAuthorization("GET", "/login/");
+			continued = true;
+			return buildLoginRequest(true);
+		});
+	/* A transport error can be reported straight out of the constructor, before
+	   exec(); quit() before exec() is a no-op, so only enter the loop when the
+	   result is not already in. */
+	if (!done)
+		loop.exec();
 }
 
 QByteArray ZcHttpTransport::upgradeHeaderBlock() const
@@ -613,6 +701,25 @@ void ZcHttpTransport::dispatch(const char *method,
 	new HttpExchange(host_, (quint16)port_, tls_,
 			 buildRequest(method, pathWithQuery, body), timeoutMs,
 			 std::move(done), this);
+}
+
+QByteArray ZcHttpTransport::buildLoginRequest(bool withAuth) const
+{
+	/* The login handshake keeps its connection alive across both legs: the
+	   nonce of some firmware is bound to the connection that issued the
+	   challenge, so the authenticated retry must reuse the socket. Leg 1 never
+	   carries the cached Authorization — its stale nonce/uri pair would only
+	   muddy the reply we need the fresh challenge from. */
+	QByteArray req;
+	req += "GET /login/ HTTP/1.1\r\n";
+	req += "Host: " + hostHeader().toUtf8() + "\r\n";
+	req += "User-Agent: obs-zcamera\r\n";
+	req += "X-Requested-With: XMLHttpRequest\r\n";
+	req += "Accept: */*\r\n";
+	if (withAuth && !auth_header_.isEmpty())
+		req += "Authorization: " + auth_header_ + "\r\n";
+	req += "Connection: keep-alive\r\n\r\n";
+	return req;
 }
 
 bool ZcHttpTransport::requestSync(const char *method,

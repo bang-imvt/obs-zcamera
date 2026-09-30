@@ -140,6 +140,10 @@ public:
 	uint32_t getWidth();
 	uint32_t getHeight();
 
+	/* The camera address this source targets, as a Qt string. Read-only: the
+	   dock's Properties path uses it to select the same camera (bug 27). */
+	QString ip() const { return QString::fromStdString(ip_); }
+
 private:
 	/* Pipeline lifecycle. */
 	void start();
@@ -1394,15 +1398,16 @@ static const char *zc_source_getname(void *unused)
 	return "ZCamera";
 }
 
-static obs_properties_t *zc_source_getproperties(void *unused)
+static obs_properties_t *zc_source_getproperties(void *data)
 {
-	(void)unused;
 	/* A ZCamera source is really driven from the control dock (discovery,
 	   add-to-scene, settings, PTZ); the classic properties dialog is kept
 	   minimal so it cannot shadow that, and opening it (which happens both when
 	   the source is added and when Properties is clicked) raises the dock so the
-	   operator lands on the surface that controls the camera. */
-	zc_show_control_dock();
+	   operator lands on the surface that controls the camera. The camera that
+	   this source represents is passed along so the dock selects it (bug 27). */
+	auto *s = static_cast<zc::ZcSspSource *>(data);
+	zc_show_control_dock(s ? s->ip() : QString());
 
 	obs_properties_t *props = obs_properties_create();
 	obs_properties_add_text(props, PROP_SOURCE_IP,

@@ -253,6 +253,10 @@ signals:
 	void framingSettingsChanged();
 
 	void connectionStateChanged(bool connected);
+	/* The camera's notification socket dropped or re-established (power loss,
+	   network drop). The dock marks the row offline/online from this so the rail
+	   reflects a camera that went away without the operator clicking (bug 49). */
+	void notifierStateChanged(bool live);
 	void statusMessage(const QString &msg);
 
 private:
