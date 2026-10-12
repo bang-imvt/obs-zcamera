@@ -4256,6 +4256,10 @@ void ZcControlDock::onLoginSubmitted(const QString &user, const QString &passwor
 	creds.username = user;
 	creds.password = password;
 	creds_[currentHost_] = creds;
+	/* Mirror into the shared store so the source's Properties bitrate push
+	   can authenticate to this camera too — the source has no login UI of
+	   its own and reads credentials back from the store (memory-only). */
+	zc::rememberCredentials(currentHost_, creds);
 	/* The form can be submitted while a connect is still probing (the probe runs
 	   a nested event loop). openCamera() would refuse and this handler would then
 	   wrongly report the password as rejected, so defer the retry instead. */

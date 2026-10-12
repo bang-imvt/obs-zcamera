@@ -64,6 +64,17 @@ extern "C" {
 #endif
 #include "obs-ssp.h"
 
+#ifdef ENABLE_CAMERA_CONTROL
+/* The Properties bitrate control writes through the camera's HTTP API (see
+   ZcSspSource::applyBitrate). The cameractrl sources are compiled into this
+   plugin target only when camera control is on (CMakeLists), which is what
+   these #ifdef guards mirror; the property itself is hidden when camera
+   control is compiled out. */
+#include "cameractrl/zc_camera_client.h"
+#include "cameractrl/zc_settings_schema.h"
+#include <QSet>
+#endif
+
 /* libavcodec is needed for the AVFrame handed out by the zero-copy backends
    (ENABLE_ZERO_COPY links it) and for the CPU fallback (ENABLE_SW_DECODE). A
    build with both off carries no FFmpeg dependency at all. */
@@ -108,6 +119,10 @@ static void release_frame_direct(struct zc_decoded_frame *frame)
 #define PROP_WAIT_I_FRAME "zc_wait_i_frame"
 #define PROP_SYNC_MODE "zc_sync_mode"
 #define PROP_LED_TALLY "zc_led_tally"
+/* Camera-side streaming bitrate in kbps, pushed to the camera's HTTP API on
+   Apply (0 = leave the camera's own value alone). Only offered when camera
+   control is compiled in. */
+#define PROP_BITRATE "zc_bitrate"
 
 #define SYNC_INTERNAL 0
 #define SYNC_SSP_TIMESTAMP 1
@@ -169,6 +184,18 @@ private:
 	   thread, the reconnect thread and the receive thread can never tear the
 	   connection down concurrently (double pthread_join). */
 	void teardownConnection();
+
+#ifdef ENABLE_CAMERA_CONTROL
+	/* Apply the Properties "Bitrate (kbps)" value to the camera's main
+	   stream: connect with the dock's remembered credentials, discover the
+	   stream index (app_stream1 -> legacy fallback, as the dock's Stream
+	   bar does) and write it. Never touches the SSP video path. */
+	void applyBitrate(int kbps);
+	void writeBitrate(ZcCameraClient *client, int kbps, const QString &index);
+	/* Delete ctrlClient_ and clear the in-flight flags. Caller must hold
+	   ctrlMutex_. */
+	void releaseControlClientLocked();
+#endif
 
 	/* Decoder swap helpers. createDecoder() touches the OBS graphics device,
 	   so it enters the graphics context itself; installDecoder() must NOT be
@@ -317,7 +344,45 @@ private:
 	bool audioUnsupportedLogged_ = false;
 	bool audioDecFailLogged_ = false;
 #endif
+
+#ifdef ENABLE_CAMERA_CONTROL
+	/* Properties "Bitrate (kbps)" push (see applyBitrate). Everything here
+	   runs on the OBS UI thread — update() and stop() are OBS's calls there,
+	   and the client's replies are delivered by the Qt event loop that
+	   connect() pumps — but ctrlMutex_ still guards the client pointer so a
+	   future caller cannot race it. It is never held across connect(),
+	   which runs a nested event loop. */
+	std::mutex ctrlMutex_;
+	/* Lazily created; destroyed in stop() with the connection. */
+	ZcCameraClient *ctrlClient_ = nullptr;
+	/* The host ctrlClient_ was created for: a source re-pointed at another
+	   camera must not reuse that client. */
+	QString ctrlHost_;
+	/* The bitrate last written to the camera. Nothing is written unless the
+	   Properties value differs from it — obs_source_update fires for every
+	   unrelated property change too — and a failed write leaves it alone so
+	   the next Apply retries. */
+	int lastAppliedBitrate_ = 0;
+	/* A discovery + write round trip is live; connect() runs a nested event
+	   loop, so a re-entrant update() must not start a second one. */
+	bool bitratePushInFlight_ = false;
+	bool bitratePushSkipLogged_ = false;
+	/* stop() ran while applyBitrate() had connect() on the stack and
+	   deferred the client teardown to that frame (see the connect call). */
+	bool ctrlClientRetirePending_ = false;
+#endif
 };
+
+#ifdef ENABLE_CAMERA_CONTROL
+/* Sources whose applyBitrate() currently has a ZcCameraClient::connect() on
+   the stack. connect() pumps a nested event loop, and an event delivered in
+   it can even destroy the source (OBS releases it from a frontend action);
+   ~ZcSspSource unregisters, so the connect frame can tell — when it resumes
+   — whether the source it belongs to still exists, and stop() can tell it
+   must not delete the client mid-connect (the use-after-free the dock's
+   opening_ guard exists for). UI thread only, like the push itself. */
+static QSet<ZcSspSource *> g_bitrateConnectLive;
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Construction / destruction                                          */
@@ -331,6 +396,13 @@ ZcSspSource::ZcSspSource(obs_source_t *source, bool async)
 ZcSspSource::~ZcSspSource()
 {
 	stop();
+#ifdef ENABLE_CAMERA_CONTROL
+	/* If stop() found a connect() frame live it deferred the client
+	   teardown to that frame; unregister here so the frame can tell the
+	   source is gone when connect() returns, and retire the orphaned
+	   client itself. */
+	g_bitrateConnectLive.remove(this);
+#endif
 	/* The CPU texture is only ever touched on the graphics thread; the source
 	   destructor runs after OBS has stopped rendering it, so this is the one
 	   place besides videoRender() where cpuTex_ may be destroyed. */
@@ -484,20 +556,202 @@ void ZcSspSource::update(obs_data_t *settings)
 	bool changed = (ip != ip_) || (backend != requestedBackend_) ||
 		       (syncMode != syncMode_) ||
 		       (waitI != waitIFrame_) || (lowNoise != lowNoise_);
-	if (!changed)
-		return;
-
-	stop();
-	ip_ = ip;
-	{
-		std::lock_guard<std::mutex> lock(decoderMutex_);
-		requestedBackend_ = backend;
+	if (changed) {
+		stop();
+#ifdef ENABLE_CAMERA_CONTROL
+		/* A different camera carries its own stream settings: forget the
+		   bitrate applied to the previous one, so the value is pushed to
+		   the new host even when the Properties number did not change.
+		   (stop() already tore down the old control client.) */
+		if (ip != ip_)
+			lastAppliedBitrate_ = 0;
+#endif
+		ip_ = ip;
+		{
+			std::lock_guard<std::mutex> lock(decoderMutex_);
+			requestedBackend_ = backend;
+		}
+		syncMode_ = syncMode;
+		waitIFrame_ = waitI;
+		lowNoise_ = lowNoise;
+		start();
 	}
-	syncMode_ = syncMode;
-	waitIFrame_ = waitI;
-	lowNoise_ = lowNoise;
-	start();
+#ifdef ENABLE_CAMERA_CONTROL
+	/* The bitrate is a camera-side setting, not a pipeline one: it must
+	   never restart a healthy SSP stream, so it is handled outside the
+	   `changed` block; the helper itself decides whether anything actually
+	   needs writing (only a value that changed since the last applied one,
+	   and only when it is > 0). Done after the pipeline handling so a
+	   settings change that also restarts the stream does not cancel the
+	   write this is about to issue. */
+	applyBitrate((int)obs_data_get_int(settings, PROP_BITRATE));
+#endif
 }
+
+#ifdef ENABLE_CAMERA_CONTROL
+/* Push the Properties "Bitrate (kbps)" value to the camera's main stream —
+   GET /ctrl/stream_setting?index=<app_stream1|stream1>&bitrate=<kbps * 1000>,
+   the same request the dock's Stream bar issues. The SSP video path (the
+   ssp-connector subprocess on TCP 9999) is a separate connection: a failure
+   here is logged and otherwise ignored, the stream keeps running. */
+void ZcSspSource::applyBitrate(int kbps)
+{
+	/* 0 means "leave the camera's own value alone" (see the property
+	   tooltip): the default, and the only way to opt out. */
+	if (kbps <= 0)
+		return;
+	/* No write unless changed: obs_source_update fires for every unrelated
+	   property change too, and a re-write on each would churn the camera.
+	   A failed push leaves lastAppliedBitrate_ alone, so the next Apply
+	   retries. */
+	if (kbps == lastAppliedBitrate_)
+		return;
+	if (ip_.empty() || !isValidHostAddress(ip_))
+		return;
+	/* connect() pumps a nested Qt event loop, so an OBS event delivered
+	   during it can re-enter update(). One round trip at a time; the skip
+	   is logged once per in-flight push, not once per re-entrant update. */
+	if (bitratePushInFlight_) {
+		if (!bitratePushSkipLogged_) {
+			bitratePushSkipLogged_ = true;
+			blog(LOG_WARNING,
+			     "[obs-zcamera] a bitrate write to %s is still in "
+			     "flight; ignoring further bitrate changes until "
+			     "it completes",
+			     ip_.c_str());
+		}
+		return;
+	}
+
+	const QString host = QString::fromStdString(ip_);
+	ZcCameraClient *client = nullptr;
+	bool needConnect = false;
+	{
+		/* Reuse a client already connected to this host; a fresh host
+		   gets a fresh one (the transport is locked to its origin). */
+		std::lock_guard<std::mutex> lock(ctrlMutex_);
+		if (ctrlClient_ && ctrlHost_ == host && ctrlClient_->isConnected()) {
+			client = ctrlClient_;
+		} else {
+			releaseControlClientLocked();
+			ctrlClient_ = new ZcCameraClient(nullptr);
+			ctrlHost_ = host;
+			client = ctrlClient_;
+			needConnect = true;
+		}
+	}
+
+	bitratePushInFlight_ = true;
+	if (needConnect) {
+		/* Credentials come from the dock's shared in-memory store: a
+		   source has no login UI of its own. */
+		g_bitrateConnectLive.insert(this);
+		const bool ok = client->connect(host, 80, zc::lookupCredentials(host));
+		/* connect() pumped a nested event loop: an event delivered in it
+		   may have destroyed this source (its stop() deferred the client
+		   teardown because this frame was live). If the source is gone,
+		   touch nothing but the set and the orphaned client. */
+		if (!g_bitrateConnectLive.remove(this)) {
+			delete client;
+			return;
+		}
+		if (ctrlClientRetirePending_) {
+			/* stop() ran during connect() and deferred the teardown
+			   to this frame: honour it. The bitrate was not applied,
+			   and lastAppliedBitrate_ stays put so the next Apply
+			   retries. */
+			std::lock_guard<std::mutex> lock(ctrlMutex_);
+			releaseControlClientLocked();
+			return;
+		}
+		if (!ok) {
+			bitratePushInFlight_ = false;
+			blog(LOG_WARNING,
+			     "[obs-zcamera] could not reach the camera at %s to "
+			     "apply the bitrate (%d kbps not written; %s); the "
+			     "video stream is unaffected",
+			     host.toUtf8().constData(), kbps,
+			     client->authRequired()
+				 ? "the camera requires a login — log in from "
+				   "the ZCamera Control Dock first"
+				 : "is the camera online?");
+			std::lock_guard<std::mutex> lock(ctrlMutex_);
+			if (ctrlClient_ == client)
+				releaseControlClientLocked();
+			return;
+		}
+	}
+
+	/* Which index the firmware offers is the camera's choice, not ours:
+	   try app_stream1 and fall back to the legacy one, exactly like the
+	   dock's loadStream() discovery. */
+	client->streamSettingQuery(
+	    QString::fromLatin1(zc::kAppStreamIndex),
+	    [this, client, kbps](const QJsonObject &doc) {
+		    const QString index =
+			zc::isStreamDocument(doc)
+			    ? QString::fromLatin1(zc::kAppStreamIndex)
+			    : QString::fromLatin1(zc::kLegacyStreamIndex);
+		    writeBitrate(client, kbps, index);
+	    });
+}
+
+/* The write itself. `bitrate` is the firmware's write name and takes bps,
+   while the document reports kbps (spec §2 Stream), hence the scale. The
+   reply is the (updated) document: log the camera's read-back value so the
+   operator can see what the camera actually took. */
+void ZcSspSource::writeBitrate(ZcCameraClient *client, int kbps,
+			       const QString &index)
+{
+	client->streamSettingWrite(
+	    index,
+	    {{QStringLiteral("bitrate"),
+	      QString::number((qlonglong)kbps * zc::kBitrateWriteScale)}},
+	    [this, client, kbps, index](const QJsonObject &doc) {
+		    std::lock_guard<std::mutex> lock(ctrlMutex_);
+		    /* The transport owns its exchanges, so this only runs while
+		       its client is alive; the identity check is belt and
+		       braces against a client swapped under a late reply. */
+		    if (client != ctrlClient_)
+			    return;
+		    bitratePushInFlight_ = false;
+		    bitratePushSkipLogged_ = false;
+		    if (doc.isEmpty()) {
+			    blog(LOG_WARNING,
+				 "[obs-zcamera] the camera did not answer the "
+				 "bitrate write (index %s); %d kbps may not "
+				 "have been applied",
+				 index.toUtf8().constData(), kbps);
+			    return;
+		    }
+		    /* Only a camera that answered counts as applied: a refused
+		       or unanswered write stays un-applied so the next Apply
+		       retries. */
+		    lastAppliedBitrate_ = kbps;
+		    blog(LOG_INFO,
+			 "[obs-zcamera] camera stream %s bitrate is now %d "
+			 "kbps (Properties asked for %d kbps)",
+			 index.toUtf8().constData(), doc.value("bitrate").toInt(),
+			 kbps);
+	    });
+}
+
+/* Delete ctrlClient_ and retire the push state with it. Deleting the client
+   destroys its transport, which owns the in-flight exchanges: a pending
+   bitrate reply is cancelled with it and can never run against a source that
+   is going away. Caller must hold ctrlMutex_. */
+void ZcSspSource::releaseControlClientLocked()
+{
+	if (ctrlClient_) {
+		delete ctrlClient_;
+		ctrlClient_ = nullptr;
+	}
+	ctrlHost_.clear();
+	bitratePushInFlight_ = false;
+	bitratePushSkipLogged_ = false;
+	ctrlClientRetirePending_ = false;
+}
+#endif /* ENABLE_CAMERA_CONTROL */
 
 void ZcSspSource::activate()
 {
@@ -601,6 +855,24 @@ void ZcSspSource::stop()
 	cv_.notify_all();
 
 	teardownConnection();
+
+#ifdef ENABLE_CAMERA_CONTROL
+	/* The control client exists only to apply Properties settings to this
+	   camera's HTTP API, so it goes down with the connection. This also
+	   cancels an in-flight bitrate write (the transport owns its
+	   exchanges), so its callback can never run against a source that is
+	   being destroyed. Exception: if applyBitrate() has connect() on the
+	   stack right now, deleting the client mid-connect is the use-after-
+	   free the dock's opening_ guard exists for — defer the teardown to
+	   that frame instead. */
+	{
+		std::lock_guard<std::mutex> lock(ctrlMutex_);
+		if (g_bitrateConnectLive.contains(this))
+			ctrlClientRetirePending_ = true;
+		else
+			releaseControlClientLocked();
+	}
+#endif
 
 	/* Join the reconnect thread so it never touches freed `this`. Done with
 	   lifecycleMutex_ released: that thread may be inside reconnectNow(),
@@ -1550,6 +1822,18 @@ static obs_properties_t *zc_source_getproperties(void *data)
 	obs_properties_add_text(props, PROP_SOURCE_IP,
 				obs_module_text("SSPPlugin.SourceProps.SourceIp"),
 				OBS_TEXT_DEFAULT);
+#ifdef ENABLE_CAMERA_CONTROL
+	/* The camera's streaming bitrate, written to the camera on Apply (see
+	   ZcSspSource::applyBitrate). The minimum is 0 rather than the
+	   camera's own floor because 0 is the value that means "leave the
+	   camera alone". */
+	obs_properties_add_int(props, PROP_BITRATE,
+			       obs_module_text("ZCameraPlugin.SourceProps.Bitrate"),
+			       0, 100000, 100);
+	obs_property_set_long_description(
+	    obs_properties_get(props, PROP_BITRATE),
+	    obs_module_text("ZCameraPlugin.SourceProps.BitrateTip"));
+#endif
 	obs_properties_add_text(
 	    props, "zc_dock_hint",
 	    obs_module_text("ZCameraPlugin.SourceProps.DockHint"),
@@ -1572,6 +1856,10 @@ static void zc_source_getdefaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, PROP_WAIT_I_FRAME, false);
 	obs_data_set_default_bool(settings, PROP_LED_TALLY, false);
 	obs_data_set_default_bool(settings, PROP_LOW_NOISE, false);
+#ifdef ENABLE_CAMERA_CONTROL
+	/* 0 = leave the camera's own bitrate alone (see applyBitrate). */
+	obs_data_set_default_int(settings, PROP_BITRATE, 0);
+#endif
 }
 
 static void *zc_source_create(obs_data_t *settings, obs_source_t *source)
