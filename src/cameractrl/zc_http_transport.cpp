@@ -556,6 +556,15 @@ bool ZcHttpTransport::login(int timeoutMs)
 	if (ok) {
 		auth_required_ = false;
 		auth_header_.clear(); /* the session replaces per-request Digest */
+		/* Drop the login nonce too: leaving it set made doRequest recompute
+		   and re-send Digest on every later /ctrl request (the session cookie
+		   and x-auth-token already carry the auth), and made WS reconnects
+		   present a fresh nc++ Digest against a consumed login nonce while
+		   the first upgrade was cookie-only. A camera that still wants
+		   per-request Digest answers 401, and doRequest's single retry
+		   re-challenges from scratch. */
+		nonce_.clear();
+		nc_ = 0;
 	}
 	return ok;
 }

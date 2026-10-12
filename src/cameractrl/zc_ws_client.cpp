@@ -127,8 +127,9 @@ void ZcWsClient::open(const QUrl &url, const QByteArray &extraHeaders)
 	connect(socket_, &ZcTlsSocket::errorOccurred, this,
 		&ZcWsClient::onSocketError);
 
-	/* The camera's self-signed certificate is accepted inside ZcTlsSocket
-	   (host-scoped trust is enforced by the caller's camera allow-list). */
+	/* The camera's self-signed certificate is TOFU-pinned inside ZcTlsSocket
+	   (per-host SHA-256 in QSettings): the first connection trusts it, a
+	   later certificate change aborts the channel. */
 	socket_->connectToHost(url.host(), (quint16)url.port(), isTls_);
 
 	/* From here the 101 upgrade must land inside the handshake timeout. The

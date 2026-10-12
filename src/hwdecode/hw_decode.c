@@ -76,8 +76,10 @@ struct zc_hw_decoder *zc_hw_decoder_create(enum zc_hw_backend backend,
 		struct zc_hw_decoder *hw = zc_hw_ffmpeg_create(backend, width,
 							       height, codec,
 							       ten_bit, source);
-		if (hw)
+		if (hw) {
+			hw->backend = backend;
 			return hw;
+		}
 		blog(LOG_WARNING,
 		     "[obs-zcamera] zero-copy decode unavailable, "
 		     "falling back to software");
@@ -89,7 +91,10 @@ struct zc_hw_decoder *zc_hw_decoder_create(enum zc_hw_backend backend,
 	(void)ten_bit;
 #endif
 #ifdef ENABLE_SW_DECODE
-	return zc_hw_sw_create(codec, source);
+	struct zc_hw_decoder *sw = zc_hw_sw_create(codec, source);
+	if (sw)
+		sw->backend = ZC_HW_SOFTWARE;
+	return sw;
 #else
 	(void)codec;
 	(void)source;

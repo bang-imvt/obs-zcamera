@@ -13,7 +13,9 @@ unchanged). It adds two things on top:
    by OBS directly (no `av_hwframe_transfer_data` GPU→CPU copy, no CPU→GPU
    upload):
    - Windows: D3D11VA (the `Auto` default) → shared BGRA texture → OBS
-     `gs_texture`; CUDA/NVDEC is available as an explicit backend choice.
+     `gs_texture`. A CUDA/NVDEC path exists in the code but is not offered in
+     the UI (it currently renders green inside OBS); it stays available for
+     standalone testing.
    - macOS: VideoToolbox → IOSurface → OBS `gs_texture`.
    - Software CPU fallback when no hardware path is available.
 2. **Camera-control dock** — a native OBS panel with a camera rail, a settings
@@ -42,7 +44,7 @@ the living status and [`doc/plan.md`](doc/plan.md) for the roadmap.
 
 ## Features
 
-- **SSP source** — add a ZCAM camera as an OBS input source (`ssp_source`).
+- **SSP source** — add a ZCAM camera as an OBS input source (`zcamera_source`).
 - **Automatic camera discovery** via mDNS (`_eagle._tcp`), plus manual IP entry.
 - **Low-latency streaming** from SSP cameras (H.264/HEVC + AAC).
 - **Zero-copy hardware decode**: D3D11VA (Auto) / NVDEC on Windows,

@@ -386,7 +386,11 @@ static bool ffmpeg_decode(struct zc_hw_decoder *dec, const uint8_t *data,
 	AVFrame *owned = av_frame_alloc();
 	if (!owned)
 		return false;
-	av_frame_ref(owned, f->hw_frame);
+	if (av_frame_ref(owned, f->hw_frame) < 0) {
+		/* OOM or a dead pool: an unreffed frame must not be handed out. */
+		av_frame_free(&owned);
+		return false;
+	}
 
 	out->backend = f->backend;
 	out->texture = NULL;

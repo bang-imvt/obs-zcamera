@@ -75,6 +75,12 @@ struct zc_decoded_frame {
 
 /* Backend interface implemented per platform. */
 struct zc_hw_decoder {
+	/* The backend that actually produced this decoder. The factory may
+	   fall back to Software after a hardware create fails, so this is not
+	   necessarily the backend the caller requested — diagnostics and the
+	   status line must show what is really decoding. */
+	enum zc_hw_backend backend;
+
 	/* Decode one access unit. On `got_output`, fields of `out` are filled
 	   (avframe or frame2 set). Caller draws then calls release(). */
 	bool (*decode)(struct zc_hw_decoder *dec, const uint8_t *data,

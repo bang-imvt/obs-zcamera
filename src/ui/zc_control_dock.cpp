@@ -1799,6 +1799,11 @@ void ZcPtzPad::pushLimit(Edge edge)
 		client_->ptzLimitUpdate(QStringLiteral("upright"), right, up);
 	else
 		client_->ptzLimitUpdate(QStringLiteral("downleft"), left, down);
+	/* Re-read the limit box the camera now holds: the transport serializes
+	   requests, so this reply reflects the push. Without it the cached box
+	   goes stale and the next Range-Limit checkbox toggle (applyLimitBox)
+	   repaints the sliders back to the pre-drag limits. */
+	refreshState();
 }
 
 void ZcPtzPad::updateLimitLabel(Edge edge)
@@ -2462,6 +2467,11 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 	connect(applyBtn, &QPushButton::clicked, this, &ZcFramingPanel::apply);
 	connect(refreshBtn, &QPushButton::clicked, this, &ZcFramingPanel::refresh);
 
+	/* Remember the construction defaults (restart 30 s etc.) so a camera
+	   switch can restore them; see spinDefaults_. */
+	for (QSpinBox *spin : findChildren<QSpinBox *>())
+		spinDefaults_.insert(spin, spin->value());
+
 	layout->addStretch(1);
 }
 
@@ -2508,7 +2518,7 @@ void ZcFramingPanel::setClient(ZcCameraClient *client)
 		}
 		for (QSpinBox *spin : findChildren<QSpinBox *>()) {
 			QSignalBlocker block(spin);
-			spin->setValue(spin->minimum());
+			spin->setValue(spinDefaults_.value(spin, spin->minimum()));
 		}
 		for (QComboBox *combo : findChildren<QComboBox *>()) {
 			QSignalBlocker block(combo);
@@ -3181,9 +3191,18 @@ void ZcPresetPanel::applySlotInfo(int index, const QJsonObject &info)
 	}
 	/* A non-zero status means the camera is mid-move; warn rather than
 	   letting the operator recall into a moving head. Presets only — a trace
-	   reply carries no status. */
-	if (!trace && info.value("status").toInt(0) != 0)
-		hintLabel_->setText(ztr("ZCameraPlugin.Dock.PresetBusy"));
+	   reply carries no status. The warning must also CLEAR: the next reply
+	   for the selected slot with status back to 0 means the head settled,
+	   and a stuck notice would keep warning about a move that ended. */
+	if (!trace) {
+		if (info.value("status").toInt(0) != 0) {
+			hintLabel_->setText(ztr("ZCameraPlugin.Dock.PresetBusy"));
+		} else if (index == selected_ &&
+			   hintLabel_->text() ==
+				   ztr("ZCameraPlugin.Dock.PresetBusy")) {
+			hintLabel_->clear();
+		}
+	}
 
 	if (name.isEmpty()) {
 		slot.thumb->setPixmap(QPixmap());
@@ -3343,6 +3362,12 @@ void ZcPresetPanel::updateActions()
 
 void ZcPresetPanel::updateSpeedControls()
 {
+	/* Trace slots carry no unit/speed fields; the combos are disabled in
+	   trace mode anyway (updateActions), and repainting them from a trace
+	   reply would blank the preset family's selections while the user is
+	   only browsing traces. */
+	if (traceMode_)
+		return;
 	if (selected_ < 0) {
 		QSignalBlocker block(speedCombo_);
 		speedCombo_->clear();
@@ -3399,8 +3424,11 @@ void ZcPresetPanel::commitRename(int index, const QString &text)
 	name.remove('=');
 	const QString stored = info_.value(index).value("name").toString();
 
-	/* 1..18 characters; anything else reverts to the stored name. */
-	if (name.isEmpty() || name.size() > kPresetNameMax) {
+	/* 1..18 bytes; anything else reverts to the stored name. The camera
+	   counts UTF-8 BYTES (same limit the framing name clamp uses), so a
+	   Chinese name of 18 characters is over the limit and must be rejected
+	   here rather than silently truncated by the camera. */
+	if (name.isEmpty() || name.toUtf8().size() > kPresetNameMax) {
 		slot.name->setText(stored.isEmpty() ? defaultName(index) : stored);
 		return;
 	}
@@ -3602,6 +3630,17 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 	scanTimer_->setInterval(2500);
 	connect(scanTimer_, &QTimer::timeout, this, &ZcControlDock::refreshCameras);
 	scanTimer_->start();
+	/* A closed dock does not need a discovery poll every 2.5 s: the rail is
+	   not on screen, and the mDNS/source churn is pure overhead until the
+	   dock is shown again. */
+	connect(this, &QDockWidget::visibilityChanged, this, [this](bool visible) {
+		if (!scanTimer_)
+			return;
+		if (visible)
+			scanTimer_->start();
+		else
+			scanTimer_->stop();
+	});
 
 	/* A setting the camera applies by restarting its web service (HTTPS,
 	   identity auth) or by moving to another address (network type) drops the
@@ -4119,6 +4158,15 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 			if (framing_)
 				framing_->refresh();
 		});
+	/* The WS event only reports framing CHANGES. If the camera was already
+	   framing when we connected, the transport must be greyed now — waiting
+	   for the next event would leave the panel claiming to work while every
+	   preset/trace click is ignored. One snapshot read settles it. */
+	if (client_->cameraSupportsAutoFraming())
+		client_->framingQuery([this](const QJsonObject &status) {
+			if (presets_)
+				presets_->setEnabled(!framingActive(status));
+		});
 	/* A camera change must not leave the previous camera's PTZ tab behind. */
 	updatePtzTab();
 	return true;
@@ -4224,10 +4272,13 @@ void ZcControlDock::onLoginSubmitted(const QString &user, const QString &passwor
 	if (ok) {
 		reachableHosts_.insert(currentHost_);
 		unreachableHosts_.remove(currentHost_);
-	} else {
+	} else if (lastAuthRequired_) {
 		/* The camera still challenged us: the credentials are wrong. Keep the
 		   form up and say the login was rejected, so the click does not look
-		   like it did nothing (bug list "wrong credentials not validated"). */
+		   like it did nothing (bug list "wrong credentials not validated").
+		   Only claim rejection when the camera actually challenged: a network
+		   timeout here is not a wrong password, and telling the operator the
+		   password was rejected sends them chasing the wrong thing. */
 		settings_->showLoginError();
 	}
 	refreshRailPresence();

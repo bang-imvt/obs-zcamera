@@ -514,6 +514,11 @@ static void *mdns_loop(void *ptr)
 	int sock = mdns_socket_open_ipv4(0);
 	while (arg->running.load()) {
 		send_mdns_query(arg->service_str, arg->service_str_size);
+		/* One query per second. Without this wait the loop floods the
+		   LAN with PTR queries and pins a core; the 100 ms slices keep
+		   Stop() responsive (join returns within ~100 ms). */
+		for (int i = 0; i < 10 && arg->running.load(); ++i)
+			os_sleep_ms(100);
 	}
 	mdns_socket_close(sock);
 	bfree(buffer);

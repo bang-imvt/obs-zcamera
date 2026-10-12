@@ -304,8 +304,10 @@ void ZcTlsSocket::startTls()
 	}
 
 	/* The camera serves a self-signed certificate for www.z-cam.com while it is
-	   addressed by IP literal, so verification could never succeed. Host trust
-	   is enforced by the caller's connected-camera allow-list instead. */
+	   addressed by IP literal, so chain verification could never succeed. The
+	   chain check stays off, but the certificate fingerprint is TOFU-pinned
+	   right after the handshake (pinPeerCertificate), so a LAN MITM with a
+	   different certificate is rejected. */
 	mbedtls_ssl_conf_authmode(&t->conf, MBEDTLS_SSL_VERIFY_NONE);
 	mbedtls_ssl_conf_rng(&t->conf, mbedtls_ctr_drbg_random, &t->drbg);
 
@@ -516,7 +518,7 @@ bool ZcTlsSocket::pinPeerCertificate()
 		return false; /* no peer certificate: a TLS peer must present one */
 	unsigned char digest[32];
 	if (mbedtls_sha256(crt->raw.p, crt->raw.len, digest, 0) != 0)
-		return true;
+		return false; /* cannot pin what we cannot hash: fail closed */
 	const QString fp = QString::fromLatin1(
 	    QByteArray(reinterpret_cast<const char *>(digest), sizeof(digest))
 		.toHex());

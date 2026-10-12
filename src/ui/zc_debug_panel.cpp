@@ -48,10 +48,14 @@ ZcDebugPanel::ZcDebugPanel(QWidget *parent) : QWidget(parent)
 
 void ZcDebugPanel::append(const QString &line)
 {
-	/* Sanitize: strip Authorization/cookie/credential-like values. */
+	/* Sanitize: strip Authorization/cookie/credential-like values. The value
+	   is a quoted string (which may contain spaces, e.g. a Cookie header) or
+	   a bare token — \S+ alone would redact only the first word of a quoted
+	   value and leak the rest of the credential into the log. */
 	QString safe = line;
 	safe.replace(QRegularExpression(
-			    "(Authorization|X-Auth-Token|Cookie|Password|password)\\s*[:=]\\s*\\S+"),
+			     "(Authorization|X-Auth-Token|Cookie|Password|password)"
+			     "\\s*[:=]\\s*(\"[^\"]*\"|\\S+)"),
 		     "\\1: [redacted]");
 	log_->appendPlainText(QDateTime::currentDateTime()
 				      .toString("HH:mm:ss.zzz ") + safe);

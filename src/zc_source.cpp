@@ -265,7 +265,9 @@ private:
 	   videoRender() when it is replaced, or in stop()/~ZcSspSource(). */
 	struct zc_decoded_frame drawn_ = {};
 	enum video_format lastFormat_ = VIDEO_FORMAT_NONE;
-	uint32_t lastWidth_ = 0, lastHeight_ = 0;
+	/* Written by the decode thread, read by the graphics thread (repeat
+	   render) and by OBS's get_width/get_height: atomic, not plain. */
+	std::atomic<uint32_t> lastWidth_{0}, lastHeight_{0};
 
 	/* CPU (Software) frame copy pending render, guarded by frameMutex_. The
 	   NV12 planes from the decoder are converted to RGBA here so videoRender
@@ -313,6 +315,7 @@ private:
 	   decoder. */
 	uint32_t audioEncoder_ = 0;
 	bool audioUnsupportedLogged_ = false;
+	bool audioDecFailLogged_ = false;
 #endif
 };
 
@@ -667,6 +670,7 @@ void ZcSspSource::stop()
 		}
 		audioEncoder_ = 0;
 		audioUnsupportedLogged_ = false;
+		audioDecFailLogged_ = false;
 	}
 #endif
 
@@ -768,10 +772,12 @@ struct zc_hw_decoder *ZcSspSource::createDecoder(int width, int height,
 				   source_);
 	obs_leave_graphics();
 	{
-		/* Record what was attempted, success or not, so diagnostics and
-		   the fallback decision see the resolved backend. */
+		/* Record what actually got built, success or not: the factory
+		   falls back to Software when a hardware create fails, and the
+		   status line must not keep advertising the hardware backend
+		   that is not decoding. */
 		std::lock_guard<std::mutex> lock(decoderMutex_);
-		backend_ = backend;
+		backend_ = dec ? dec->backend : backend;
 	}
 	return dec;
 }
@@ -1215,9 +1221,15 @@ void ZcSspSource::onAudioData(imf::SspAudioData *audio)
 	}
 	if (!audioDecReady_) {
 		if (ffmpeg_decode_init(&audioDec_, AV_CODEC_ID_AAC, false) != 0) {
-			blog(LOG_WARNING,
-			     "[obs-zcamera] could not open the AAC decoder; the "
-			     "source will have no audio");
+			/* One line, not one per audio packet (~47/s): the decoder
+			   cannot come up by itself, repeating the warning just
+			   floods the log. */
+			if (!audioDecFailLogged_) {
+				audioDecFailLogged_ = true;
+				blog(LOG_WARNING,
+				     "[obs-zcamera] could not open the AAC decoder; "
+				     "the source will have no audio");
+			}
 			return;
 		}
 		audioDecReady_ = true;

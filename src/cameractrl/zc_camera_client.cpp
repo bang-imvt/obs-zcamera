@@ -127,6 +127,11 @@ void ZcCameraClient::disconnect()
 	recording_ = false;
 	model_.clear();
 	supportsPtz_ = false;
+	/* The framing gate belongs to the connected camera too: leaving it set
+	   kept the framing tab (and its preset grey-out) alive on a camera that
+	   does not do framing. */
+	supportsAutoFraming_ = false;
+	temperature_ = 0.0;
 	authRequired_ = false;
 	emit cameraInfoChanged();
 	emit connectionStateChanged(false);

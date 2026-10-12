@@ -411,6 +411,11 @@ private:
 	QSpinBox *waitTimeSpin_ = nullptr;
 	QSpinBox *sensitivitySpin_ = nullptr;
 	QSpinBox *accelerationSpin_ = nullptr;
+	/* Value each spin had at construction (the panel's own defaults, e.g.
+	   restart = 30 s). setClient(nullptr) restores these — resetting to
+	   minimum() would park every spinner at 0/1, which is not the default
+	   the camera page shows. */
+	QHash<QSpinBox *, int> spinDefaults_;
 
 	QPushButton *restartNowBtn_ = nullptr;
 

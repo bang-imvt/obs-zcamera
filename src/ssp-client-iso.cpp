@@ -236,10 +236,11 @@ void SSPClientIso::doStart()
 	this->pipe = tpipe;
 
 	this->worker = std::thread(SSPClientIso::ReceiveThread, this);
-#ifdef _WIN32
-	/* Owned and joined by Stop() (not detached): see stderrWorker's comment. */
+	/* Owned and joined by Stop() (not detached): see stderrWorker's comment.
+	   Started on every platform: os_process_pipe_read_err works on POSIX too,
+	   and an undrained stderr pipe can block the connector once its 4 KiB
+	   pipe fills. */
 	this->stderrWorker = std::thread(dump_stderr, tpipe);
-#endif
 	this->statusLock.unlock();
 }
 
