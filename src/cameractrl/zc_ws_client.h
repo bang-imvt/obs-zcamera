@@ -31,6 +31,7 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <QObject>
 #include <QByteArray>
 #include <QString>
+#include <QTimer>
 
 class QUrl;
 
@@ -51,6 +52,10 @@ public:
 	void close();
 
 	bool isOpen() const;
+
+	/* Read-idle watchdog period: the channel is failed if no data (including
+	   ping/pong) arrives for this many milliseconds. */
+	void setIdleTimeoutMs(int ms);
 
 signals:
 	void connected();
@@ -78,6 +83,10 @@ private:
 	QString host_;            /* Host header value, without the port */
 	int port_ = 81;           /* notification port, for the Host header */
 	bool isTls_ = false;
+
+	QTimer handshakeTimer_;    /* bounds the wait for the HTTP 101 upgrade   */
+	QTimer idleTimer_;         /* fails a half-open channel with no traffic  */
+	int idleTimeoutMs_ = 60000; /* read-idle watchdog period (configurable)  */
 };
 
 } // namespace zc

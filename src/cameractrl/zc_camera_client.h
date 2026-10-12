@@ -98,6 +98,10 @@ public:
 	void ptzHome();
 	/* Full PTZ state: current pan/tilt, flip, range limit (+ detail=y). */
 	void ptzQuery(bool detail, std::function<void(const QJsonObject &)> cb);
+	/* Range limit: move one corner of the head's travel box. `direct` is
+	   "upright" (pan_max/tilt_max) or "downleft" (pan_min/tilt_min); the pair is
+	   the whole corner position, exactly as the camera's own web UI sends it. */
+	void ptzLimitUpdate(const QString &direct, double pan, double tilt);
 	/* Move to an absolute (relative=0) or relative (relative=1) position. */
 	void ptzGoto(float pan, float tilt, float speed, bool relative,
 		     bool speedWithZoom);
@@ -156,7 +160,8 @@ public:
 	/* unit 0 = speed (ptz_common_speed range), 1 = time (ptz_common_time). */
 	void ptzPresetSetSpeedUnit(int index, int unit);
 	void ptzPresetSetSpeedByIndex(int index, int speed);
-	/* duration in seconds; sent on the wire as milliseconds. */
+	/* duration in seconds; the camera takes seconds on the wire (its web UI sends
+	   `preset_time = ms / 1000`). */
 	void ptzPresetSetSpeedByDuration(int index, int seconds);
 	/* Authenticated GET of a preset thumbnail; empty bytes when unavailable. */
 	void ptzPresetThumbnail(int index, std::function<void(const QByteArray &)> cb);
@@ -237,6 +242,9 @@ signals:
 	void temperatureChanged(double celsius);
 	void configChanged(const QString &key, const QString &value);
 	void afAreaChanged(double x, double y, double w, double h);
+	/* Live PTZ position from a ptzfChange notification: pan/tilt in degrees and
+	   the zoom position as a percentage, so the read-out follows the head. */
+	void ptzPositionChanged(double pan, double tilt, double zoomPercent);
 
 	/* A catalog finished loading; the settings panel rebuilds its rows. */
 	void groupRefreshed(const QString &catalog);
@@ -258,6 +266,8 @@ signals:
 	   reflects a camera that went away without the operator clicking (bug 49). */
 	void notifierStateChanged(bool live);
 	void statusMessage(const QString &msg);
+	/* Re-emitted from ZcHttpTransport for the debug panel. */
+	void requestLogged(const QString &line);
 
 private:
 	/* WS event dispatcher. */

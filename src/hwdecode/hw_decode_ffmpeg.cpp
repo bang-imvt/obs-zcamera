@@ -391,8 +391,25 @@ static bool ffmpeg_decode(struct zc_hw_decoder *dec, const uint8_t *data,
 	out->backend = f->backend;
 	out->texture = NULL;
 	out->owns_texture = false;
-	out->width = (uint32_t)(owned->width ? owned->width : f->width);
-	out->height = (uint32_t)(owned->height ? owned->height : f->height);
+	/* Report the display (crop-aware) size rather than the coded surface size:
+	   the D3D11VA pool pads the height to a macroblock multiple (1080 -> 1088)
+	   and those padding rows are not part of the picture. */
+	{
+		int dw = owned->width ? owned->width : f->width;
+		int dh = owned->height ? owned->height : f->height;
+		if (owned->crop_left || owned->crop_right)
+			dw = owned->width - (int)owned->crop_left -
+			     (int)owned->crop_right;
+		if (owned->crop_top || owned->crop_bottom)
+			dh = owned->height - (int)owned->crop_top -
+			     (int)owned->crop_bottom;
+		if (dw <= 0)
+			dw = owned->width ? owned->width : f->width;
+		if (dh <= 0)
+			dh = owned->height ? owned->height : f->height;
+		out->width = (uint32_t)dw;
+		out->height = (uint32_t)dh;
+	}
 	/* Hardware frames report AV_PIX_FMT_D3D11 / VIDEOTOOLBOX / CUDA, not the
 	   YUV format underneath. Derive VIDEO_FORMAT_P010 vs NV12 from the frames
 	   context sw_format the decoder negotiated for this surface; a software

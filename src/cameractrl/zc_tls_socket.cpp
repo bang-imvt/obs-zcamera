@@ -23,6 +23,7 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <QTimer>
 #include <QAbstractSocket>
 #include <QNetworkProxy>
+#include <QSettings>
 
 #ifdef ZC_HAVE_MBEDTLS
 #include "mbedtls/build_info.h"
@@ -31,12 +32,36 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/error.h"
+#include "mbedtls/x509_crt.h"
+#include "mbedtls/sha256.h"
 #else
 #include <QSslSocket>
 #include <QSslError>
+#include <QSslCertificate>
+#include <QCryptographicHash>
 #endif
 
 namespace zc {
+
+namespace {
+/* Trust-on-first-use pin, shared by the mbedTLS and QSslSocket backends: the
+   first certificate fingerprint seen for a host is recorded in QSettings and
+   every later connection must match. Deleting "zcamera/tls/<host>" re-trusts
+   the host. */
+bool pinMatches(const QString &host, const QString &fingerprintHex)
+{
+	if (host.isEmpty())
+		return true;
+	QSettings settings;
+	const QString key = QStringLiteral("zcamera/tls/%1").arg(host);
+	const QString pinned = settings.value(key).toString();
+	if (pinned.isEmpty()) {
+		settings.setValue(key, fingerprintHex);
+		return true;
+	}
+	return pinned.compare(fingerprintHex, Qt::CaseInsensitive) == 0;
+}
+} // namespace
 
 #ifdef ZC_HAVE_MBEDTLS
 struct ZcTlsSocket::Tls {
@@ -67,6 +92,7 @@ void ZcTlsSocket::connectToHost(const QString &host, quint16 port, bool tls,
 	/* Tear down anything left over from a previous attempt first. */
 	abort();
 	is_tls_ = tls;
+	host_ = host;
 	ready_ = false;
 	reported_ = false;
 	driving_ = false;
@@ -79,14 +105,32 @@ void ZcTlsSocket::connectToHost(const QString &host, quint16 port, bool tls,
 #else
 	if (tls) {
 		QSslSocket *ssl = new QSslSocket(this);
-		/* Cameras ship a self-signed certificate; accept it, exactly as the
-		   previous QSslSocket::VerifyNone code did. */
+		/* Cameras ship a self-signed certificate for www.z-cam.com while
+		   addressed by IP literal, so the chain can never verify: accept it
+		   (VerifyNone) and pin the fingerprint instead, in the encrypted
+		   handler below, exactly like the mbedTLS backend. */
 		ssl->setPeerVerifyMode(QSslSocket::VerifyNone);
 		connect(ssl, &QSslSocket::sslErrors, ssl,
 			[ssl]() { ssl->ignoreSslErrors(); });
-		connect(ssl, &QSslSocket::encrypted, this, [this]() {
+		connect(ssl, &QSslSocket::encrypted, this, [this, ssl]() {
 			if (ready_)
 				return;
+			/* Trust on first use: a TLS peer must present a certificate and
+			   it must match the one recorded for this host (see
+			   pinMatches). */
+			const QSslCertificate cert = ssl->peerCertificate();
+			if (cert.isNull()) {
+				fail(QStringLiteral(
+				    "certificate error: camera presented no certificate"));
+				return;
+			}
+			const QString fp = QString::fromLatin1(
+			    cert.digest(QCryptographicHash::Sha256).toHex());
+			if (!pinMatches(host_, fp)) {
+				fail(QStringLiteral("certificate error: camera "
+						    "certificate changed since first pairing"));
+				return;
+			}
 			ready_ = true;
 			stopTimer();
 			emit connected();
@@ -305,6 +349,15 @@ void ZcTlsSocket::driveTls()
 		}
 		ready_ = true;
 		became_ready = true;
+		/* The camera's certificate is self-signed, so a chain check can never
+		   succeed; pin its fingerprint instead (trust on first use) so a later
+		   MITM on the LAN cannot silently relay the Digest challenge. */
+		if (!pinPeerCertificate()) {
+			driving_ = false;
+			fail(QStringLiteral("certificate error: camera certificate "
+					    "changed since first pairing"));
+			return;
+		}
 	}
 
 	for (;;) {
@@ -446,6 +499,28 @@ int ZcTlsSocket::bioRecv(void *ctx, unsigned char *buf, size_t len)
 	if (n == 0)
 		return MBEDTLS_ERR_SSL_WANT_READ;
 	return (int)n;
+}
+
+/* Trust on first use. The camera presents a self-signed certificate for
+   www.z-cam.com while addressed by IP literal, so the chain can never verify;
+   MBEDTLS_SSL_VERIFY_NONE stays, but the certificate's SHA-256 fingerprint is
+   recorded per host on first connection and every later connection must match.
+   A changed certificate (a plausible LAN MITM) aborts the channel. Pins live in
+   QSettings under "zcamera/tls/<host>"; deleting that key re-trusts the host. */
+bool ZcTlsSocket::pinPeerCertificate()
+{
+	if (!tls_ || host_.isEmpty())
+		return true;
+	const mbedtls_x509_crt *crt = mbedtls_ssl_get_peer_cert(&tls_->ssl);
+	if (!crt || !crt->raw.p || crt->raw.len == 0)
+		return false; /* no peer certificate: a TLS peer must present one */
+	unsigned char digest[32];
+	if (mbedtls_sha256(crt->raw.p, crt->raw.len, digest, 0) != 0)
+		return true;
+	const QString fp = QString::fromLatin1(
+	    QByteArray(reinterpret_cast<const char *>(digest), sizeof(digest))
+		.toHex());
+	return pinMatches(host_, fp);
 }
 #endif /* ZC_HAVE_MBEDTLS */
 

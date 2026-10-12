@@ -9,16 +9,22 @@ project(${_name} VERSION ${_version})
 
 set(CMAKE_COMPILE_WARNING_AS_ERROR OFF)
 
+# obs-frontend-api and Qt are mandatory for this plugin: the sources include and
+# use them unconditionally (no #ifdef guards), so a "false" value would not even
+# link. They stay plain variables rather than option()s so the build does not
+# advertise a configuration that cannot be produced.
 set(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" ON)
 set(ENABLE_QT "Use Qt functionality" ON)
 
-# Zero-copy hardware decode + camera-control dock
-set(ENABLE_ZERO_COPY "Build zero-copy hardware decode backends" ON)
-set(ENABLE_CAMERA_CONTROL "Build the embedded camera-control dock" ON)
+# Zero-copy hardware decode + camera-control dock. These are real options so a
+# -D/preset cache entry (e.g. -DENABLE_SW_DECODE=OFF) is honored instead of being
+# silently shadowed by a normal set().
+option(ENABLE_ZERO_COPY "Build zero-copy hardware decode backends" ON)
+option(ENABLE_CAMERA_CONTROL "Build the embedded camera-control dock" ON)
 # FFmpeg is NOT required for hardware decode (native NVDEC/D3D11VA/VideoToolbox).
 # It is used only as a software-decode fallback when no hardware path is
 # available.
-set(ENABLE_SW_DECODE "Software decode fallback via FFmpeg" ON)
+option(ENABLE_SW_DECODE "Software decode fallback via FFmpeg" ON)
 # The dock's request-log panel and its "Debug" button are a development aid;
 # they are left out of release builds unless this is switched on.
 option(ZC_ENABLE_DEBUG_PANEL "Show the control dock's debug log panel" OFF)
@@ -271,39 +277,6 @@ else()
   endif()
 endif()
 
-# CPack configuration
-set(CPACK_PACKAGE_NAME "${_name}")
-set(CPACK_PACKAGE_VENDOR "")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "ZCAM camera source with zero-copy hardware decode for OBS Studio")
-set(CPACK_PACKAGE_VERSION ${CMAKE_PROJECT_VERSION})
-set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}")
-set(CPACK_PACKAGE_INSTALL_DIRECTORY "")
-set(CPACK_OUTPUT_FILE_PREFIX "${CMAKE_BINARY_DIR}/package")
-set(CPACK_PACKAGING_INSTALL_PREFIX "")
-set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
-set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS "")
-set(CMAKE_INSTALL_UCRT_LIBRARIES FALSE)
-set(CMAKE_INSTALL_OPENMP_LIBRARIES FALSE)
-set(CMAKE_INSTALL_MFC_LIBRARIES FALSE)
-set(CPACK_INSTALL_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/cmake_install_post.cmake")
-macro(InstallRequiredSystemLibraries)
-  # Empty override to prevent any runtime libraries installation
-endmacro()
-
-add_custom_target(clean_package
-  COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_BINARY_DIR}/cmake_install_post.cmake"
-  COMMENT "Cleaning up package..."
-)
-set_target_properties(clean_package PROPERTIES FOLDER "Packaging")
-if(TARGET package)
-  add_dependencies(package clean_package)
-endif()
-
-set(CPACK_COMPONENTS_ALL plugin)
-set(CPACK_COMPONENT_PLUGIN_DISPLAY_NAME "${_name} Plugin for OBS Studio")
-set(CPACK_COMPONENT_PLUGIN_DESCRIPTION "Enables ZCAM camera support with hardware-accelerated decoding in OBS Studio")
-set(CPACK_COMPONENT_PLUGIN_REQUIRED TRUE)
-
 if(WIN32)
   install(CODE [[
     file(GLOB_RECURSE runtime_dlls "${CMAKE_INSTALL_PREFIX}/bin/*.dll")
@@ -326,36 +299,6 @@ if(WIN32)
     set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION "bin/64bit")
   endif()
 endif()
-
-if(WIN32)
-  find_program(NSIS_PATH makensis)
-  if(NSIS_PATH)
-    set(CPACK_GENERATOR "ZIP;NSIS")
-  else()
-    set(CPACK_GENERATOR "ZIP")
-  endif()
-  set(CPACK_NSIS_PACKAGE_NAME "${_name}")
-  set(CPACK_NSIS_DISPLAY_NAME "${_name}")
-  set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
-  set(CPACK_NSIS_MODIFY_PATH OFF)
-  set(CPACK_NSIS_INSTALL_ROOT "$PROGRAMFILES64\\obs-studio")
-  set(CPACK_PACKAGE_INSTALL_REGISTRY_KEY "${_name}")
-  set(CPACK_NSIS_INSTALL_PREFIX "${CPACK_NSIS_INSTALL_ROOT}")
-  set(CPACK_NSIS_MUI_FINISHPAGE_RUN "obs64.exe")
-  set(CPACK_NSIS_INSTALLED_ICON_NAME "obs64.exe")
-elseif(APPLE)
-  set(CPACK_GENERATOR "DragNDrop")
-  set(CPACK_DMG_VOLUME_NAME "${_name}")
-  set(CPACK_DMG_FORMAT "UDZO")
-else()
-  set(CPACK_GENERATOR "DEB;RPM;TGZ")
-  set(CPACK_DEBIAN_PACKAGE_MAINTAINER "IMVT")
-  set(CPACK_DEBIAN_PACKAGE_SECTION "video")
-  set(CPACK_DEBIAN_PACKAGE_DEPENDS "obs-studio")
-  set(CPACK_RPM_PACKAGE_REQUIRES "obs-studio")
-endif()
-
-include(CPack)
 
 if(APPLE)
   install(

@@ -18,6 +18,7 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 */
 
 #include "zc_ws_notifier.h"
+#include "zc_http_transport.h"
 
 #include <QDebug>
 #include <QJsonDocument>
@@ -38,6 +39,11 @@ ZcWsNotifier::ZcWsNotifier(QObject *parent)
 	reconnectTimer_.setSingleShot(true);
 	connect(&reconnectTimer_, &QTimer::timeout, this,
 		&ZcWsNotifier::doConnect);
+}
+
+void ZcWsNotifier::setTransport(ZcHttpTransport *transport)
+{
+	transport_ = transport;
 }
 
 void ZcWsNotifier::start(const QString &host, bool secure,
@@ -82,13 +88,25 @@ void ZcWsNotifier::doConnect()
 		qWarning().noquote()
 			<< "[obs-zcamera] notifications connecting:" << url.toString();
 
-	/* The upgrade carries Digest Authorization, x-auth-token and the
-	   session cookie, supplied by the HTTP transport. */
-	socket_.open(url, extraHeaders_);
+	/* The upgrade carries Digest Authorization, x-auth-token and the session
+	   cookie, supplied by the HTTP transport. Rebuild it from the CURRENT auth
+	   state on every (re)connect: the cached Authorization goes stale (login()
+	   clears it, and nc must advance per nonce), so replaying the snapshot
+	   handed to start() would leave a later reconnect unauthenticated. */
+	const QByteArray headers =
+		transport_ ? transport_->currentUpgradeHeaderBlock() : extraHeaders_;
+	socket_.open(url, headers);
 }
 
 void ZcWsNotifier::onConnected()
 {
+	/* A dial that was in flight when stop() ran can still emit connected()
+	   once it completes; it must not revive the notifier. Tear the just-opened
+	   socket down instead. */
+	if (stopped_) {
+		socket_.close();
+		return;
+	}
 	live_ = true;
 	retry_ = 0;
 	failureLogged_ = false;
@@ -99,6 +117,10 @@ void ZcWsNotifier::onConnected()
 
 void ZcWsNotifier::onDisconnected()
 {
+	/* stop() already reported the notifier as down and cancelled reconnects;
+	   nothing here should emit or reschedule. */
+	if (stopped_)
+		return;
 	if (live_) {
 		live_ = false;
 		qWarning().noquote() << "[obs-zcamera] notifications disconnected:"
@@ -110,6 +132,8 @@ void ZcWsNotifier::onDisconnected()
 
 void ZcWsNotifier::onTextMessage(const QString &msg)
 {
+	if (stopped_)
+		return;
 	QJsonParseError err{};
 	QJsonDocument doc = QJsonDocument::fromJson(msg.toUtf8(), &err);
 	if (err.error != QJsonParseError::NoError || !doc.isObject())
@@ -127,6 +151,10 @@ void ZcWsNotifier::onTextMessage(const QString &msg)
 
 void ZcWsNotifier::onSocketError(const QString &error)
 {
+	/* A stop()ped notifier must not log, emit or reschedule — an error can
+	   still surface from a dial that was in flight when stop() ran. */
+	if (stopped_)
+		return;
 	/* Backoff and reconnect. Never issue camera commands during recovery. */
 	/* Once per failure streak: a camera that stays off would otherwise put a
 	   line in the log at every backoff interval. */
@@ -146,8 +174,10 @@ void ZcWsNotifier::scheduleReconnect()
 	   would otherwise fire and re-open the socket. */
 	if (host_.isEmpty() || stopped_)
 		return;
-	/* Escalating backoff: 1s, 2s, 4s, ... capped at 10s. */
-	int delayMs = (retry_ < 5) ? (1000 << retry_) : 10000;
+	/* Escalating backoff, a true capped exponential: 1s, 2s, 4s, 8s, then 10s.
+	   A raw `1000 << retry_` kept doubling past the cap (16 s at retry 4) and
+	   would overflow once the counter reached the int bit width. */
+	const int delayMs = (retry_ >= 4) ? 10000 : (1000 << retry_);
 	retry_++;
 	reconnectTimer_.start(delayMs);
 }

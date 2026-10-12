@@ -105,7 +105,6 @@ static void release_frame_direct(struct zc_decoded_frame *frame)
 #define PROP_SOURCE_IP "zc_source_ip"
 #define PROP_DECODE_BACKEND "zc_decode_backend"
 #define PROP_LOW_NOISE "zc_low_noise"
-#define PROP_BITRATE "zc_bitrate"
 #define PROP_WAIT_I_FRAME "zc_wait_i_frame"
 #define PROP_SYNC_MODE "zc_sync_mode"
 #define PROP_LED_TALLY "zc_led_tally"
@@ -120,6 +119,19 @@ static void release_frame_direct(struct zc_decoded_frame *frame)
 #define ZC_STALL_TIMEOUT_MS 10000
 
 namespace zc {
+
+/* RAII guard for a graphics section. obs_enter_graphics()/obs_leave_graphics()
+   are ref-counted and safe to nest, so this is correct whether or not the
+   caller (libobs's render loop) already entered the context. Holding it across
+   the whole of videoRender() makes the render thread own the graphics context
+   for the entire function, which is what stops it from deadlocking against the
+   receive thread's graphics -> decoderMutex_ order. */
+struct GraphicsScope {
+	GraphicsScope() { obs_enter_graphics(); }
+	~GraphicsScope() { obs_leave_graphics(); }
+	GraphicsScope(const GraphicsScope &) = delete;
+	GraphicsScope &operator=(const GraphicsScope &) = delete;
+};
 
 class ZcSspSource {
 public:
@@ -199,7 +211,6 @@ private:
 	int metaW_ = 0, metaH_ = 0;
 
 	/* Stream settings. */
-	int bitrate_ = 0;
 	int syncMode_ = SYNC_INTERNAL;
 	bool waitIFrame_ = false;
 	bool lowNoise_ = false;
@@ -212,10 +223,17 @@ private:
 	std::atomic<bool> iFrameShown_{false};
 	std::mutex lifecycleMutex_;
 	std::thread reconnectThread_;
+	/* Serializes join()/reassign of reconnectThread_ between stop() (OBS thread)
+	   and onDisconnected() (the graphics thread, via watchdog()): a concurrent
+	   double-join, or assigning over a still-joinable thread, is undefined
+	   behaviour (and a joinable reassign calls std::terminate()). */
+	std::mutex reconnectMutex_;
 	std::atomic<bool> reconnectJoined_{true};
 	std::mutex cvMutex_;
 	std::condition_variable cv_;
-	bool stopping_ = false;
+	/* Written by stop() under cvMutex_ and read by the reconnect thread both
+	   under that lock and outside it, so it must be atomic. */
+	std::atomic<bool> stopping_{false};
 
 	/* Liveness timestamps for watchdog(). Written by the receive thread (and
 	   start()), read by the graphics thread; both are plain nanosecond stamps,
@@ -321,6 +339,70 @@ ZcSspSource::~ZcSspSource()
 	obs_leave_graphics();
 }
 
+/* Source-IP validation (bug list "no IP format validation on the source-IP
+   box"). Accepts a dotted-quad IPv4 address or a DNS-style host name; anything
+   else (empty labels, spaces, a pasted URL) is rejected so a typo cannot be
+   applied and left behind as a permanently black source. */
+static bool isValidHostAddress(const std::string &host)
+{
+	if (host.empty() || host.size() > 253)
+		return false;
+
+	/* Dotted-quad IPv4: exactly four 0..255 octets. */
+	bool quad = true;
+	{
+		size_t i = 0;
+		int octets = 0;
+		while (i <= host.size()) {
+			size_t j = host.find('.', i);
+			if (j == std::string::npos)
+				j = host.size();
+			if (j == i || j - i > 3) {
+				quad = false;
+				break;
+			}
+			int v = 0;
+			for (size_t k = i; k < j; ++k) {
+				if (host[k] < '0' || host[k] > '9') {
+					quad = false;
+					break;
+				}
+				v = v * 10 + (host[k] - '0');
+			}
+			if (!quad || v > 255)
+				break;
+			++octets;
+			if (j == host.size())
+				break;
+			i = j + 1;
+		}
+		if (quad && octets == 4)
+			return true;
+	}
+
+	/* Host name: letters, digits, '-' and '.', no empty label and no leading or
+	   trailing separator. */
+	if (host.front() == '.' || host.back() == '.' || host.front() == '-' ||
+	    host.back() == '-')
+		return false;
+	bool prevDot = false;
+	for (char c : host) {
+		if (c == '.') {
+			if (prevDot)
+				return false;
+			prevDot = true;
+			continue;
+		}
+		const bool alnum = (c >= 'a' && c <= 'z') ||
+				   (c >= 'A' && c <= 'Z') ||
+				   (c >= '0' && c <= '9');
+		if (!alnum && c != '-')
+			return false;
+		prevDot = false;
+	}
+	return true;
+}
+
 /* Sources added from the dock keep their address only in their own name
    ("ZCamera <ip>", spec §1 L3). A scene collection saved before
    zc_source_getdefaults() stopped clobbering create-time settings holds an
@@ -340,18 +422,50 @@ static std::string ipFromSourceName(obs_source_t *source)
 	if (full.size() <= prefix.size() ||
 	    full.compare(0, prefix.size(), prefix) != 0)
 		return {};
-	return full.substr(prefix.size());
+	const std::string candidate = full.substr(prefix.size());
+	return isValidHostAddress(candidate) ? candidate : std::string();
+}
+
+/* The dock names its sources "ZCamera <ip>", and the rail keys both presence and
+   "already added" off that name. A source the operator configured from OBS's own
+   Properties dialog keeps the default "ZCamera" name, so the rail cannot match it
+   to the IP in its settings, and "Restore Defaults" then wipes the address with
+   nothing left to recover it from (bug list: "source name is not synced to
+   ZCamera + IP"). Adopt the convention as soon as the address is known. Only the
+   bare default is renamed: a name that already carries an address (or a
+   duplicate OBS made unique) is left alone, so this can never churn. */
+static void syncSourceNameToIp(obs_source_t *source, const std::string &ip)
+{
+	if (!source || ip.empty())
+		return;
+	const char *cur = obs_source_get_name(source);
+	if (!cur || std::string(cur) != "ZCamera")
+		return;
+	const std::string want = "ZCamera " + ip;
+	obs_source_set_name(source, want.c_str());
 }
 
 void ZcSspSource::update(obs_data_t *settings)
 {
 	std::string ip = obs_data_get_string(settings, PROP_SOURCE_IP);
+	/* Refuse a syntactically invalid address outright: the source-IP box has no
+	   validation of its own, and an accepted typo would otherwise be applied and
+	   surface as a black source (bug list "source IP input has no validation"). */
+	if (!ip.empty() && !isValidHostAddress(ip)) {
+		blog(LOG_WARNING,
+		     "[obs-zcamera] ignoring invalid source IP '%s'", ip.c_str());
+		ip.clear();
+	}
 	/* A source saved with an empty address recovers it from its own name, so a
 	   scene collection from before the get_defaults fix still renders. Applied
 	   before the comparison below, so re-applying unchanged settings is still a
 	   no-op and does not restart a healthy stream. */
 	if (ip.empty())
 		ip = ipFromSourceName(source_);
+	/* Adopt the "ZCamera <ip>" convention when the address was typed into the
+	   Properties dialog (see the helper). Done before the early return so the
+	   name is fixed even when the pipeline settings did not change. */
+	syncSourceNameToIp(source_, ip);
 	enum zc_hw_backend backend = (enum zc_hw_backend)obs_data_get_int(
 		settings, PROP_DECODE_BACKEND);
 	/* CUDA/NVDEC is no longer offered in the UI (it renders green in OBS), but
@@ -360,13 +474,12 @@ void ZcSspSource::update(obs_data_t *settings)
 	   re-enabled silently from an old profile. */
 	if (backend == ZC_HW_CUDA)
 		backend = ZC_HW_AUTO;
-	int bitrate = (int)obs_data_get_int(settings, PROP_BITRATE);
 	int syncMode = (int)obs_data_get_int(settings, PROP_SYNC_MODE);
 	bool waitI = obs_data_get_bool(settings, PROP_WAIT_I_FRAME);
 	bool lowNoise = obs_data_get_bool(settings, PROP_LOW_NOISE);
 
 	bool changed = (ip != ip_) || (backend != requestedBackend_) ||
-		       (bitrate != bitrate_) || (syncMode != syncMode_) ||
+		       (syncMode != syncMode_) ||
 		       (waitI != waitIFrame_) || (lowNoise != lowNoise_);
 	if (!changed)
 		return;
@@ -377,7 +490,6 @@ void ZcSspSource::update(obs_data_t *settings)
 		std::lock_guard<std::mutex> lock(decoderMutex_);
 		requestedBackend_ = backend;
 	}
-	bitrate_ = bitrate;
 	syncMode_ = syncMode;
 	waitIFrame_ = waitI;
 	lowNoise_ = lowNoise;
@@ -435,7 +547,7 @@ void ZcSspSource::start()
 		stopping_ = false;
 	}
 
-	client_ = std::make_shared<SSPClientIso>(ip_, (uint32_t)(bitrate_ * 1024));
+	client_ = std::make_shared<SSPClientIso>(ip_);
 
 	/* Start the watchdog's stall clock for this connection attempt. */
 	const uint64_t now = os_gettime_ns();
@@ -489,10 +601,14 @@ void ZcSspSource::stop()
 
 	/* Join the reconnect thread so it never touches freed `this`. Done with
 	   lifecycleMutex_ released: that thread may be inside reconnectNow(),
-	   which takes it. */
-	if (reconnectThread_.joinable() &&
-	    reconnectThread_.get_id() != std::this_thread::get_id()) {
-		reconnectThread_.join();
+	   which takes it. reconnectMutex_ serializes this against onDisconnected()
+	   (graphics thread) doing the same join/reassign. */
+	{
+		std::lock_guard<std::mutex> lk(reconnectMutex_);
+		if (reconnectThread_.joinable() &&
+		    reconnectThread_.get_id() != std::this_thread::get_id()) {
+			reconnectThread_.join();
+		}
 		reconnectJoined_ = true;
 	}
 	/* A reconnect that ran while we were stopping may have re-created the
@@ -725,6 +841,10 @@ void ZcSspSource::onDisconnected()
 	bool expected = true;
 	if (!reconnectJoined_.compare_exchange_strong(expected, false))
 		return;
+	/* Serialize join/reassign with stop(), which does the same from the OBS
+	   thread; without this the two can join or reassign reconnectThread_
+	   concurrently (UB, and a joinable reassign calls std::terminate()). */
+	std::lock_guard<std::mutex> lk(reconnectMutex_);
 	/* A previous reconnect thread is only joined by stop(), so by the time a
 	   *second* disconnect arrives the finished thread is still joinable.
 	   Assigning a new std::thread over a joinable one calls std::terminate(),
@@ -746,7 +866,7 @@ void ZcSspSource::reconnectThread()
 			std::unique_lock<std::mutex> lk(cvMutex_);
 			if (cv_.wait_for(lk,
 					 std::chrono::milliseconds(delays[attempt % 4]),
-					 [this] { return stopping_; }))
+					 [this] { return stopping_.load(); }))
 				break; /* stop() requested */
 		}
 		if (!running_ || stopping_)
@@ -1228,6 +1348,11 @@ void ZcSspSource::videoRender(gs_effect_t *effect)
 	gs_texture_t *tex = NULL;
 	bool fallbackToSoftware = false;
 	int frameW = 0, frameH = 0;
+	/* Own the graphics context for the whole render, BEFORE frameMutex_ and
+	   decoderMutex_. The receive thread takes graphics -> decoderMutex_ inside
+	   decode(); taking decoderMutex_ first here and entering graphics later
+	   (inside import()) was the exact opposite order and deadlocked the source. */
+	GraphicsScope gfx;
 	/* Runs before the early returns below, so a stream that never produces a
 	   frame is noticed too. */
 	watchdog();
@@ -1431,7 +1556,6 @@ static void zc_source_getdefaults(obs_data_t *settings)
 	   empty one and never connect. */
 	obs_data_set_default_string(settings, PROP_SOURCE_IP, "");
 	obs_data_set_default_int(settings, PROP_DECODE_BACKEND, ZC_HW_AUTO);
-	obs_data_set_default_int(settings, PROP_BITRATE, 20);
 	obs_data_set_default_int(settings, PROP_SYNC_MODE, SYNC_INTERNAL);
 	obs_data_set_default_bool(settings, PROP_WAIT_I_FRAME, false);
 	obs_data_set_default_bool(settings, PROP_LED_TALLY, false);
@@ -1529,9 +1653,12 @@ struct obs_source_info create_ssp_source_info()
 	info.update = zc::zc_source_update;
 	info.activate = zc::zc_source_activate;
 	info.deactivate = zc::zc_source_deactivate;
-#ifdef __APPLE__
+	/* video_tick drives the stall watchdog on every platform, so a hidden or
+	   unrendered source still notices a dead stream; on macOS it is the only
+	   path (the source is ASYNC_VIDEO there), on Windows it supplements
+	   video_render (watchdog() is idempotent). */
 	info.video_tick = zc::zc_source_video_tick;
-#else
+#ifndef __APPLE__
 	info.video_render = zc::zc_source_video_render;
 #endif
 	info.get_width = zc::zc_source_get_width;

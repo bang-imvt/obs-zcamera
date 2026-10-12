@@ -218,6 +218,25 @@ public:
 		sock_->connectToHost(host, port, tls, timeoutMs);
 	}
 
+	/* Give up on this exchange without delivering a result. The nested-loop
+	   watchdogs (requestSync/loginSync) call this when they time out and are
+	   about to return: without it a late completion would run their `[&]`
+	   callback against stack variables that no longer exist. After abort() no
+	   callback is ever delivered. */
+	void abort()
+	{
+		if (finished_)
+			return;
+		finished_ = true;
+		if (tt_)
+			tt_->stop();
+		if (sock_)
+			sock_->disconnectFromHost();
+		done_ = nullptr;
+		cont_ = nullptr;
+		deleteLater();
+	}
+
 private:
 	void evaluate()
 	{
@@ -547,7 +566,7 @@ void ZcHttpTransport::loginSync(RawHttp &out, bool &challenged, bool &continued,
 	QEventLoop loop;
 	bool done = false;
 
-	new HttpExchange(
+	HttpExchange *ex = new HttpExchange(
 		host_, (quint16)port_, tls_, buildLoginRequest(false), timeoutMs,
 		[&](int status, const QByteArray &headers, const QByteArray &body,
 		    const QString &error, bool timedOut) {
@@ -577,9 +596,27 @@ void ZcHttpTransport::loginSync(RawHttp &out, bool &challenged, bool &continued,
 		});
 	/* A transport error can be reported straight out of the constructor, before
 	   exec(); quit() before exec() is a no-op, so only enter the loop when the
-	   result is not already in. */
-	if (!done)
+	   result is not already in. As in requestSync(), guard against the exchange
+	   being destroyed mid-wait so the UI thread can never hang here. The guard
+	   must outlast BOTH legs: complete_() restarts the exchange's own timeout for
+	   the authenticated retry, so a legitimate handshake can take up to
+	   2*timeoutMs. Firing at timeoutMs+2000 would cut that short and return while
+	   the exchange is still live — its callback would then write to this dead
+	   stack frame (and quit() a destroyed QEventLoop). When it does fire we abort
+	   the exchange first so no late callback can ever run. */
+	if (!done) {
+		QTimer guard;
+		guard.setSingleShot(true);
+		connect(&guard, &QTimer::timeout, &loop, [&loop, ex]() {
+			ex->abort();
+			loop.quit();
+		});
+		guard.start(timeoutMs > 0 ? 2 * timeoutMs + 2000 : 30000);
 		loop.exec();
+		guard.stop();
+		if (!done)
+			out.error = QStringLiteral("request aborted");
+	}
 }
 
 QByteArray ZcHttpTransport::upgradeHeaderBlock() const
@@ -594,6 +631,18 @@ QByteArray ZcHttpTransport::upgradeHeaderBlock() const
 	if (!x_auth_token_.isEmpty())
 		h += "x-auth-token: " + x_auth_token_ + "\r\n";
 	return h;
+}
+
+QByteArray ZcHttpTransport::currentUpgradeHeaderBlock()
+{
+	/* Refresh the Digest Authorization for the upgrade request line (GET /)
+	   from the live nonce, so a reconnect never replays a stale nc. A camera
+	   whose session is cookie/token based has no nonce and needs none.
+	   buildAuthorization() advances nc, so each (re)connect gets a fresh
+	   response. */
+	if (!nonce_.isEmpty() && !creds_.username.isEmpty())
+		buildAuthorization("GET", "/");
+	return upgradeHeaderBlock();
 }
 
 void ZcHttpTransport::setCredentials(const ZcCredentials &cred)
@@ -696,11 +745,14 @@ QByteArray ZcHttpTransport::buildRequest(const char *method,
 void ZcHttpTransport::dispatch(const char *method,
 			       const QString &pathWithQuery,
 			       const QByteArray &body, int timeoutMs,
-			       ExchangeDone done)
+			       ExchangeDone done, ExchangeCancel *cancel)
 {
-	new HttpExchange(host_, (quint16)port_, tls_,
-			 buildRequest(method, pathWithQuery, body), timeoutMs,
-			 std::move(done), this);
+	HttpExchange *ex =
+		new HttpExchange(host_, (quint16)port_, tls_,
+				 buildRequest(method, pathWithQuery, body), timeoutMs,
+				 std::move(done), this);
+	if (cancel)
+		*cancel = [ex]() { ex->abort(); };
 }
 
 QByteArray ZcHttpTransport::buildLoginRequest(bool withAuth) const
@@ -729,6 +781,7 @@ bool ZcHttpTransport::requestSync(const char *method,
 {
 	QEventLoop loop;
 	bool done = false;
+	ExchangeCancel cancel;
 	dispatch(method, pathWithQuery, body, timeoutMs,
 		 [&](int status, const QByteArray &headers,
 		     const QByteArray &rspBody, const QString &error,
@@ -740,12 +793,36 @@ bool ZcHttpTransport::requestSync(const char *method,
 			 out.timedOut = timedOut;
 			 done = true;
 			 loop.quit();
-		 });
+		 },
+		 &cancel);
 	/* A failure can be reported synchronously from dispatch() — an immediate
 	   socket error is emitted right out of connectToHost(). quit() before
 	   exec() is a no-op, so entering the loop then would block forever. */
-	if (!done)
+	if (!done) {
+		/* Watchdog escape hatch. The done callback above is the ONLY quit()
+		   trigger, and it belongs to an HttpExchange that is a child of this
+		   transport: if the client is destroyed while this nested loop is
+		   pumping (OBS shutdown, or dock teardown that runs inside it) the
+		   exchange and its timeout timer are deleted, quit() never fires, and
+		   the UI thread hangs here for good. This guard timer lives on the
+		   stack, so it survives that teardown and always ends the wait. When it
+		   does fire the exchange is aborted first, so a late completion can
+		   never run the callback above against this now-dead stack frame. */
+		QTimer guard;
+		guard.setSingleShot(true);
+		connect(&guard, &QTimer::timeout, &loop, [&loop, &cancel]() {
+			if (cancel)
+				cancel();
+			loop.quit();
+		});
+		guard.start(timeoutMs > 0 ? timeoutMs + 2000 : 30000);
 		loop.exec();
+		guard.stop();
+		if (!done) {
+			out.timedOut = true;
+			out.error = QStringLiteral("request aborted");
+		}
+	}
 	return out.error.isEmpty();
 }
 

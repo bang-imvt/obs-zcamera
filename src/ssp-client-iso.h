@@ -39,7 +39,7 @@ class SSPClientIso : public QObject {
 	Q_OBJECT
 
 public:
-	SSPClientIso(const std::string &ip, uint32_t bufferSize);
+	SSPClientIso(const std::string &ip);
 	~SSPClientIso();
 	virtual void
 	setOnRecvBufferFullCallback(const imf::OnRecvBufferFullCallback &cb);
@@ -73,12 +73,15 @@ private:
 	std::mutex statusLock;
 	std::atomic<bool> running;
 	std::string ip;
-	uint32_t bufferSize;
 	QString ssp_connector_path;
 
 	os_process_pipe_t *pipe;
 
 	std::thread worker;
+	/* Drains the connector's stderr. Kept joinable (never detached) so Stop()
+	   can join it BEFORE the pipe is destroyed — a detached thread blocked in
+	   ReadFile on the pipe would otherwise be freed out from under itself. */
+	std::thread stderrWorker;
 
 	imf::OnRecvBufferFullCallback bufferFullCallback;
 	imf::OnH264DataCallback h264DataCallback;

@@ -12,7 +12,8 @@ unchanged). It adds two things on top:
 1. **Zero-copy hardware decode** — decoded frames stay on the GPU and are drawn
    by OBS directly (no `av_hwframe_transfer_data` GPU→CPU copy, no CPU→GPU
    upload):
-   - Windows: CUDA (NVDEC) → shared D3D11 texture → OBS `gs_texture`.
+   - Windows: D3D11VA (the `Auto` default) → shared BGRA texture → OBS
+     `gs_texture`; CUDA/NVDEC is available as an explicit backend choice.
    - macOS: VideoToolbox → IOSurface → OBS `gs_texture`.
    - Software CPU fallback when no hardware path is available.
 2. **Camera-control dock** — a native OBS panel with a camera rail, a settings
@@ -24,10 +25,11 @@ unchanged). It adds two things on top:
 
 ## Status
 
-Scaffolding and the first implementation slice are in place (see
-[`doc/progress.md`](doc/progress.md)). The zero-copy backends currently fall
-back to Software; the GPU interop and the source `video_render` integration are
-the next implementation milestones (see [`doc/plan.md`](doc/plan.md)).
+The zero-copy Windows path (D3D11VA) is implemented, tested end-to-end and
+verified inside real OBS; the CUDA backend is verified standalone and the macOS
+VideoToolbox path is compile-only. The source falls back to Software decode when
+no hardware frame can be imported. See [`doc/progress.md`](doc/progress.md) for
+the living status and [`doc/plan.md`](doc/plan.md) for the roadmap.
 
 ## Documentation
 
@@ -43,9 +45,9 @@ the next implementation milestones (see [`doc/plan.md`](doc/plan.md)).
 - **SSP source** — add a ZCAM camera as an OBS input source (`ssp_source`).
 - **Automatic camera discovery** via mDNS (`_eagle._tcp`), plus manual IP entry.
 - **Low-latency streaming** from SSP cameras (H.264/HEVC + AAC).
-- **Zero-copy hardware decode** (in progress): NVDEC/D3D11VA on Windows,
-  VideoToolbox on macOS.
-- **Camera control dock** (in progress): a per-camera rail whose rows carry their
+- **Zero-copy hardware decode**: D3D11VA (Auto) / NVDEC on Windows,
+  VideoToolbox on macOS, with a Software fallback.
+- **Camera control dock**: a per-camera rail whose rows carry their
   own add/remove chip, a settings pane with the stream controls pinned on top, a
   PTZ pad with presets and traces, and a sanitized debug panel.
 - **Automatic decode backend**: the source resolves the best hardware path
@@ -69,17 +71,22 @@ cmake -S . -B build --preset windows-x64
 cmake --build build --config RelWithDebInfo
 ```
 
-macOS uses the Xcode generator with universal binaries; see `CMakePresets.json`.
-FFmpeg (`avcodec`, `avutil`) and Qt6 (Widgets, Network, WebSockets) are required.
+macOS uses the Xcode generator; see `CMakePresets.json`.
+FFmpeg (`avcodec`, `avutil`, `swscale`, `swresample`) and Qt6 (Widgets, Network)
+are required. WebSocket notifications use a small in-tree RFC 6455 client, so
+Qt's WebSockets module is **not** needed.
 
 ## Manual install
 
 #### Windows
-1. Extract the ZIP to your OBS Studio installation directory.
-2. Files land at:
-   - Plugin DLL: `obs-plugins/64bit/obs-zcamera.dll`
-   - `ssp-connector.exe` + `libssp.dll`: `obs-plugins/64bit/`
-   - Data: `data/obs-plugins/obs-zcamera/*`
+Run `dist\obs-zcamera-<version>-setup.exe` (built by `installer.nsi`), or extract
+the ZIP produced by `package.ps1`. The ZIP is laid out for OBS's **plugin
+directory**, so copy it into
+`%ProgramData%\obs-studio\plugins\obs-zcamera\` (machine-wide, no admin needed)
+or `%APPDATA%\obs-studio\plugins\obs-zcamera\` (per-user):
+   - Plugin DLL + `ssp-connector.exe` + `libssp.dll` + FFmpeg DLLs:
+     `obs-zcamera\bin\64bit\`
+   - Locale data: `obs-zcamera\data\locale\*`
 
 #### macOS
 1. Extract the package.

@@ -19,6 +19,8 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 
 #include "zc_debug_panel.h"
 
+#include <obs-module.h>
+
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QDateTime>
@@ -35,7 +37,7 @@ ZcDebugPanel::ZcDebugPanel(QWidget *parent) : QWidget(parent)
 	log_->setMaximumBlockCount(2000); /* bounded memory */
 
 	auto *btnRow = new QHBoxLayout;
-	clearBtn_ = new QPushButton("Clear", this);
+	clearBtn_ = new QPushButton(obs_module_text("ZCameraPlugin.Debug.Clear"), this);
 	connect(clearBtn_, &QPushButton::clicked, this, &ZcDebugPanel::clearLog);
 	btnRow->addStretch();
 	btnRow->addWidget(clearBtn_);

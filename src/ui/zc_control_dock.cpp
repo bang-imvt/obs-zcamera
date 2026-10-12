@@ -93,8 +93,12 @@ static QString ztr(const char *key)
 static QString settingLabel(const QString &key)
 {
 	/* Readable labels following ZCamGuiOpen's settings-schema labels; a key
-	   without an entry shows its raw id. */
+	   without an entry shows its raw id. The names are kept aligned with the
+	   camera's own web UI (bug list "unify setting names"), and every schema key
+	   has an entry in the .ini so the row is translated, not a raw camera id
+	   (bug list "settings not translated to Chinese"). */
 	static const QHash<QString, const char *> kLabels = {
+		/* exposure */
 		{QStringLiteral("http_auth"), "ZCameraPlugin.Setting.HttpAuth"},
 		{QStringLiteral("https_on"), "ZCameraPlugin.Setting.HttpsOn"},
 		{QStringLiteral("ev"), "ZCameraPlugin.Setting.Ev"},
@@ -116,6 +120,73 @@ static QString settingLabel(const QString &key)
 		{QStringLiteral("lock_ae_in_rec"), "ZCameraPlugin.Setting.LockAeInRec"},
 		{QStringLiteral("ae_speed"), "ZCameraPlugin.Setting.AeSpeed"},
 		{QStringLiteral("bl_comp"), "ZCameraPlugin.Setting.BlComp"},
+		/* white balance */
+		{QStringLiteral("wb"), "ZCameraPlugin.Setting.Wb"},
+		{QStringLiteral("wb_priority"), "ZCameraPlugin.Setting.WbPriority"},
+		{QStringLiteral("lock_awb_in_rec"),
+		 "ZCameraPlugin.Setting.LockAwbInRec"},
+		{QStringLiteral("mwb"), "ZCameraPlugin.Setting.Mwb"},
+		{QStringLiteral("tint"), "ZCameraPlugin.Setting.Tint"},
+		{QStringLiteral("mwb_r"), "ZCameraPlugin.Setting.MwbR"},
+		{QStringLiteral("mwb_g"), "ZCameraPlugin.Setting.MwbG"},
+		{QStringLiteral("mwb_b"), "ZCameraPlugin.Setting.MwbB"},
+		/* lens / focus */
+		{QStringLiteral("focus"), "ZCameraPlugin.Setting.Focus"},
+		{QStringLiteral("af_mode"), "ZCameraPlugin.Setting.AfMode"},
+		{QStringLiteral("caf"), "ZCameraPlugin.Setting.Caf"},
+		{QStringLiteral("caf_sens"), "ZCameraPlugin.Setting.CafSens"},
+		{QStringLiteral("af_area"), "ZCameraPlugin.Setting.AfArea"},
+		{QStringLiteral("live_caf"), "ZCameraPlugin.Setting.LiveCaf"},
+		{QStringLiteral("mf_mag"), "ZCameraPlugin.Setting.MfMag"},
+		{QStringLiteral("mf_recording"), "ZCameraPlugin.Setting.MfRecording"},
+		{QStringLiteral("af_speed"), "ZCameraPlugin.Setting.AfSpeed"},
+		{QStringLiteral("af_adjust_with_ptz"),
+		 "ZCameraPlugin.Setting.AfAdjustWithPtz"},
+		{QStringLiteral("zoom_mode"), "ZCameraPlugin.Setting.ZoomMode"},
+		{QStringLiteral("lens_focus_pos"),
+		 "ZCameraPlugin.Setting.LensFocusPos"},
+		{QStringLiteral("lens_zoom_pos"), "ZCameraPlugin.Setting.LensZoomPos"},
+		{QStringLiteral("fz_speed"), "ZCameraPlugin.Setting.FzSpeed"},
+		/* image */
+		{QStringLiteral("lut"), "ZCameraPlugin.Setting.Lut"},
+		{QStringLiteral("sharpness"), "ZCameraPlugin.Setting.Sharpness"},
+		{QStringLiteral("noise_reduction"),
+		 "ZCameraPlugin.Setting.NoiseReduction"},
+		{QStringLiteral("luma_level"), "ZCameraPlugin.Setting.LumaLevel"},
+		{QStringLiteral("brightness"), "ZCameraPlugin.Setting.Brightness"},
+		{QStringLiteral("contrast"), "ZCameraPlugin.Setting.Contrast"},
+		{QStringLiteral("saturation"), "ZCameraPlugin.Setting.Saturation"},
+		{QStringLiteral("hue"), "ZCameraPlugin.Setting.Hue"},
+		/* record */
+		{QStringLiteral("resolution"), "ZCameraPlugin.Setting.Resolution"},
+		{QStringLiteral("project_fps"), "ZCameraPlugin.Setting.ProjectFps"},
+		{QStringLiteral("vfr_ctrl"), "ZCameraPlugin.Setting.VfrCtrl"},
+		{QStringLiteral("movvfr"), "ZCameraPlugin.Setting.MovVfr"},
+		{QStringLiteral("record_file_format"),
+		 "ZCameraPlugin.Setting.RecordFileFormat"},
+		{QStringLiteral("rotation"), "ZCameraPlugin.Setting.Rotation"},
+		{QStringLiteral("split_duration"),
+		 "ZCameraPlugin.Setting.SplitDuration"},
+		{QStringLiteral("rec_fps"), "ZCameraPlugin.Setting.RecFps"},
+		{QStringLiteral("preroll"), "ZCameraPlugin.Setting.Preroll"},
+		{QStringLiteral("video_tl_interval"),
+		 "ZCameraPlugin.Setting.VideoTlInterval"},
+		{QStringLiteral("record_meta"), "ZCameraPlugin.Setting.RecordMeta"},
+		{QStringLiteral("camera_id"), "ZCameraPlugin.Setting.CameraId"},
+		{QStringLiteral("reelname"), "ZCameraPlugin.Setting.ReelName"},
+		/* video */
+		{QStringLiteral("video_encoder"),
+		 "ZCameraPlugin.Setting.VideoEncoder"},
+		{QStringLiteral("bitrate_level"), "ZCameraPlugin.Setting.BitrateLevel"},
+		{QStringLiteral("record_mode"), "ZCameraPlugin.Setting.RecordMode"},
+		{QStringLiteral("rec_proxy_file"),
+		 "ZCameraPlugin.Setting.RecProxyFile"},
+		{QStringLiteral("crop_sensor"), "ZCameraPlugin.Setting.CropSensor"},
+		{QStringLiteral("low_jello"), "ZCameraPlugin.Setting.LowJello"},
+		{QStringLiteral("photo_q"), "ZCameraPlugin.Setting.PhotoQ"},
+		{QStringLiteral("eis_on_off"), "ZCameraPlugin.Setting.EisOnOff"},
+		{QStringLiteral("vid_rot"), "ZCameraPlugin.Setting.VidRot"},
+		/* audio */
 		{QStringLiteral("primary_audio"), "ZCameraPlugin.Setting.PrimaryAudio"},
 		{QStringLiteral("audio_channel"), "ZCameraPlugin.Setting.AudioChannel"},
 		{QStringLiteral("audio_phantom_power"),
@@ -133,6 +204,28 @@ static QString settingLabel(const QString &key)
 		{QStringLiteral("audio_in_r_gain"), "ZCameraPlugin.Setting.AudioInRGain"},
 		{QStringLiteral("audio_output_gain"),
 		 "ZCameraPlugin.Setting.AudioOutputGain"},
+		/* ptz */
+		{QStringLiteral("pt_speedmode"), "ZCameraPlugin.Setting.PtSpeedmode"},
+		{QStringLiteral("ptz_flip"), "ZCameraPlugin.Setting.PtzFlip"},
+		{QStringLiteral("ptz_limit"), "ZCameraPlugin.Setting.PtzLimit"},
+		{QStringLiteral("ptz_preset_mode"),
+		 "ZCameraPlugin.Setting.PtzPresetMode"},
+		{QStringLiteral("ptz_speed_mode"),
+		 "ZCameraPlugin.Setting.PtzSpeedMode"},
+		{QStringLiteral("freeze_during_preset"),
+		 "ZCameraPlugin.Setting.FreezeDuringPreset"},
+		{QStringLiteral("pt_pwr_pos"), "ZCameraPlugin.Setting.PtPwrPos"},
+		{QStringLiteral("pt_priv_mode"), "ZCameraPlugin.Setting.PtPrivMode"},
+		{QStringLiteral("preset_adjust_speed_with_zoom"),
+		 "ZCameraPlugin.Setting.PresetAdjustSpeedWithZoom"},
+		{QStringLiteral("pt_speed_with_zoom_pos"),
+		 "ZCameraPlugin.Setting.PtSpeedWithZoomPos"},
+		{QStringLiteral("ptz_common_speed_unit"),
+		 "ZCameraPlugin.Setting.PtzCommonSpeedUnit"},
+		{QStringLiteral("ptz_common_speed"),
+		 "ZCameraPlugin.Setting.PtzCommonSpeed"},
+		{QStringLiteral("ptz_common_time"),
+		 "ZCameraPlugin.Setting.PtzCommonTime"},
 	};
 	auto it = kLabels.constFind(key);
 	if (it == kLabels.constEnd())
@@ -140,6 +233,30 @@ static QString settingLabel(const QString &key)
 	/* obs_module_text echoes the key itself when the locale has no entry. */
 	const QString text = ztr(*it);
 	return text == QLatin1String(*it) ? key : text;
+}
+
+/* Human label for a settings catalog (the sidebar's group tabs). The camera
+   exposes lowercase ids ("wb"); the locale maps each to a readable title, and
+   an id with no entry keeps its raw form, so a catalog a newer firmware adds is
+   still listed. The id itself stays in Qt::UserRole, never shown. */
+static QString catalogLabel(const QString &id)
+{
+	static const QHash<QString, const char *> kLabels = {
+		{QStringLiteral("exposure"), "ZCameraPlugin.Catalog.Exposure"},
+		{QStringLiteral("wb"), "ZCameraPlugin.Catalog.Wb"},
+		{QStringLiteral("lens"), "ZCameraPlugin.Catalog.Lens"},
+		{QStringLiteral("image"), "ZCameraPlugin.Catalog.Image"},
+		{QStringLiteral("record"), "ZCameraPlugin.Catalog.Record"},
+		{QStringLiteral("video"), "ZCameraPlugin.Catalog.Video"},
+		{QStringLiteral("audio"), "ZCameraPlugin.Catalog.Audio"},
+		{QStringLiteral("ptz"), "ZCameraPlugin.Catalog.Ptz"},
+	};
+	auto it = kLabels.constFind(id);
+	if (it == kLabels.constEnd())
+		return id;
+	/* obs_module_text echoes the key itself when the locale has no entry. */
+	const QString text = ztr(*it);
+	return text == QLatin1String(*it) ? id : text;
 }
 
 /* Small painted camera glyph so the discovery list needs no bundled asset.
@@ -426,6 +543,16 @@ void ZcCameraRail::setCameras(const QVector<ZcRailCamera> &cameras)
 	if (current == next)
 		return;
 
+	/* Remember the highlighted row and put it back after the rebuild: clear()
+	   replaces every item and would otherwise drop the operator's selection even
+	   though the same camera is still in the list. setCurrentItem() does not
+	   emit itemClicked, so this cannot re-open the camera. */
+	const QString selectedHost =
+	    list_->currentItem()
+		? list_->currentItem()->data(kHostRole).toString()
+		: QString();
+
+	QListWidgetItem *toSelect = nullptr;
 	list_->clear();
 	for (const auto &c : cameras) {
 		if (c.host.isEmpty())
@@ -436,7 +563,11 @@ void ZcCameraRail::setCameras(const QVector<ZcRailCamera> &cameras)
 		item->setData(kOfflineRole, c.offline);
 		applyRow(item);
 		list_->addItem(item);
+		if (!selectedHost.isEmpty() && c.host == selectedHost)
+			toSelect = item;
 	}
+	if (toSelect)
+		list_->setCurrentItem(toSelect);
 }
 
 /* Spec §1, L11: a row's offline state can change on a click, and rebuilding the
@@ -597,9 +728,8 @@ ZcSettingsPanel::ZcSettingsPanel(QWidget *parent) : QWidget(parent)
 	title->setStyleSheet("color:#8a9bb2;font-size:11px;letter-spacing:1px;");
 	header->addWidget(title);
 	header->addStretch(1);
-	auto *refresh = new QPushButton("Refresh", this);
-	refresh->setToolTip("Re-read the stream settings and this group from the "
-			    "camera");
+	auto *refresh = new QPushButton(ztr("ZCameraPlugin.Dock.Refresh"), this);
+	refresh->setToolTip(ztr("ZCameraPlugin.Dock.RefreshTip"));
 	refresh->setStyleSheet(
 	    "QPushButton { color:#eef2ed; background:#2b3a38; border:1px solid "
 	    "#3c514e; border-radius:4px; padding:3px 10px; font-size:11px; }"
@@ -623,6 +753,14 @@ ZcSettingsPanel::ZcSettingsPanel(QWidget *parent) : QWidget(parent)
 		promptHint_->setStyleSheet(
 		    "color:#eef2ed;background:#2b3a38;border-radius:4px;padding:8px;");
 		lp->addWidget(promptHint_);
+		/* Rejection notice: hidden until a login fails, then shown in red under
+		   the hint so a wrong user/password is reported instead of the form
+		   silently staying up (bug list "wrong credentials are not reported"). */
+		loginError_ = new QLabel(loginPage_);
+		loginError_->setWordWrap(true);
+		loginError_->setStyleSheet("color:#e58a8a;padding:0 8px;");
+		loginError_->hide();
+		lp->addWidget(loginError_);
 		/* The username/password rows (labels + inputs) + login button live in
 		   their own widget so the HTTPS notice can hide the entire form at once
 		   without leaving the column labels behind. */
@@ -687,12 +825,31 @@ ZcSettingsPanel::ZcSettingsPanel(QWidget *parent) : QWidget(parent)
 void ZcSettingsPanel::showLoginPrompt(const QString &host)
 {
 	loginHost_ = host;
+	if (loginError_)
+		loginError_->hide();
 	promptHint_->setText(ztr("ZCameraPlugin.Dock.AuthNeeded").arg(host));
 	loginFields_->show();
 	loginPage_->show();
 	subtabList_->hide();
 	rowsContainer_->hide();
 	loginUser_->setFocus();
+}
+
+/* The camera rejected the submitted credentials: show the form again with a
+   notice so the operator knows the login was tried and failed rather than the
+   click doing nothing (bug list "wrong credentials are not reported"). */
+void ZcSettingsPanel::showLoginError()
+{
+	if (loginError_) {
+		loginError_->setText(ztr("ZCameraPlugin.Dock.AuthFailed"));
+		loginError_->show();
+	}
+	loginFields_->show();
+	loginPage_->show();
+	subtabList_->hide();
+	rowsContainer_->hide();
+	loginPass_->clear();
+	loginPass_->setFocus();
 }
 
 /* HTTPS-only camera with no TLS backend: tell the operator to switch to HTTP,
@@ -761,6 +918,12 @@ void ZcSettingsPanel::writeKey(const QString &key, const QString &value)
 	if (!client_)
 		return;
 	client_->writeSetting(key, value);
+	/* Re-read only the key that changed, never the whole PTZ catalog: a catalog
+	   read comes back through groupRefreshed and rebuilds every row, which tears
+	   down the control the operator is still using. The row already shows the new
+	   value; the cache is all that needs to follow the camera. */
+	if (client_->settingGroupKeys(QLatin1String("ptz")).contains(key))
+		client_->readSetting(key, [](const ZcSettingValue &) {});
 	/* HTTPS and identity auth restart the camera's web service, and a
 	   network-type change can move it to another address: the reply never
 	   arrives and the connection drops. The dock is told to wait for the camera
@@ -853,7 +1016,7 @@ void ZcSettingsPanel::populateGroups()
 			continue;
 		if (!zc::catalogSupportedByModel(cat.id, model))
 			continue;
-		auto *item = new QListWidgetItem(cat.id, subtabList_);
+		auto *item = new QListWidgetItem(catalogLabel(cat.id), subtabList_);
 		item->setData(Qt::UserRole, cat.id);
 	}
 	/* Keep the selection when that group still exists, else fall back to the
@@ -928,6 +1091,7 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 	if (!rowLayout)
 		return;
 	clearRows(rowLayout);
+	rowWidgets_.clear();
 
 	auto addHint = [&](const QString &text) {
 		auto *hint = new QLabel(text, rowsContainer_);
@@ -937,15 +1101,15 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 	};
 
 	if (catalog.isEmpty()) {
-		addHint("Select a group to load its settings.");
+		addHint(ztr("ZCameraPlugin.Dock.SelectGroup"));
 		return;
 	}
 	if (!client_) {
-		addHint("Select a camera to load its settings.");
+		addHint(ztr("ZCameraPlugin.Dock.SelectCamera"));
 		return;
 	}
 	if (!client_->isConnected()) {
-		addHint("Not connected to a camera.");
+		addHint(ztr("ZCameraPlugin.Dock.NotConnected"));
 		return;
 	}
 
@@ -954,7 +1118,7 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 	   have this catalog (getbatch answers code -1 with no cfgs). */
 	const QStringList keys = client_->settingGroupKeys(catalog);
 	if (keys.isEmpty()) {
-		addHint("No settings available for this group.");
+		addHint(ztr("ZCameraPlugin.Dock.NoSettingsForGroup"));
 		return;
 	}
 
@@ -963,9 +1127,24 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		   under the raw id `compose_mode`); showing it here only confuses, so it
 		   is hidden (bug list "remove WDR setting"). Likewise the raw `ev` row
 		   duplicates `ev_choice` (both set EV, and editing one does not update the
-		   other); only `ev_choice` is shown (bug list "keep EV Choice"). */
+		   other); only `ev_choice` is shown (bug list "keep EV Choice"). The image
+		   group also reports `ois_mode` and `vignette`, which have no counterpart
+		   on the camera or its web UI (they only ever come back read-only), so
+		   they are hidden too (bug list "ois_mode/vignette are not on the
+		   camera"). `raw_over_hdmi` is removed from the UI on purpose: RAW has
+		   nothing to do with live streaming, and toggling it makes the camera
+		   restart its web service, which breaks the stream/audio in the plugin
+		   (bug list "remove RAW over HDMI", RD feedback). `ptz_limit` is the
+		   Range Limit status, which the PTZ tab's own Range Limit group owns
+		   (checkbox + the four edge sliders); rendering it here as a second,
+		   independent combo duplicated the control and let the two disagree
+		   (bug list "the range limit status appears twice"). */
 		if (key == QLatin1String("compose_mode") ||
-		    key == QLatin1String("ev"))
+		    key == QLatin1String("ev") ||
+		    key == QLatin1String("ois_mode") ||
+		    key == QLatin1String("vignette") ||
+		    key == QLatin1String("raw_over_hdmi") ||
+		    key == QLatin1String("ptz_limit"))
 			continue;
 		ZcSettingValue def;
 		if (!client_->settingDefinition(key, &def))
@@ -985,7 +1164,16 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 					       QLatin1String("Normal"));
 
 		auto *row = new QHBoxLayout;
-		auto *label = new QLabel(settingLabel(key), rowsContainer_);
+		/* `ptz_common_time` carries milliseconds on the wire but the camera's own
+		   web UI shows seconds; display it in seconds and convert on write, and
+		   make the unit explicit (bug list "common time unit differs from the web
+		   and no unit is shown"). */
+		const bool timeInSeconds = key == QLatin1String("ptz_common_time");
+		const double scale = timeInSeconds ? 1000.0 : 1.0;
+		auto *label = new QLabel(
+		    timeInSeconds ? settingLabel(key) + QStringLiteral(" (s)")
+				  : settingLabel(key),
+		    rowsContainer_);
 		label->setMinimumWidth(170);
 		label->setStyleSheet("color:#eef2ed;");
 		/* The camera's own key stays reachable: a locale may rename a row, but
@@ -1005,6 +1193,14 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 				[this, key](const QString &text) {
 					writeKey(key, text);
 				});
+			/* Changing the unit must reveal the matching speed/time row right
+			   away instead of waiting for a refresh (bug list "unit switch does
+			   not show the matching speed/time row"). */
+			if (key == QLatin1String("ptz_common_speed_unit"))
+				connect(combo, &QComboBox::currentTextChanged, this,
+					[this](const QString &) {
+						updatePtzCommonRows();
+					});
 			control = combo;
 		} else if (def.type == 2 && def.max > def.min && def.step > 0 &&
 			   def.step == std::floor(def.step)) {
@@ -1013,20 +1209,22 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 			auto *wl = new QHBoxLayout(wrap);
 			wl->setContentsMargins(0, 0, 0, 0);
 			auto *slider = new QSlider(Qt::Horizontal, wrap);
-			slider->setMinimum(static_cast<int>(def.min));
-			slider->setMaximum(static_cast<int>(def.max));
-			slider->setSingleStep(static_cast<int>(def.step));
-			slider->setValue(def.value.toInt());
-			auto *val = new QLabel(def.value, wrap);
+			slider->setMinimum(static_cast<int>(def.min / scale));
+			slider->setMaximum(static_cast<int>(def.max / scale));
+			slider->setSingleStep(
+			    qMax(1, static_cast<int>(def.step / scale)));
+			slider->setValue(static_cast<int>(def.value.toInt() / scale));
+			auto *val = new QLabel(QString::number(slider->value()), wrap);
 			val->setMinimumWidth(48);
 			val->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 			val->setStyleSheet("color:#d8b878;");
 			connect(slider, &QSlider::valueChanged, val,
 				[val](int v) { val->setText(QString::number(v)); });
 			connect(slider, &QSlider::sliderReleased, this,
-				[this, key, slider] {
-					writeKey(key,
-						 QString::number(slider->value()));
+				[this, key, slider, scale] {
+					writeKey(key, QString::number(
+							  static_cast<qint64>(
+							      slider->value() * scale)));
 				});
 			wl->addWidget(slider, 1);
 			wl->addWidget(val);
@@ -1049,7 +1247,44 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		control->setMaximumWidth(260);
 		row->addWidget(control);
 		rowLayout->addLayout(row);
+		rowWidgets_.insert(key, {label, control});
 	}
+
+	/* Apply the PTZ common-speed-unit linkage to the rows just built. */
+	updatePtzCommonRows();
+}
+
+/* The PTZ group's "common speed unit" selects which of the two common values
+   (speed index or recall time) applies. The camera's web UI shows only the one
+   in use; until now both stayed visible here (bug list "switching the common
+   speed unit does not show the matching speed/time row"). */
+void ZcSettingsPanel::updatePtzCommonRows()
+{
+	const auto unitRow =
+	    rowWidgets_.constFind(QLatin1String("ptz_common_speed_unit"));
+	if (unitRow == rowWidgets_.constEnd())
+		return; /* not the PTZ group */
+
+	/* Prefer the combo on screen (a click has not been round-tripped through the
+	   camera yet); fall back to the cached value. unit 1 = Time. */
+	QString unitText;
+	if (unitRow.value().size() > 1)
+		if (auto *combo = qobject_cast<QComboBox *>(unitRow.value().at(1)))
+			unitText = combo->currentText();
+	if (unitText.isEmpty() && client_)
+		unitText = client_->settingValue(
+		    QLatin1String("ptz_common_speed_unit"));
+
+	const bool timeMode =
+	    unitText == QLatin1String("1") ||
+	    unitText.contains(QLatin1String("time"), Qt::CaseInsensitive);
+
+	auto show = [this](const char *key, bool visible) {
+		for (QWidget *w : rowWidgets_.value(QLatin1String(key)))
+			w->setVisible(visible);
+	};
+	show("ptz_common_speed", !timeMode);
+	show("ptz_common_time", timeMode);
 }
 
 /* A JSON array of choices as a string list; the lists are numbers for fps and
@@ -1229,10 +1464,13 @@ void ZcSettingsPanel::updateStreamBar()
 
 	/* bitrate is kbps in the document and bps on the wire, and maxBitrate is not
 	   a hard bound (an idle stream can report more than it), so the current
-	   value is always kept representable. */
+	   value is always kept representable. The minimum is 1, not 0: a zero
+	   target bitrate is refused by the camera, and the bar then snapped back to
+	   the previous value, which read as "the slider cannot reach its left end"
+	   (bug list "bitrate slider bounces at the far left"). */
 	const int bitrate = streamDoc_.value("bitrate").toInt();
-	streamBitrate_->setRange(0, qMax(streamDoc_.value("maxBitrate").toInt(),
-					 bitrate));
+	streamBitrate_->setRange(1, qMax(streamDoc_.value("maxBitrate").toInt(),
+					 qMax(1, bitrate)));
 	streamBitrate_->setValue(bitrate);
 	streamBitrate_->setEnabled(!streamDoc_.value("bitrateRo").toBool());
 	streamBitrateValue_->setText(ztr("ZCameraPlugin.Dock.Kbps").arg(bitrate));
@@ -1341,7 +1579,7 @@ ZcPtzPad::ZcPtzPad(QWidget *parent) : QWidget(parent)
 	layout->addWidget(joystickArea_, 0, Qt::AlignHCenter);
 
 	auto *speedRow = new QHBoxLayout;
-	auto *speedLbl = new QLabel("Speed", this);
+	auto *speedLbl = new QLabel(ztr("ZCameraPlugin.Dock.Speed"), this);
 	speedSlider_ = new QSlider(Qt::Horizontal, this);
 	speedSlider_->setObjectName("ptzSpeed");
 	speedSlider_->setRange(1, 100);
@@ -1366,17 +1604,99 @@ ZcPtzPad::ZcPtzPad(QWidget *parent) : QWidget(parent)
 			client_->ptzStop();
 	});
 
-	/* No position / GOTO row here: the "Position" read-out and the absolute /
-	   relative GOTO spins are not wanted on this panel — the joystick, the
-	   presets and the traces already cover every move it needs. (The client's
-	   ptzGoto() / ptzQuery() stay: they are the /ctrl/pt protocol facade.) */
+	/* No position / GOTO row here: the absolute / relative GOTO spins are not
+	   wanted on this panel — the joystick, the presets and the traces already
+	   cover every move it needs. (The client's ptzGoto() stays: it is part of
+	   the /ctrl/pt protocol facade.) A read-only Current Position read-out is
+	   kept below, though: the operator needs to see where the head is. */
 
-	/* No auto-framing controls here: they moved to the dock's dedicated
+	/* Current Position (bug list: the PTZ tab had no position read-out). Kept
+	   live by the ptzfChange notification, so it follows the joystick. */
+	positionLabel_ = new QLabel(this);
+	positionLabel_->setObjectName("PtzPosition");
+	layout->addWidget(positionLabel_);
+	setPosition(0.0, 0.0);
+
+	/* No auto-framing controls here: they live in the dock's dedicated
 	   ZcFramingPanel tab, matching the camera's web UI layout. */
 
-	/* No range-limit controls here: the enable flag and the four edge buttons
-	   were never finished (bug 13 is deferred), and a lone checkbox that does
-	   nothing but flip a camera flag is worse than no control at all. */
+	/* Range Limit: the enable flag plus the four edge sliders and their
+	   "set to current" buttons, mirroring the camera's web UI
+	   "Pan tilt -> Range Limit" group (bug list: the four range items were
+	   missing). Up/Right write the "upright" corner, Down/Left "downleft",
+	   exactly as the web UI does. */
+	limitCheck_ = new QCheckBox(ztr("ZCameraPlugin.Dock.PtzRangeLimit"), this);
+	layout->addWidget(limitCheck_);
+
+	static const char *const kEdgeLabels[EdgeCount] = {
+		"ZCameraPlugin.Dock.EdgeUp", "ZCameraPlugin.Dock.EdgeRight",
+		"ZCameraPlugin.Dock.EdgeDown", "ZCameraPlugin.Dock.EdgeLeft"};
+	for (int e = 0; e < EdgeCount; ++e) {
+		auto *row = new QHBoxLayout;
+		row->setSpacing(4);
+		auto *lbl = new QLabel(ztr(kEdgeLabels[e]), this);
+		lbl->setFixedWidth(36);
+		limitSlider_[e] = new QSlider(Qt::Horizontal, this);
+		limitSlider_[e]->setRange(0, 1);
+		limitValue_[e] = new QLabel(QStringLiteral("0\u00b0"), this);
+		limitValue_[e]->setFixedWidth(36);
+		limitValue_[e]->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+		limitCurrent_[e] = new QPushButton(QStringLiteral("\u2316"), this);
+		limitCurrent_[e]->setFixedWidth(28);
+		limitCurrent_[e]->setToolTip(ztr("ZCameraPlugin.Dock.PtzSetCurrent"));
+		row->addWidget(lbl);
+		row->addWidget(limitSlider_[e], 1);
+		row->addWidget(limitValue_[e]);
+		row->addWidget(limitCurrent_[e]);
+		layout->addLayout(row);
+
+		connect(limitSlider_[e], &QSlider::valueChanged, this,
+			[this, e](int v) {
+				updateLimitLabel((Edge)e);
+				if (!limitLoaded_)
+					return;
+				/* Keep the opposite edge one degree clear of this one,
+				   without re-entering this handler. */
+				const bool low = (e == EdgeDown || e == EdgeLeft);
+				QSlider *opp = (e == EdgeUp)     ? limitSlider_[EdgeDown]
+					     : (e == EdgeRight) ? limitSlider_[EdgeLeft]
+					     : (e == EdgeDown)  ? limitSlider_[EdgeUp]
+								: limitSlider_[EdgeRight];
+				{
+					QSignalBlocker b(opp);
+					if (low)
+						opp->setMinimum(v + 1);
+					else
+						opp->setMaximum(v - 1);
+				}
+				updateLimitLabel((Edge)((e + 2) % EdgeCount));
+			});
+		/* Write only when the drag ends: every other slider in the dock does the
+		   same, and one request per notch floods the camera's single-threaded
+		   httpd and can store intermediate limits (bug list: range-limit
+		   sliders). */
+		connect(limitSlider_[e], &QSlider::sliderReleased, this,
+			[this, e]() {
+				if (!limitLoaded_)
+					return;
+				pushLimit((Edge)e);
+			});
+		connect(limitCurrent_[e], &QPushButton::clicked, this,
+			[this, e]() { setEdgeToCurrent((Edge)e); });
+	}
+
+	connect(limitCheck_, &QCheckBox::toggled, this, [this](bool on) {
+		/* Repaint the four sliders from the limit / unlimit box right away, the
+		   way the camera's web UI does when its Range Limit status changes: with
+		   the limit on an edge sits on the stored boundary, with it off on the
+		   head's full travel. */
+		if (limitLoaded_)
+			applyLimitBox(on);
+		if (client_)
+			client_->writeSetting(QLatin1String("ptz_limit"),
+					      on ? QStringLiteral("On")
+						 : QStringLiteral("Off"));
+	});
 
 	layout->addStretch();
 }
@@ -1384,6 +1704,175 @@ ZcPtzPad::ZcPtzPad(QWidget *parent) : QWidget(parent)
 void ZcPtzPad::setClient(ZcCameraClient *client)
 {
 	client_ = client;
+	if (client_) {
+		/* A change made from the Settings tab (or the camera's own web UI)
+		   reaches the engine as a refreshed PTZ catalog. Mirror its `ptz_limit`
+		   so the Range Limit checkbox and the four sliders below stay in step
+		   with it, instead of the two controls disagreeing (bug list: the range
+		   limit status did not drive the range limit adjustment). */
+		connect(client_, &ZcCameraClient::groupRefreshed, this,
+			[this](const QString &catalog) {
+				if (!client_ || catalog != QLatin1String("ptz"))
+					return;
+				const QString value = client_->settingValue(
+				    QLatin1String("ptz_limit"));
+				if (value.isEmpty())
+					return;
+				const bool enabled = value == QLatin1String("On");
+				if (limitCheck_) {
+					QSignalBlocker b(limitCheck_);
+					limitCheck_->setChecked(enabled);
+				}
+				if (limitLoaded_)
+					applyLimitBox(enabled);
+			});
+		return;
+	}
+	/* No client: clear the live values so a stale position/limit from the
+	   previous camera is not left on screen. */
+	limitLoaded_ = false;
+	if (limitCheck_) {
+		QSignalBlocker b(limitCheck_);
+		limitCheck_->setChecked(false);
+	}
+	for (int e = 0; e < EdgeCount; ++e) {
+		if (!limitSlider_[e])
+			continue;
+		QSignalBlocker b(limitSlider_[e]);
+		limitSlider_[e]->setRange(0, 1);
+		limitSlider_[e]->setValue(0);
+		updateLimitLabel((Edge)e);
+	}
+	if (positionLabel_)
+		positionLabel_->setText(ztr("ZCameraPlugin.Dock.PtzPosition") +
+					QStringLiteral(" \u2014"));
+}
+
+/* Whole-degree slider helper: a degenerate range (an edge that reaches the
+   camera's own travel) collapses to a single point rather than inverting. */
+static void setLimitRange(QSlider *s, int lo, int hi, int value)
+{
+	if (!s)
+		return;
+	if (hi < lo)
+		hi = lo;
+	s->setRange(lo, hi);
+	s->setValue(value);
+}
+
+void ZcPtzPad::applyLimitBox(bool enabled)
+{
+	/* Ranges and values mirror the web UI's updatePtzLimit(): with the limit on
+	   an edge sits on the stored boundary, with it off on the camera's full
+	   travel. The opposite edge is kept one degree clear so the box cannot
+	   invert. */
+	const int upVal = enabled ? tiltMax_ : utiltMax_;
+	const int rightVal = enabled ? panMax_ : upanMax_;
+	const int downVal = enabled ? tiltMin_ : utiltMin_;
+	const int leftVal = enabled ? panMin_ : upanMin_;
+	for (int e = 0; e < EdgeCount; ++e) {
+		if (limitSlider_[e])
+			limitSlider_[e]->blockSignals(true);
+	}
+	setLimitRange(limitSlider_[EdgeUp], tiltMin_ + 1, utiltMax_, upVal);
+	setLimitRange(limitSlider_[EdgeRight], panMin_ + 1, upanMax_, rightVal);
+	setLimitRange(limitSlider_[EdgeDown], utiltMin_, tiltMax_ - 1, downVal);
+	setLimitRange(limitSlider_[EdgeLeft], upanMin_, panMax_ - 1, leftVal);
+	for (int e = 0; e < EdgeCount; ++e) {
+		if (limitSlider_[e])
+			limitSlider_[e]->blockSignals(false);
+		updateLimitLabel((Edge)e);
+	}
+}
+
+void ZcPtzPad::pushLimit(Edge edge)
+{
+	if (!client_)
+		return;
+	const int up = limitSlider_[EdgeUp]->value();
+	const int right = limitSlider_[EdgeRight]->value();
+	const int down = limitSlider_[EdgeDown]->value();
+	const int left = limitSlider_[EdgeLeft]->value();
+	/* Up and Right are the origin corner's maximums, Down and Left its
+	   minimums; the camera takes the whole corner in one request. */
+	if (edge == EdgeUp || edge == EdgeRight)
+		client_->ptzLimitUpdate(QStringLiteral("upright"), right, up);
+	else
+		client_->ptzLimitUpdate(QStringLiteral("downleft"), left, down);
+}
+
+void ZcPtzPad::updateLimitLabel(Edge edge)
+{
+	if (limitValue_[edge] && limitSlider_[edge])
+		limitValue_[edge]->setText(
+		    QString::number(limitSlider_[edge]->value()) +
+		    QStringLiteral("\u00b0"));
+}
+
+void ZcPtzPad::setEdgeToCurrent(Edge edge)
+{
+	if (!client_)
+		return;
+	client_->ptzQuery(true, [this, edge](const QJsonObject &o) {
+		if (!client_ || !limitLoaded_ || !limitSlider_[edge])
+			return;
+		const int pan = qRound(o.value("pan_pos").toDouble());
+		const int tilt = qRound(o.value("tilt_pos").toDouble());
+		{
+			QSignalBlocker b(limitSlider_[edge]);
+			limitSlider_[edge]->setValue(
+			    (edge == EdgeUp || edge == EdgeDown) ? tilt : pan);
+		}
+		updateLimitLabel(edge);
+		if (limitCheck_ && !limitCheck_->isChecked()) {
+			QSignalBlocker b(limitCheck_);
+			limitCheck_->setChecked(true);
+		}
+		pushLimit(edge);
+	});
+}
+
+void ZcPtzPad::refreshState()
+{
+	if (!client_)
+		return;
+	client_->ptzQuery(true, [this](const QJsonObject &o) {
+		if (!client_)
+			return;
+		if (o.contains("pan_pos") || o.contains("tilt_pos"))
+			setPosition(o.value("pan_pos").toDouble(),
+				    o.value("tilt_pos").toDouble());
+		const QJsonObject lim = o.value("limit").toObject();
+		const QJsonObject un = o.value("unlimit").toObject();
+		if (lim.isEmpty() || un.isEmpty())
+			return;
+		panMin_ = qRound(lim.value("pan_min").toDouble());
+		panMax_ = qRound(lim.value("pan_max").toDouble());
+		tiltMin_ = qRound(lim.value("tilt_min").toDouble());
+		tiltMax_ = qRound(lim.value("tilt_max").toDouble());
+		upanMin_ = qRound(un.value("pan_min").toDouble());
+		upanMax_ = qRound(un.value("pan_max").toDouble());
+		utiltMin_ = qRound(un.value("tilt_min").toDouble());
+		utiltMax_ = qRound(un.value("tilt_max").toDouble());
+		const bool enabled = lim.value("enable").toBool();
+		if (limitCheck_) {
+			QSignalBlocker b(limitCheck_);
+			limitCheck_->setChecked(enabled);
+		}
+		limitLoaded_ = true;
+		applyLimitBox(enabled);
+	});
+}
+
+void ZcPtzPad::setPosition(double pan, double tilt)
+{
+	if (!positionLabel_)
+		return;
+	positionLabel_->setText(
+	    QStringLiteral("%1  Pan %2\u00b0   Tilt %3\u00b0")
+		.arg(ztr("ZCameraPlugin.Dock.PtzPosition"),
+		     QString::number(pan, 'f', 1),
+		     QString::number(tilt, 'f', 1)));
 }
 
 void ZcPtzPad::updateGeometry()
@@ -1619,14 +2108,13 @@ namespace {
    stored it. */
 constexpr int kFramingReloadMs = 400;
 
-/* The auto-framing panel below is finished on the wire side — it speaks the
-   whole /ctrl/framing API the camera's own web page uses — but its UI is still
-   far behind that page, which drives a framing-box canvas, a FOV composition
-   preview and EzFraming click-to-centre/zoom. Rather than ship a panel that
-   looks unrelated to the web UI, the tab is built, kept alive and kept wired
-   but left out of the tab bar. Flip this to true to show the "Auto framing" tab
-   again; nothing else needs to change. */
-constexpr bool kFramingPanelVisible = false;
+/* The auto-framing panel speaks the whole /ctrl/framing API the camera's own
+   web page uses. Its canvas-only parts (the framing-box drag, the FOV preview,
+   EzFraming click-to-centre) are not reproduced, but the switches, dropdowns,
+   spinners and composition presets are, so the tab is shown for a camera whose
+   /info reports auto framing (bug list: "the whole auto-framing settings are
+   missing"). The gate is cameraSupportsAutoFraming() in updatePtzTab(). */
+constexpr bool kFramingPanelVisible = true;
 
 /* Option lists lifted from the camera's web UI (framing.js constants
    AI_FRAMING_SCENE / AI_TARET_NUM / AI_TARGET_LOST_ACTION); /ctrl/framing/config
@@ -2521,6 +3009,18 @@ void ZcPresetPanel::buildUi()
 void ZcPresetPanel::setClient(ZcCameraClient *client)
 {
 	client_ = client;
+	if (client_)
+		/* The per-preset speed unit / speed follow `ptz_speed_mode`: with the
+		   "Common" preset speed mode the camera applies one shared speed to
+		   every preset, so the per-preset controls are refused. The PTZ catalog
+		   carries that key, so repaint the row's enablement whenever it is
+		   refreshed (bug list: the preset speed unit must follow the PTZ preset
+		   speed mode). */
+		connect(client_, &ZcCameraClient::groupRefreshed, this,
+			[this](const QString &catalog) {
+				if (catalog == QLatin1String("ptz"))
+					updateActions();
+			});
 	refresh();
 }
 
@@ -2771,8 +3271,18 @@ void ZcPresetPanel::updateActions()
 		secondaryBtn_->setEnabled(has);
 		deleteBtn_->setEnabled(named);
 		renameBtn_->setEnabled(named);
-		unitCombo_->setEnabled(named);
-		speedCombo_->setEnabled(named && speedCombo_->count() > 0);
+		/* With the PTZ preset speed mode "Common" the camera recalls every
+		   preset at one shared speed, so a per-preset unit/speed is refused; the
+		   camera's web UI greys its "Unit"/"Speed" entries in exactly this case.
+		   An unread value (empty) leaves them usable rather than over-disabling
+		   the row. */
+		const bool perPresetSpeed =
+		    !client_ ||
+		    client_->settingValue(QLatin1String("ptz_speed_mode")) !=
+			QLatin1String("Common");
+		unitCombo_->setEnabled(named && perPresetSpeed);
+		speedCombo_->setEnabled(named && perPresetSpeed &&
+					speedCombo_->count() > 0);
 		for (QPushButton *btn : pageButtons_)
 			btn->setEnabled(true);
 		return;
@@ -2916,8 +3426,35 @@ void ZcPresetPanel::commitRename(int index, const QString &text)
 /* ZcControlDock                                                     */
 /* ---------------------------------------------------------------- */
 
+/* Whether an auto-framing status payload means framing is driving the head. The
+   camera reports it as `value` (overall) and/or `detect` (the detection switch);
+   either being on means presets/traces cannot move it (bug 47; the RD comment
+   supplied the exact websocket samples). */
+static bool framingActive(const QJsonObject &status)
+{
+	const auto on = [&status](const char *key) {
+		const QJsonValue v = status.value(QLatin1String(key));
+		if (v.isBool())
+			return v.toBool();
+		if (v.isDouble())
+			return v.toInt() != 0;
+		return false;
+	};
+	return on("value") || on("detect");
+}
+
+/* Set by ~ZcControlDock. A connect probe runs a nested event loop inside
+   client_->connect(); OBS can tear the dock down from an event delivered in that
+   loop, leaving the probe's frames on the stack. When the loop unwinds they
+   resume (negotiateOrigin -> openCameraNow -> openCamera -> the click slot)
+   against the already-freed dock, so each resume point checks this and bails out
+   before dereferencing a freed member. */
+static bool g_controlDockClosing = false;
+
 ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 {
+	/* A fresh dock: clear any flag left by a previous instance's teardown. */
+	g_controlDockClosing = false;
 	setWindowTitle(QString::fromUtf8(
 	    obs_module_text("ZCameraPlugin.Dock.Title")));
 	setObjectName("zcamera-control-dock");
@@ -2963,17 +3500,26 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 	auto *ptzLayout = new QHBoxLayout(ptzTab_);
 	ptzLayout->setContentsMargins(0, 0, 0, 0);
 	ptzLayout->setSpacing(0);
-		ptz_ = new ZcPtzPad(ptzTab_);
+	/* The pad grew tall (joystick + position + the four range-limit rows), so it
+	   scrolls rather than squeezing the joystick on a short dock. The scroll area
+	   keeps the pad's fixed width, so the presets keep the rest. */
+	ptzScroll_ = new QScrollArea(ptzTab_);
+	ptzScroll_->setWidgetResizable(true);
+	ptzScroll_->setFrameShape(QFrame::NoFrame);
+	ptzScroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+	ptzScroll_->setFixedWidth(268);
+	ptzScroll_->viewport()->setStyleSheet("background:#1f2927;");
+	ptz_ = new ZcPtzPad();
+	ptzScroll_->setWidget(ptz_);
 	presets_ = new ZcPresetPanel(ptzTab_);
-	ptzLayout->addWidget(ptz_, 0);
+	ptzLayout->addWidget(ptzScroll_, 0);
 	ptzLayout->addWidget(presets_, 1);
 	rightLayout->addWidget(tabs_, 1);
 
-	/* The auto-framing tab is built up front and hidden like the PTZ tab, but —
-	   unlike it — deliberately never inserted into the tab bar for now: the
-	   panel works, yet it does not look like the camera's own framing page (see
-	   kFramingPanelVisible). Building it anyway keeps the widget, its client
-	   calls and its WebSocket handlers alive and ready to re-enable. */
+	/* The auto-framing tab is built up front and hidden like the PTZ tab; it is
+	   inserted into the tab bar once a camera reports auto framing (see
+	   kFramingPanelVisible in updatePtzTab). Building it here keeps the widget,
+	   its client calls and its WebSocket handlers alive. */
 	framingTab_ = new QWidget(tabs_);
 	framingTab_->hide();
 	auto *framingLayout = new QVBoxLayout(framingTab_);
@@ -2997,7 +3543,7 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 	/* Development aid: only compiled in when the build asks for it, so a
 	   release build ships no debug affordance (bug list: "Debug button not
 	   removed from the release build"). */
-	debugButton_ = new QPushButton("Debug", container);
+	debugButton_ = new QPushButton(ztr("ZCameraPlugin.Dock.Debug"), container);
 	debugButton_->setCheckable(true);
 	statusBar->addWidget(debugButton_);
 #endif
@@ -3321,6 +3867,12 @@ void ZcControlDock::removeCameraFromSource(const QString &host)
 	const std::string name = sourceNameForHost(host).toStdString();
 
 	obs_source_t *src = obs_get_source_by_name(name.c_str());
+	/* A source created from OBS's own Sources panel keys off its stored address,
+	   not its name (the rail counts it as added the same way), so removing it must
+	   find it the same way rather than leaving its gold check stuck on (bug list
+	   "the +/check toggle is out of sync with the source"). */
+	if (!src)
+		src = findSourceByHost(host);
 	if (!src)
 		return;
 	obs_source_remove(src);  /* out of all scenes; OBS drops its own refs */
@@ -3340,7 +3892,25 @@ ZcControlDock::~ZcControlDock()
 	if (debugPanel_)
 		delete debugPanel_;
 #endif
-	delete client_;
+	/* A connect probe runs a nested event loop inside client_->connect(); OBS can
+	   tear the dock down from an event delivered in it, leaving the probe's frames
+	   on the stack to resume when the loop unwinds. Deleting the client here would
+	   free its transport under negotiateOrigin(); letting Qt free it as this
+	   dock's child would do the same, so when a probe is in flight detach it off
+	   the dock and leak it (the process is going down). The resume points check
+	   g_controlDockClosing and bail out before touching a freed member. */
+	g_controlDockClosing = true;
+	if (client_) {
+		settings_->setClient(nullptr);
+		ptz_->setClient(nullptr);
+		presets_->setClient(nullptr);
+		framing_->setClient(nullptr);
+		if (opening_)
+			client_->setParent(nullptr); /* the probe is still using it */
+		else
+			delete client_;
+		client_ = nullptr;
+	}
 }
 
 /* Spec §3: the PTZ tab exists only for a camera that reports PTZ support, and
@@ -3363,9 +3933,9 @@ void ZcControlDock::updatePtzTab()
 	else if (!wantPtz && ptzIndex >= 0)
 		tabs_->removeTab(ptzIndex);
 
-	/* The auto-framing pane stays out of the tab bar until its layout matches the
-	   camera's web page (see kFramingPanelVisible). The gate lives here, not at
-	   construction, so re-enabling it is a one-line change. */
+	/* The auto-framing pane is inserted into the tab bar for a camera that
+	   reports auto framing (see kFramingPanelVisible). The gate lives here, not
+	   at construction, so hiding it again is a one-line change. */
 	if (framingTab_ && kFramingPanelVisible) {
 		const bool wantFraming =
 		    client_ && client_->cameraSupportsAutoFraming();
@@ -3392,6 +3962,39 @@ bool ZcControlDock::openCamera(const QString &host)
 
 bool ZcControlDock::openCamera(const QString &host, const ZcCredentials &creds)
 {
+	/* connect() answers synchronously but runs a nested event loop (the origin
+	   probe), so an event delivered during it can re-enter this path — a queued
+	   selectCamera() from the source Properties dialog, or a second click. A
+	   re-entrant call would run `delete client_` in openCameraNow() while the
+	   current client's connect() frame (and its transport) is still on the stack,
+	   freeing the object mid-call: the crash is in negotiateOrigin, at the
+	   base_url_ build. Never serve a second request while one is live; remember
+	   the pick and serve it after the current attempt returns. */
+	if (opening_)
+		return false;
+
+	opening_ = true;
+	const bool ok = openCameraNow(host, creds);
+	/* openCameraNow() ran a nested event loop; OBS may have torn the dock down
+	   from an event delivered in it (see g_controlDockClosing). If so, do not
+	   touch any member of the freed dock. */
+	if (g_controlDockClosing)
+		return false;
+	opening_ = false;
+
+	/* Serve a pick that arrived while we were connecting. Deferred so the
+	   caller's stack (openCameraNow's frames are gone) unwinds first. */
+	if (pendingClick_) {
+		pendingClick_ = false;
+		const QString next = pendingClickHost_;
+		pendingClickHost_.clear();
+		QTimer::singleShot(0, this, [this, next]() { onCameraClicked(next); });
+	}
+	return ok;
+}
+
+bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &creds)
+{
 	if (client_) {
 		/* Detach the panels before the client goes away: a panel holding a
 		   pointer to a deleted client would write through it. */
@@ -3407,8 +4010,24 @@ bool ZcControlDock::openCamera(const QString &host, const ZcCredentials &creds)
 	ptz_->setClient(client_);
 	presets_->setClient(client_);
 	framing_->setClient(client_);
+	/* The preset/trace transport is greyed while auto-framing drives the head.
+	   That state belongs to the PREVIOUS camera, so clear it on every switch;
+	   the first framingStatusChanged from the new camera greys it again if it
+	   actually needs to be (bug review §4 UI: stuck-disabled panel). */
+	presets_->setEnabled(true);
+#ifdef ZC_ENABLE_DEBUG_PANEL
+	/* Feed the debug panel from this client's transport (see ZcCameraClient). */
+	if (debugPanel_)
+		connect(client_, &ZcCameraClient::requestLogged, debugPanel_,
+			&ZcDebugPanel::append);
+#endif
 
 	bool ok = client_->connect(host, 80, creds);
+	/* connect() ran a nested event loop (the origin probe); OBS may have torn the
+	   dock down from an event delivered in it (see g_controlDockClosing). Bail
+	   before touching any member of the freed dock. */
+	if (g_controlDockClosing)
+		return false;
 	if (!ok) {
 		/* Distinguish "the camera wants a login we do not have" from "the
 		   camera is not there", so the caller can ask for credentials
@@ -3463,17 +4082,37 @@ bool ZcControlDock::openCamera(const QString &host, const ZcCredentials &creds)
 	   preset list loads once the model is known. */
 	connect(client_, &ZcCameraClient::cameraInfoChanged, this, [this]() {
 		updatePtzTab();
-		if (client_ && client_->cameraSupportsPtz())
+		if (client_ && client_->cameraSupportsPtz()) {
 			presets_->refresh();
+			/* Seed the position read-out and the range-limit sliders from
+			   the camera (bug list: the Range Limit group). */
+			ptz_->refreshState();
+			/* The PTZ catalog carries the keys the PTZ tab and the preset pane
+			   depend on (`ptz_limit` for the Range Limit group, `ptz_speed_mode`
+			   for the per-preset speed row); read it once so those dependencies
+			   are known without the operator having to open the group. */
+			client_->readGroup(QLatin1String("ptz"), nullptr);
+		}
 		if (client_ && client_->cameraSupportsAutoFraming())
 			framing_->refresh();
 	});
+	/* Live position (ptzfChange): the read-out follows the head as it moves. */
+	connect(client_, &ZcCameraClient::ptzPositionChanged, this,
+		[this](double pan, double tilt, double) {
+			if (ptz_)
+				ptz_->setPosition(pan, tilt);
+		});
 	/* Live framing notifications: the status event carries the switches, so the
 	   panel repaints straight from it; a settings change just means re-read. */
 	connect(client_, &ZcCameraClient::framingStatusChanged, this,
 		[this](const QJsonObject &status) {
 			if (framing_)
 				framing_->applyStatus(status);
+			/* While auto-framing drives the head, the preset/trace transport
+			   does nothing, so grey it out instead of letting a click look
+			   broken; restore it the moment framing turns off (bug 47). */
+			if (presets_)
+				presets_->setEnabled(!framingActive(status));
 		});
 	connect(client_, &ZcCameraClient::framingSettingsChanged, this,
 		[this]() {
@@ -3484,6 +4123,13 @@ bool ZcControlDock::openCamera(const QString &host, const ZcCredentials &creds)
 	updatePtzTab();
 	return true;
 }
+
+/* Reconnect schedule after a write that makes the camera restart its web service
+   (HTTPS, identity auth, Crop Sensor). The camera is unreachable for tens of
+   seconds, so the retry gap grows 20 s -> 40 s -> 90 s (RD feedback). */
+static constexpr int kRestartBackoffMs[] = {20000, 40000, 90000};
+static constexpr int kRestartBackoffCount =
+    sizeof(kRestartBackoffMs) / sizeof(kRestartBackoffMs[0]);
 
 /* Bug 8: a write that makes the camera restart its web service (HTTPS,
    identity auth) or move to another address (network type) is applied by a
@@ -3496,6 +4142,9 @@ void ZcControlDock::onCameraRestarting()
 	statusBarLabel_->setText(
 	    ztr("ZCameraPlugin.Dock.CameraRestarting").arg(currentHost_));
 	restartAttempts_ = 0;
+	/* A restarting camera is offline for tens of seconds, so the first probe
+	   waits rather than hammering it (RD feedback: back off ~20 s, 40 s, 90 s). */
+	restartTimer_->setInterval(kRestartBackoffMs[0]);
 	restartTimer_->start();
 }
 
@@ -3508,13 +4157,18 @@ void ZcControlDock::tryReconnect()
 	}
 	/* A bounded number of tries: a camera that never comes back, or comes back
 	   on another address, must not leave a timer polling for ever. */
-	if (++restartAttempts_ > 15) {
+	if (++restartAttempts_ > 8) {
 		restartTimer_->stop();
 		statusBarLabel_->setText(
 		    ztr("ZCameraPlugin.Dock.OfflineReason").arg(host));
 		return;
 	}
-	if (openCamera(host)) {
+	const bool reconnected = openCamera(host);
+	/* The probe may have torn the dock down (see g_controlDockClosing): stop
+	   before touching a freed member. */
+	if (g_controlDockClosing)
+		return;
+	if (reconnected) {
 		restartTimer_->stop();
 		reachableHosts_.insert(host);
 		unreachableHosts_.remove(host);
@@ -3535,6 +4189,9 @@ void ZcControlDock::tryReconnect()
 		settings_->showTlsPrompt(host);
 		return;
 	}
+	/* Still down: widen the gap for the next probe (20 s, 40 s, then 90 s). */
+	restartTimer_->setInterval(
+	    kRestartBackoffMs[qMin(restartAttempts_, kRestartBackoffCount - 1)]);
 	/* openCamera() reported the failed attempt; keep the restarting notice up
 	   while the camera is still coming back. */
 	statusBarLabel_->setText(
@@ -3551,12 +4208,27 @@ void ZcControlDock::onLoginSubmitted(const QString &user, const QString &passwor
 	creds.username = user;
 	creds.password = password;
 	creds_[currentHost_] = creds;
-	if (openCamera(currentHost_, creds)) {
+	/* The form can be submitted while a connect is still probing (the probe runs
+	   a nested event loop). openCamera() would refuse and this handler would then
+	   wrongly report the password as rejected, so defer the retry instead. */
+	if (opening_) {
+		pendingClick_ = true;
+		pendingClickHost_ = currentHost_;
+		return;
+	}
+	const bool ok = openCamera(currentHost_, creds);
+	/* The probe may have torn the dock down (see g_controlDockClosing): stop
+	   before touching a freed member. */
+	if (g_controlDockClosing)
+		return;
+	if (ok) {
 		reachableHosts_.insert(currentHost_);
 		unreachableHosts_.remove(currentHost_);
 	} else {
-		/* Still no login: keep the form up so the operator can correct it. */
-		settings_->showLoginPrompt(currentHost_);
+		/* The camera still challenged us: the credentials are wrong. Keep the
+		   form up and say the login was rejected, so the click does not look
+		   like it did nothing (bug list "wrong credentials not validated"). */
+		settings_->showLoginError();
 	}
 	refreshRailPresence();
 }
@@ -3581,11 +4253,33 @@ void ZcControlDock::selectCamera(const QString &host)
    that is not stays marked offline. */
 void ZcControlDock::onCameraClicked(const QString &host)
 {
-	/* An explicit pick ends any wait for a restarting camera. */
+	/* An explicit pick ends any wait for a restarting camera — before the
+	   deferral below too, otherwise the previous camera's pending restart probe
+	   fires after the new camera connects and tears its connection down. Clearing
+	   the attempt count makes a later restart start its backoff afresh. */
 	if (restartTimer_)
 		restartTimer_->stop();
+	restartAttempts_ = 0;
+
+	/* A connect is still in flight (its origin probe runs a nested event loop, so
+	   this handler can be re-entered from an event it delivers). openCamera()
+	   cannot be served now without freeing the live client, so remember the pick
+	   and let openCamera() replay it once the current attempt returns. Skip the
+	   offline bookkeeping: nothing was attempted for this host yet. */
+	if (opening_) {
+		qWarning().noquote()
+			<< "[obs-zcamera] click deferred, connect in progress" << host;
+		currentHost_ = host;
+		pendingClick_ = true;
+		pendingClickHost_ = host;
+		return;
+	}
 	currentHost_ = host;
 	bool ok = openCamera(host);
+	/* The probe may have torn the dock down (see g_controlDockClosing): stop
+	   before touching a freed member. */
+	if (g_controlDockClosing)
+		return;
 	qWarning().noquote() << "[obs-zcamera] click" << host << "ok" << ok
 			     << "authReq" << lastAuthRequired_
 			     << "tlsUnavail" << lastTlsUnavailable_;

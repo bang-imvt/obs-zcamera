@@ -49,9 +49,11 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 
 extern "C" {
 #include <libavutil/hwcontext.h>
+#include <libavutil/pixfmt.h>
 }
 
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <dxgi1_2.h>
 
 #include <new>
@@ -66,11 +68,22 @@ struct zc_hw_d3d11_import {
 	ID3D11DeviceContext *context = NULL;  /* AddRef'd by GetImmediateContext */
 	ID3D11VideoDevice *vdev = NULL;
 	ID3D11VideoContext *vctx = NULL;
+	/* Same object as vctx when the D3D11.1 runtime is present: used to hand the
+	   processor a DXGI_COLOR_SPACE_TYPE directly. Optional (NULL on D3D11.0). */
+	ID3D11VideoContext1 *vctx1 = NULL;
 	ID3D11VideoProcessorEnumerator *enumr = NULL;
 	ID3D11VideoProcessor *vp = NULL;
 	ID3D11Texture2D *out_tex = NULL;
 	ID3D11VideoProcessorOutputView *out_view = NULL;
 	HANDLE shared_handle = NULL;
+	/* Coded (allocated) input size — the size the decoder's NV12 texture array
+	   is, macroblock-padded (1080 -> 1088). The enumerator and the input view
+	   must be built for this. */
+	uint32_t in_width = 0;
+	uint32_t in_height = 0;
+	/* Display (cropped) output size — the BGRA texture OBS opens and the size
+	   reported as the frame. The video processor is told to blit only this
+	   region of the coded input via SetStreamSourceRect. */
 	uint32_t width = 0;
 	uint32_t height = 0;
 	/* Set when the processor path proved unsupported for this decoder, so the
@@ -104,6 +117,10 @@ static void vp_clear(struct zc_hw_d3d11_import *imp)
 		imp->enumr->Release();
 		imp->enumr = NULL;
 	}
+	if (imp->vctx1) {
+		imp->vctx1->Release();
+		imp->vctx1 = NULL;
+	}
 	if (imp->vctx) {
 		imp->vctx->Release();
 		imp->vctx = NULL;
@@ -121,14 +138,21 @@ static void vp_clear(struct zc_hw_d3d11_import *imp)
 		imp->device = NULL;
 	}
 	imp->shared_handle = NULL;
+	imp->in_width = 0;
+	imp->in_height = 0;
 	imp->width = 0;
 	imp->height = 0;
 }
 
 /* Build the video processor + the shared BGRA output texture. Returns false
-   and marks the cache unavailable when the GPU cannot do the conversion. */
+   and marks the cache unavailable when the GPU cannot do the conversion.
+   `in_w`/`in_h` are the coded (allocated) input dimensions and `out_w`/`out_h`
+   the display dimensions: the enumerator and content description are built for
+   the coded size (that is what the decoder's texture actually is), while the
+   BGRA output texture is the display size and the coded surface is cropped to
+   it with SetStreamSourceRect at blit time. */
 static bool vp_setup(struct zc_hw_d3d11_import *imp, ID3D11Texture2D *in_tex,
-		     uint32_t width, uint32_t height)
+		     uint32_t in_w, uint32_t in_h, uint32_t out_w, uint32_t out_h)
 {
 	in_tex->GetDevice(&imp->device);
 	if (!imp->device) {
@@ -149,19 +173,30 @@ static bool vp_setup(struct zc_hw_d3d11_import *imp, ID3D11Texture2D *in_tex,
 		     "interface");
 		return false;
 	}
+	/* Optional: lets the processor be told the stream color space as a
+	   DXGI_COLOR_SPACE_TYPE. Absent on D3D11.0, where the D3D11.0 color-space
+	   struct is used instead. */
+	imp->context->QueryInterface(__uuidof(ID3D11VideoContext1),
+				     (void **)&imp->vctx1);
 
+	/* The content description describes the conversion: its INPUT size must
+	   match the decoder's coded surface (and therefore the input view, which is
+	   created from that texture — building the enumerator at the display size
+	   while the view is coded is what makes some drivers reject the view), and
+	   its OUTPUT size must match the BGRA texture OBS opens. The processor
+	   then crops/scales from the coded input region to the display output. */
 	D3D11_VIDEO_PROCESSOR_CONTENT_DESC cd = {};
 	cd.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
-	cd.InputWidth = width;
-	cd.InputHeight = height;
-	cd.OutputWidth = width;
-	cd.OutputHeight = height;
+	cd.InputWidth = in_w;
+	cd.InputHeight = in_h;
+	cd.OutputWidth = out_w;
+	cd.OutputHeight = out_h;
 	cd.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
 	if (FAILED(imp->vdev->CreateVideoProcessorEnumerator(&cd, &imp->enumr))) {
 		blog(LOG_WARNING,
 		     "[obs-zcamera] d3d11 vp: CreateVideoProcessorEnumerator "
-		     "failed (%ux%u)",
-		     width, height);
+		     "failed (%ux%u -> %ux%u)",
+		     in_w, in_h, out_w, out_h);
 		return false;
 	}
 
@@ -175,14 +210,13 @@ static bool vp_setup(struct zc_hw_d3d11_import *imp, ID3D11Texture2D *in_tex,
 		return false;
 	}
 	if (FAILED(imp->vdev->CreateVideoProcessor(imp->enumr, 0, &imp->vp))) {
-		blog(LOG_WARNING,
-		     "[obs-zcamera] d3d11 vp: CreateVideoProcessor failed");
+		blog(LOG_WARNING, "[obs-zcamera] d3d11 vp: CreateVideoProcessor failed");
 		return false;
 	}
 
 	D3D11_TEXTURE2D_DESC td = {};
-	td.Width = width;
-	td.Height = height;
+	td.Width = out_w;
+	td.Height = out_h;
 	td.MipLevels = 1;
 	td.ArraySize = 1;
 	td.Format = kOutputFormat;
@@ -194,7 +228,7 @@ static bool vp_setup(struct zc_hw_d3d11_import *imp, ID3D11Texture2D *in_tex,
 		blog(LOG_WARNING,
 		     "[obs-zcamera] d3d11 vp: shared BGRA texture creation "
 		     "failed (%ux%u)",
-		     width, height);
+		     out_w, out_h);
 		return false;
 	}
 
@@ -226,12 +260,22 @@ static bool vp_setup(struct zc_hw_d3d11_import *imp, ID3D11Texture2D *in_tex,
 		return false;
 	}
 
-	imp->width = width;
-	imp->height = height;
+	/* Blit only the display region of the coded input into the whole output.
+	   Without this the processor scales the entire coded surface (padding rows
+	   included) into the display-sized output, squeezing the picture (~0.7%
+	   vertically for 1080p). */
+	const RECT src = {0, 0, (LONG)out_w, (LONG)out_h};
+	imp->vctx->VideoProcessorSetStreamSourceRect(imp->vp, 0, TRUE, &src);
+	imp->vctx->VideoProcessorSetOutputTargetRect(imp->vp, TRUE, &src);
+
+	imp->in_width = in_w;
+	imp->in_height = in_h;
+	imp->width = out_w;
+	imp->height = out_h;
 	blog(LOG_INFO,
-	     "[obs-zcamera] d3d11 video processor ready: NV12 slice -> shared "
-	     "BGRA %ux%u (zero-copy import path)",
-	     width, height);
+	     "[obs-zcamera] d3d11 video processor ready: NV12 slice %ux%u -> "
+	     "shared BGRA %ux%u (zero-copy import path)",
+	     in_w, in_h, out_w, out_h);
 	return true;
 }
 
@@ -243,6 +287,48 @@ void zc_hw_d3d11_import_free(struct zc_hw_d3d11_import *imp)
 		return;
 	vp_clear(imp);
 	delete imp;
+}
+
+/* The video processor has to be told the stream's matrix and range, otherwise
+   it guesses: a full-range or BT.601 stream is then converted with the wrong
+   contrast. Mirror the CUDA importer's mapping — BT.709 (and BT.2020) vs
+   BT.601 matrix, full (JPEG) vs limited range, BT.601 limited when the stream
+   did not say — and emit the DXGI_COLOR_SPACE_TYPE for the D3D11.1 path. */
+static DXGI_COLOR_SPACE_TYPE vp_input_color_space(const AVFrame *avf)
+{
+	const bool full = avf->color_range == AVCOL_RANGE_JPEG;
+	switch (avf->colorspace) {
+	case AVCOL_SPC_BT2020_NCL:
+	case AVCOL_SPC_BT2020_CL:
+		return full ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020
+			    : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020;
+	case AVCOL_SPC_BT709:
+		return full ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709
+			    : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709;
+	default:
+		return full ? DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P601
+			    : DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601;
+	}
+}
+
+/* Same information for the D3D11.0 VideoProcessorSetStreamColorSpace call,
+   which takes the older struct rather than a DXGI_COLOR_SPACE_TYPE. */
+static D3D11_VIDEO_PROCESSOR_COLOR_SPACE
+vp_color_space_struct(const AVFrame *avf)
+{
+	D3D11_VIDEO_PROCESSOR_COLOR_SPACE cs = {};
+	cs.Usage = 0;     /* playback */
+	cs.RGB_Range = 0; /* full range */
+	cs.YCbCr_Matrix = (avf->colorspace == AVCOL_SPC_BT709 ||
+			   avf->colorspace == AVCOL_SPC_BT2020_NCL ||
+			   avf->colorspace == AVCOL_SPC_BT2020_CL)
+				  ? 1
+				  : 0; /* 0 = BT.601, 1 = BT.709 */
+	cs.YCbCr_xvYCC = 0;
+	cs.Nominal_Range = (avf->color_range == AVCOL_RANGE_JPEG)
+				   ? D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255
+				   : D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
+	return cs;
 }
 
 namespace zc {
@@ -297,20 +383,44 @@ gs_texture_t *zc_hw_import_d3d11_slice(struct zc_hw_d3d11_import **slot,
 		return NULL;
 	}
 
+	/* The decoder's D3D11VA pool is allocated at the coded size, which the
+	   driver pads to a macroblock multiple (1080 -> 1088). Blit only the
+	   FFmpeg display region — crop-aware, using avf->width/height when crop is
+	   unset — so those padding rows never reach OBS, and report that region as
+	   the frame size. */
+	uint32_t disp_w = (uint32_t)avf->width;
+	uint32_t disp_h = (uint32_t)avf->height;
+	if (avf->crop_left || avf->crop_right)
+		disp_w = (uint32_t)(avf->width - avf->crop_left - avf->crop_right);
+	if (avf->crop_top || avf->crop_bottom)
+		disp_h = (uint32_t)(avf->height - avf->crop_top - avf->crop_bottom);
+	if (!disp_w || !disp_h || disp_w > (uint32_t)in_desc.Width ||
+	    disp_h > (uint32_t)in_desc.Height) {
+		/* No usable display size (crop unset to a degenerate value):
+		   fall back to the allocated surface. */
+		disp_w = (uint32_t)in_desc.Width;
+		disp_h = (uint32_t)in_desc.Height;
+	}
+	avf->width = (int)disp_w;
+	avf->height = (int)disp_h;
+
+	/* The coded surface (the decoder's NV12 texture array) is what the
+	   enumerator/input view are built against; the display region is cropped
+	   out of it by the processor (see vp_setup). Rebuild when either changes. */
+	const uint32_t coded_w = (uint32_t)in_desc.Width;
+	const uint32_t coded_h = (uint32_t)in_desc.Height;
 	if (!imp->vp) {
-		if (!vp_setup(imp, in_tex, (uint32_t)in_desc.Width,
-			      (uint32_t)in_desc.Height)) {
+		if (!vp_setup(imp, in_tex, coded_w, coded_h, disp_w, disp_h)) {
 			imp->unavailable = true;
 			vp_clear(imp);
 			return NULL;
 		}
-	} else if ((uint32_t)in_desc.Width != imp->width ||
-		   (uint32_t)in_desc.Height != imp->height) {
+	} else if (disp_w != imp->width || disp_h != imp->height ||
+		   coded_w != imp->in_width || coded_h != imp->in_height) {
 		/* Resolution change: the cached processor and output texture are
 		   sized for the old dimensions. */
 		vp_clear(imp);
-		if (!vp_setup(imp, in_tex, (uint32_t)in_desc.Width,
-			      (uint32_t)in_desc.Height)) {
+		if (!vp_setup(imp, in_tex, coded_w, coded_h, disp_w, disp_h)) {
 			imp->unavailable = true;
 			vp_clear(imp);
 			return NULL;
@@ -343,6 +453,23 @@ gs_texture_t *zc_hw_import_d3d11_slice(struct zc_hw_d3d11_import **slot,
 	stream.PastFrames = 0;
 	stream.FutureFrames = 0;
 	stream.pInputSurface = in_view;
+
+	/* Tell the processor the input matrix/range (and the full-range BGRA
+	   output), otherwise it guesses and full-range/BT.601 streams come out with
+	   the wrong contrast. Prefer the D3D11.1 DXGI_COLOR_SPACE_TYPE call, falling
+	   back to the D3D11.0 color-space struct. */
+	if (imp->vctx1) {
+		imp->vctx1->VideoProcessorSetStreamColorSpace1(
+			imp->vp, 0, vp_input_color_space(avf));
+		imp->vctx1->VideoProcessorSetOutputColorSpace1(
+			imp->vp, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+	} else {
+		D3D11_VIDEO_PROCESSOR_COLOR_SPACE scs = vp_color_space_struct(avf);
+		imp->vctx->VideoProcessorSetStreamColorSpace(imp->vp, 0, &scs);
+		D3D11_VIDEO_PROCESSOR_COLOR_SPACE ocs = {};
+		ocs.RGB_Range = 0; /* full-range BGRA output */
+		imp->vctx->VideoProcessorSetOutputColorSpace(imp->vp, &ocs);
+	}
 
 	const HRESULT hr =
 		imp->vctx->VideoProcessorBlt(imp->vp, imp->out_view, 0, 1,

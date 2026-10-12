@@ -48,8 +48,13 @@ if ($Backend -eq 'all') {
     if ($KeepObsRunning) {
         Write-Host 'note: -KeepObsRunning is ignored with -Backend all (each run needs a clean OBS)'
     }
+    # CUDA/NVDEC is deliberately coerced back to Auto by zc_source.cpp (the CUDA
+    # import renders green inside OBS's render pass, so the backend was removed
+    # from the UI), so a "-Backend cuda" run never reaches the CUDA importer and
+    # can never satisfy the CUDA readiness marker. Only the two live backends are
+    # swept here.
     $summary = @()
-    foreach ($b in @('auto', 'd3d11va', 'cuda')) {
+    foreach ($b in @('auto', 'd3d11va')) {
         $childArgs = @('-Backend', $b, '-CameraIp', $CameraIp,
                        '-RecordSeconds', "$RecordSeconds", '-ReadyTimeout', "$ReadyTimeout")
         if ($SkipDeploy) { $childArgs += '-SkipDeploy' }

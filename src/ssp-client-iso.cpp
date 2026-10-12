@@ -51,6 +51,12 @@ static size_t os_process_pipe_read_retry(os_process_pipe *pipe, uint8_t *dst,
 	return pos;
 }
 
+/* Upper bound on one framed message body. Even a large H.264/HEVC access unit
+   is well under a few MB, so a larger `length` means the pipe stream is corrupt;
+   trusting it would either allocate/copy an arbitrary amount or (if bmalloc
+   fails) memcpy into a NULL pointer. */
+#define ZC_MAX_MSG_BODY (64u * 1024u * 1024u)
+
 static Message *msg_recv(os_process_pipe *pipe)
 {
 	size_t sz = 0;
@@ -60,7 +66,7 @@ static Message *msg_recv(os_process_pipe *pipe)
 	}
 	sz = os_process_pipe_read_retry(pipe, (uint8_t *)msg, sizeof(Message));
 	if (sz != sizeof(Message)) {
-		ssp_blog(LOG_WARNING, "pipe protocol header error, recv: %d!",
+		ssp_blog(LOG_WARNING, "pipe protocol header error, recv: %zu!",
 			 sz);
 		bfree(msg);
 		return nullptr;
@@ -68,14 +74,25 @@ static Message *msg_recv(os_process_pipe *pipe)
 	if (msg->length == 0) {
 		return msg;
 	}
+	if (msg->length > ZC_MAX_MSG_BODY) {
+		ssp_blog(LOG_WARNING,
+			 "pipe protocol length %u exceeds limit, dropping!",
+			 msg->length);
+		bfree(msg);
+		return nullptr;
+	}
 	Message *msg_all = nullptr;
 	msg_all = (Message *)bmalloc(sizeof(Message) + msg->length);
+	if (!msg_all) {
+		bfree(msg);
+		return nullptr;
+	}
 	memcpy(msg_all, msg, sizeof(Message));
 	bfree(msg);
 	//ssp_blog(LOG_INFO, "receive msg type: %d, size: %d", msg_all->type, msg_all->length);
 	sz = os_process_pipe_read_retry(pipe, msg_all->value, msg_all->length);
 	if (sz != msg_all->length) {
-		ssp_blog(LOG_WARNING, "pipe protocol body error, recv: %d!",
+		ssp_blog(LOG_WARNING, "pipe protocol body error, recv: %zu!",
 			 sz);
 		bfree(msg_all);
 		return nullptr;
@@ -107,10 +124,32 @@ static void *dump_stderr(os_process_pipe *pipe)
 	return nullptr;
 }
 
-SSPClientIso::SSPClientIso(const std::string &ip, uint32_t bufferSize)
+#ifdef _WIN32
+/* libobs keeps `struct os_process_pipe` opaque — it is only defined in
+   libobs/util/pipe-windows.c — so there is no public way to reach the child
+   process handle. Stop() needs it to terminate a connector that is alive but
+   silent (the very stall the watchdog exists for): such a child never closes
+   its pipe ends, so this side's blocking ReadFile never returns and both
+   worker.join() and os_process_pipe_destroy()'s INFINITE wait would hang OBS
+   forever. The layout below mirrors pipe-windows.c for the current OBS; only
+   `process` is read. A layout drift is harmless — TerminateProcess() simply
+   rejects a handle that lacks PROCESS_TERMINATE access instead of crashing. */
+struct zc_process_pipe_win {
+	bool read_pipe;
+	HANDLE handle;
+	HANDLE handle_err;
+	HANDLE process;
+};
+
+static HANDLE pipe_child_process(os_process_pipe *pp)
+{
+	return reinterpret_cast<zc_process_pipe_win *>(pp)->process;
+}
+#endif
+
+SSPClientIso::SSPClientIso(const std::string &ip)
 {
 	this->ip = ip;
-	this->bufferSize = bufferSize;
 	this->running = false;
 	this->pipe = nullptr;
 
@@ -175,7 +214,12 @@ void SSPClientIso::doStart()
 	dstr_insert(&cmd, 0, "arch -x86_64 ");
 #endif
 	dstr_cat(&cmd, "--host ");
+	/* Quote the host: on macOS os_process_pipe_create() is a popen(), so an
+	   unquoted, attacker-controlled zc_source_ip from a shared scene collection
+	   would inject shell. Harmless but harmless-to-fix on Windows too. */
+	dstr_cat_ch(&cmd, '"');
 	dstr_cat(&cmd, this->ip.c_str());
+	dstr_cat_ch(&cmd, '"');
 	dstr_cat(&cmd, " --port ");
 	dstr_cat(&cmd, "9999");
 
@@ -192,6 +236,10 @@ void SSPClientIso::doStart()
 	this->pipe = tpipe;
 
 	this->worker = std::thread(SSPClientIso::ReceiveThread, this);
+#ifdef _WIN32
+	/* Owned and joined by Stop() (not detached): see stderrWorker's comment. */
+	this->stderrWorker = std::thread(dump_stderr, tpipe);
+#endif
 	this->statusLock.unlock();
 }
 
@@ -202,10 +250,6 @@ void *SSPClientIso::ReceiveThread(void *arg)
 	th->statusLock.lock();
 	auto pipe = th->pipe;
 	th->statusLock.unlock();
-
-#ifdef _WIN32
-	std::thread(dump_stderr, pipe).detach();
-#endif
 
 	// Use RAII to ensure message is freed
 	std::unique_ptr<Message, decltype(&msg_free)> initial_msg(msg_recv(pipe), msg_free);
@@ -267,21 +311,48 @@ void SSPClientIso::Restart()
 void SSPClientIso::Stop()
 {
 	blog(LOG_INFO, "ssp client %s stopping...",ip.c_str());
-	if (!running) {
+	this->statusLock.lock();
+	const bool wasRunning = this->running;
+	this->running = false;
+	os_process_pipe *pp = this->pipe;
+	this->statusLock.unlock();
+
+	if (!wasRunning && !pp) {
 		blog(LOG_INFO, "ssp client %s already stopped...", ip.c_str());
 		return;
 	}
-	this->statusLock.lock();
-	this->running = false;
-	this->statusLock.unlock();
-	if (this->worker.joinable()) {
-		this->worker.join();
+
+#ifdef _WIN32
+	/* Terminate the connector FIRST. It may be alive but silent (a stalled
+	   camera): its pipe stays open, so the receive thread's ReadFile never
+	   returns and joining it — or os_process_pipe_destroy()'s own INFINITE
+	   wait on the child — would freeze OBS for good. Killing the child closes
+	   its pipe ends, which unblocks both the stdout and stderr readers. */
+	if (pp) {
+		HANDLE child = pipe_child_process(pp);
+		if (child) {
+			if (TerminateProcess(child, 0))
+				blog(LOG_INFO, "ssp client %s connector terminated",
+				     ip.c_str());
+			/* Bounded: the handle is signalled once the child is gone, so
+			   os_process_pipe_destroy()'s WaitForSingleObject below returns
+			   immediately instead of blocking. */
+			WaitForSingleObject(child, 5000);
+		}
 	}
-	if (this->pipe) {
-		os_process_pipe_destroy(this->pipe);
+#endif
+
+	/* Join both readers before the pipe is destroyed: they read from it and
+	   would otherwise dereference the freed struct. */
+	if (this->worker.joinable())
+		this->worker.join();
+	if (this->stderrWorker.joinable())
+		this->stderrWorker.join();
+
+	if (pp) {
+		os_process_pipe_destroy(pp);
 		this->pipe = nullptr;
 	}
-	
 }
 
 void SSPClientIso::OnRecvBufferFull()

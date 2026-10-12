@@ -20,8 +20,10 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #define _CRT_SECURE_NO_WARNINGS 1
 #endif
 
+#include <atomic>
 #include <map>
 #include <string>
+#include <vector>
 #include <mutex>
 #include <stdint.h>
 #include <stdio.h>
@@ -47,7 +49,9 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #define DEFAULT_TTL 60
 
 struct mdns_args {
-	bool running;
+	/* Written by the plugin thread (create/stop_mdns_loop) and read by the
+	   mdns worker thread; must be atomic or pthread_join can miss the stop. */
+	std::atomic<bool> running{false};
 	const char *service_str;
 	size_t service_str_size;
 } g_mdns_args;
@@ -150,12 +154,18 @@ static int query_callback(int sock, const struct sockaddr *from, size_t addrlen,
 		mdns_string_t ptr_str = mdns_record_parse_ptr(
 			data, size, record_offset, record_length, namebuffer,
 			sizeof(namebuffer));
-		std::string ptr(ptr_str.str,
-				ptr_str.length - strlen(ZCAM_QUERY_DOMAIN) - 2);
-		current_mdns_record.ptr_record = ptr;
-		current_mdns_record.last_available =
-			os_gettime_ns() / 1000000 + ttl * 1000;
-		current_mdns_record.has_ptr = true;
+		/* A short/garbled PTR name would make this subtraction underflow to a
+		   huge length and read out of bounds. Only strip ".<domain>" when the
+		   name actually carries it. */
+		const size_t domain_len = strlen(ZCAM_QUERY_DOMAIN);
+		if (ptr_str.length >= domain_len + 2) {
+			std::string ptr(ptr_str.str,
+					ptr_str.length - domain_len - 2);
+			current_mdns_record.ptr_record = ptr;
+			current_mdns_record.last_available =
+				os_gettime_ns() / 1000000 + ttl * 1000;
+			current_mdns_record.has_ptr = true;
+		}
 	}
 	if (current_mdns_record.has_ptr && rtype == MDNS_RECORDTYPE_A &&
 		   from->sa_family == AF_INET) {
@@ -487,7 +497,7 @@ static int send_mdns_query(const char *service, size_t service_len)
 				FD_SET(sockets[isock], &readfs);
 			}
 		}
-	} while (res > 0);
+	} while (records > 0);
 
 	free(buffer);
 
@@ -502,7 +512,7 @@ static void *mdns_loop(void *ptr)
 	mdns_args *arg = (mdns_args *)ptr;
 	void *buffer = bzalloc(MDNS_BUFFER_SIZE);
 	int sock = mdns_socket_open_ipv4(0);
-	while (arg->running) {
+	while (arg->running.load()) {
 		send_mdns_query(arg->service_str, arg->service_str_size);
 	}
 	mdns_socket_close(sock);
@@ -528,55 +538,52 @@ void stop_mdns_loop()
 	ssp_records.clear();
 	ssp_records_lock.unlock();
 	ssp_blog(LOG_INFO, "stop mdns query thread...");
-	while (g_mdns_args.running)
-		g_mdns_args.running = false;
+	g_mdns_args.running = false;
 	pthread_join(mdns_thread, nullptr);
 	ssp_blog(LOG_INFO, "mdns query thread stopped.");
 }
 
 SspMDnsIterator::SspMDnsIterator()
 {
+	/* Snapshot the live records under the lock, then release it immediately.
+	   Holding ssp_records_lock for the iterator's whole lifetime (as the old
+	   code did) leaked the lock on any early return and deadlocked a second
+	   iterator. Building the snapshot here also lets next() hand out stable
+	   pointers instead of a shared static. */
+	const uint64_t now = os_gettime_ns() / 1000000;
+	char buf[64];
 	ssp_records_lock.lock();
-	iter = ssp_records.begin();
-	current_time = os_gettime_ns() / 1000000;
-}
-SspMDnsIterator::~SspMDnsIterator()
-{
+	for (auto &kv : ssp_records) {
+		const mdns_record &rec = kv.second;
+		if (rec.last_available < now)
+			continue;
+		ssp_device_item item;
+		item.device_name = rec.ptr_record;
+		if (rec.has_a) {
+			mdns_string_t addr = ipv4_address_to_string(
+				buf, sizeof(buf), &rec.a_record,
+				sizeof(rec.a_record));
+			item.ip_address = std::string(addr.str, addr.length);
+		} else if (rec.has_aaaa) {
+			mdns_string_t addr = ipv6_address_to_string(
+				buf, sizeof(buf), &rec.aaaa_record,
+				sizeof(rec.aaaa_record));
+			item.ip_address = std::string(addr.str, addr.length);
+		} else {
+			continue;
+		}
+		snapshot_.push_back(item);
+	}
 	ssp_records_lock.unlock();
 }
+SspMDnsIterator::~SspMDnsIterator() {}
 bool SspMDnsIterator::hasNext()
 {
-	return iter != ssp_records.end();
+	return index_ < snapshot_.size();
 }
 ssp_device_item *SspMDnsIterator::next()
 {
-	static ssp_device_item ret;
-	while (hasNext()) {
-		if (iter->second.last_available < current_time) {
-			++iter;
-			continue;
-		}
-		ret.device_name = iter->second.ptr_record;
-		if (iter->second.has_a) {
-			mdns_string_t addr = ipv4_address_to_string(
-				addrbuffer, sizeof(addrbuffer),
-				&(iter->second.a_record),
-				sizeof(iter->second.a_record));
-			ret.ip_address = std::string(addr.str, addr.length);
-			++iter;
-			return &ret;
-		} else if (iter->second.has_aaaa) {
-			mdns_string_t addr = ipv6_address_to_string(
-				addrbuffer, sizeof(addrbuffer),
-				&(iter->second.aaaa_record),
-				sizeof(iter->second.aaaa_record));
-			ret.ip_address = std::string(addr.str, addr.length);
-			++iter;
-			return &ret;
-		} else {
-			++iter;
-			continue;
-		}
-	}
-	return nullptr;
+	if (index_ >= snapshot_.size())
+		return nullptr;
+	return &snapshot_[index_++];
 }

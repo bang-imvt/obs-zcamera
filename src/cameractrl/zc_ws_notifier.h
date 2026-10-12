@@ -38,6 +38,8 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 
 namespace zc {
 
+class ZcHttpTransport;
+
 class ZcWsNotifier : public QObject {
 	Q_OBJECT
 
@@ -52,6 +54,12 @@ public:
 	void start(const QString &host, bool secure,
 		   const QByteArray &extraHeaders = QByteArray());
 	void stop();
+
+	/* The HTTP transport owns the live auth/session state. When set, the
+	   upgrade headers are rebuilt from it on every (re)connect (see
+	   ZcHttpTransport::currentUpgradeHeaderBlock), so a header captured once at
+	   start() cannot go stale across a reconnect. */
+	void setTransport(ZcHttpTransport *transport);
 
 	/* Mark the socket as live (receiving notifications). */
 	bool isLive() const { return live_; }
@@ -76,6 +84,7 @@ private:
 	QTimer reconnectTimer_;
 	QString host_;
 	QByteArray extraHeaders_; /* upgrade request headers (auth/cookie) */
+	ZcHttpTransport *transport_ = nullptr; /* live auth source (may be null) */
 	bool secure_ = false;
 	bool live_ = false;
 	bool stopped_ = true;

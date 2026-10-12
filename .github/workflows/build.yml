@@ -1,13 +1,12 @@
-# GitHub Actions build for obs-zcamera (Windows / macOS / Linux).
+# GitHub Actions build for obs-zcamera (Windows / macOS).
 #
-# Builds the OBS plugin for all three platforms and uploads the artifacts so a
-# macOS bundle / Windows installer / Linux package can be produced without a
-# local machine of each OS.
+# Builds the OBS plugin for both supported platforms and uploads the artifacts
+# so a Windows plugin bundle / macOS bundle can be produced without a local
+# machine of each OS.
 #
 # The plugin links OBS's own libobs/obs-frontend-api (from the published
 # obsproject/obs-deps) and OBS's patched Qt6 (the *-qt6-* packages, so the ABI
-# matches the OBS it runs in). Linux has no published obs-deps, so it builds
-# against the distro's libobs-dev instead.
+# matches the OBS it runs in).
 #
 # NOTE: the obs-deps asset names here are the real ones for tag 2024-09-12
 # (windows-deps-* / macos-deps-*). If a download 404s, re-check the tag's assets.
@@ -40,19 +39,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build \
-            libobs-dev qt6-base-dev \
-            libavcodec-dev libavutil-dev libswscale-dev
-
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
 
       - name: Download OBS deps (Windows/macOS)
-        if: runner.os != 'Linux'
         shell: bash
         run: |
           set -e
@@ -119,13 +109,6 @@ jobs:
             "${LINKER_FLAGS[@]}" \
             -DENABLE_ZERO_COPY=ON -DENABLE_SW_DECODE=ON -DENABLE_CAMERA_CONTROL=ON
 
-      - name: Configure (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          cmake -S . -B build -G "Unix Makefiles" \
-            -DENABLE_ZERO_COPY=ON -DENABLE_SW_DECODE=ON -DENABLE_CAMERA_CONTROL=ON
-
       - name: Build
         run: cmake --build build --config RelWithDebInfo -j
 
@@ -138,9 +121,11 @@ jobs:
         with:
           name: obs-zcamera-${{ matrix.artifact }}
           path: |
+            build/RelWithDebInfo/obs-zcamera.dll
             build/RelWithDebInfo/obs-zcamera
             build/ssp_connector/RelWithDebInfo/ssp-connector*
+            build/_deps/libssp-src/lib/win_x64_vs2017/libssp.dll
             build/**/*.dylib
             build/**/*.so
             ${{ runner.temp }}/install/**
-          if-no-files-found: warn
+          if-no-files-found: error

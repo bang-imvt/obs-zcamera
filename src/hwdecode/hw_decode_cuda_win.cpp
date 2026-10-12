@@ -456,6 +456,14 @@ static bool cuda_setup(struct zc_hw_cuda_import *imp, const zc_cuda_api *api,
 			imp->cuda_ctx = nullptr;
 			return false;
 		}
+		/* cuCtxCreate leaves the new context current on this thread. Pop it
+		   right away so the create balances: otherwise the push/pop pairs in
+		   the registration/copy helpers net out to depth 1 and cuda_clear()'s
+		   cuCtxDestroy runs while the context is still current, failing with
+		   CUDA_ERROR_CURRENT_CONTEXT and leaking the context on every
+		   teardown (reconnect/fallback or resolution change). */
+		CUcontext created = nullptr;
+		api->cuCtxPopCurrent(&created);
 	}
 
 	/* Plane textures: plain 2D textures with an SRV, which is all CUDA's
@@ -688,29 +696,133 @@ static bool cuda_render(const AVFrame *avf, struct zc_hw_cuda_import *imp)
 	if (avf->color_range == AVCOL_RANGE_JPEG)
 		params[1] = 1.0f;
 
-	imp->context->UpdateSubresource(imp->params, 0, nullptr, params, 0, 0);
+	ID3D11DeviceContext *ctx = imp->context;
+
+	/* This is OBS's own immediate context and libobs-d3d11 caches pipeline
+	   state without knowing about anything bound here, so every piece of state
+	   this pass touches is saved first and put back before returning. */
+	ID3D11RenderTargetView
+		*prev_rtv[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+	ID3D11DepthStencilView *prev_dsv = nullptr;
+	ctx->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, prev_rtv,
+				&prev_dsv);
+	UINT prev_vp_count = 0;
+	ctx->RSGetViewports(&prev_vp_count, nullptr);
+	D3D11_VIEWPORT
+		prev_vps[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+	if (prev_vp_count >
+	    D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE)
+		prev_vp_count =
+			D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+	ctx->RSGetViewports(&prev_vp_count, prev_vps);
+	ID3D11InputLayout *prev_layout = nullptr;
+	ctx->IAGetInputLayout(&prev_layout);
+	D3D11_PRIMITIVE_TOPOLOGY prev_topo = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+	ctx->IAGetPrimitiveTopology(&prev_topo);
+	ID3D11VertexShader *prev_vs = nullptr;
+	ctx->VSGetShader(&prev_vs, nullptr, nullptr);
+	ID3D11PixelShader *prev_ps = nullptr;
+	ctx->PSGetShader(&prev_ps, nullptr, nullptr);
+	ID3D11ShaderResourceView *prev_srv[2] = {};
+	ctx->PSGetShaderResources(0, 2, prev_srv);
+	ID3D11SamplerState *prev_samp = nullptr;
+	ctx->PSGetSamplers(0, 1, &prev_samp);
+	ID3D11Buffer *prev_cb = nullptr;
+	ctx->PSGetConstantBuffers(0, 1, &prev_cb);
+	ID3D11BlendState *prev_blend = nullptr;
+	FLOAT prev_blend_factor[4] = {};
+	UINT prev_sample_mask = 0;
+	ctx->OMGetBlendState(&prev_blend, prev_blend_factor, &prev_sample_mask);
+	ID3D11DepthStencilState *prev_dss = nullptr;
+	UINT prev_stencil_ref = 0;
+	ctx->OMGetDepthStencilState(&prev_dss, &prev_stencil_ref);
+	ID3D11RasterizerState *prev_rs = nullptr;
+	ctx->RSGetState(&prev_rs);
+	/* libobs-d3d11 sets a scissor rectangle for its own draws and leaves it
+	   bound. The conversion draw is a full-screen triangle, so it would be
+	   clipped to whatever scissor OBS left behind; save it and run this pass
+	   with the scissor disabled (a full-surface rect) instead. */
+	UINT prev_sc_count = 0;
+	ctx->RSGetScissorRects(&prev_sc_count, nullptr);
+	D3D11_RECT
+		prev_sc[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+	if (prev_sc_count > D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE)
+		prev_sc_count =
+			D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+	ctx->RSGetScissorRects(&prev_sc_count, prev_sc);
+
+	ctx->UpdateSubresource(imp->params, 0, nullptr, params, 0, 0);
 
 	ID3D11RenderTargetView *rtv = imp->out_rtv;
-	imp->context->OMSetRenderTargets(1, &rtv, nullptr);
+	ctx->OMSetRenderTargets(1, &rtv, nullptr);
 	D3D11_VIEWPORT vp = {};
 	vp.Width = (float)imp->width;
 	vp.Height = (float)imp->height;
 	vp.MaxDepth = 1.0f;
-	imp->context->RSSetViewports(1, &vp);
-	imp->context->IASetInputLayout(nullptr);
-	imp->context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	imp->context->VSSetShader(imp->vs, nullptr, 0);
-	imp->context->PSSetShader(imp->ps, nullptr, 0);
+	ctx->RSSetViewports(1, &vp);
+	ctx->IASetInputLayout(nullptr);
+	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	ctx->VSSetShader(imp->vs, nullptr, 0);
+	ctx->PSSetShader(imp->ps, nullptr, 0);
 	ID3D11ShaderResourceView *srvs[2] = {imp->y_srv, imp->uv_srv};
-	imp->context->PSSetShaderResources(0, 2, srvs);
-	imp->context->PSSetSamplers(0, 1, &imp->samp);
-	imp->context->PSSetConstantBuffers(0, 1, &imp->params);
-	imp->context->Draw(3, 0);
+	ctx->PSSetShaderResources(0, 2, srvs);
+	ctx->PSSetSamplers(0, 1, &imp->samp);
+	ctx->PSSetConstantBuffers(0, 1, &imp->params);
+	/* Draw with a known state so the conversion does not inherit OBS's blend,
+	   depth test or culling. */
+	const FLOAT clear_blend[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+	ctx->OMSetBlendState(nullptr, clear_blend, 0xffffffff);
+	ctx->OMSetDepthStencilState(nullptr, 0);
+	ctx->RSSetState(nullptr);
+	/* Disable the scissor for this pass by covering the whole output. */
+	const D3D11_RECT full_sc = {0, 0, (LONG)imp->width, (LONG)imp->height};
+	ctx->RSSetScissorRects(1, &full_sc);
+	ctx->Draw(3, 0);
 
-	/* Unbind before CUDA writes the planes again next frame. */
-	ID3D11ShaderResourceView *unbind[2] = {nullptr, nullptr};
-	imp->context->PSSetShaderResources(0, 2, unbind);
-	imp->context->OMSetRenderTargets(0, nullptr, nullptr);
+	/* Put the state back. Restoring the resource slots also unbinds our SRVs,
+	   so CUDA can write the plane textures again next frame. */
+	ctx->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, prev_rtv,
+				prev_dsv);
+	ctx->RSSetViewports(prev_vp_count, prev_vps);
+	ctx->IASetInputLayout(prev_layout);
+	ctx->IASetPrimitiveTopology(prev_topo);
+	ctx->VSSetShader(prev_vs, nullptr, 0);
+	ctx->PSSetShader(prev_ps, nullptr, 0);
+	ctx->PSSetShaderResources(0, 2, prev_srv);
+	ctx->PSSetSamplers(0, 1, &prev_samp);
+	ctx->PSSetConstantBuffers(0, 1, &prev_cb);
+	ctx->OMSetBlendState(prev_blend, prev_blend_factor, prev_sample_mask);
+	ctx->OMSetDepthStencilState(prev_dss, prev_stencil_ref);
+	ctx->RSSetState(prev_rs);
+	if (prev_sc_count)
+		ctx->RSSetScissorRects(prev_sc_count, prev_sc);
+
+	for (UINT i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++) {
+		if (prev_rtv[i])
+			prev_rtv[i]->Release();
+	}
+	if (prev_dsv)
+		prev_dsv->Release();
+	if (prev_layout)
+		prev_layout->Release();
+	if (prev_vs)
+		prev_vs->Release();
+	if (prev_ps)
+		prev_ps->Release();
+	for (int i = 0; i < 2; i++) {
+		if (prev_srv[i])
+			prev_srv[i]->Release();
+	}
+	if (prev_samp)
+		prev_samp->Release();
+	if (prev_cb)
+		prev_cb->Release();
+	if (prev_blend)
+		prev_blend->Release();
+	if (prev_dss)
+		prev_dss->Release();
+	if (prev_rs)
+		prev_rs->Release();
 	return true;
 }
 
@@ -805,8 +917,44 @@ gs_texture_t *zc_hw_cuda_import_frame(struct zc_hw_cuda_import **slot,
 		return nullptr;
 	}
 
-	const uint32_t width = (uint32_t)avf->width;
-	const uint32_t height = (uint32_t)avf->height;
+	/* Only 8-bit NV12 is importable: the copies below move one R8 luma plane
+	   and one R8G8 chroma plane, so a 10-bit P010 (or any other sw_format)
+	   surface would be copied byte-wise into the wrong layout and come out
+	   corrupted. Refuse it here so the caller falls back to software. */
+	AVPixelFormat cuda_sw_fmt = AV_PIX_FMT_NV12;
+	if (avf->hw_frames_ctx) {
+		AVHWFramesContext *fc = (AVHWFramesContext *)avf->hw_frames_ctx->data;
+		if (fc)
+			cuda_sw_fmt = fc->sw_format;
+	}
+	if (cuda_sw_fmt != AV_PIX_FMT_NV12) {
+		blog(LOG_WARNING,
+		     "[obs-zcamera] cuda import: frames sw_format is %s, expected "
+		     "NV12; using software decode",
+		     av_get_pix_fmt_name(cuda_sw_fmt));
+		if (*slot)
+			(*slot)->unavailable = true;
+		return nullptr;
+	}
+
+	/* Crop to the display region, exactly like the reported frame size.
+	   NVDEC allocates the plane at the coded size (1080 -> 1088) and the padding
+	   rows are not part of the picture, so the plane textures and the BGRA
+	   output are built at the display size and only those rows are copied.
+	   Otherwise the imported texture is 1088 tall while the decoder reports 1080
+	   (the D3D11VA path crops the same way, via SetStreamSourceRect). */
+	uint32_t width = (uint32_t)avf->width;
+	uint32_t height = (uint32_t)avf->height;
+	if (avf->crop_left || avf->crop_right)
+		width = (uint32_t)(avf->width - avf->crop_left - avf->crop_right);
+	if (avf->crop_top || avf->crop_bottom)
+		height = (uint32_t)(avf->height - avf->crop_top - avf->crop_bottom);
+	if (!width || !height) {
+		width = (uint32_t)avf->width;
+		height = (uint32_t)avf->height;
+	}
+	avf->width = (int)width;
+	avf->height = (int)height;
 	if (!width || !height || (width & 1) || (height & 1)) {
 		blog(LOG_WARNING,
 		     "[obs-zcamera] cuda import: odd frame size %ux%u cannot be "

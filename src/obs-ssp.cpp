@@ -102,6 +102,10 @@ void zc_show_control_dock(const QString &host)
    only once the frontend has finished loading. */
 static bool zc_dock_raise_armed = false;
 static signal_handler_t *zc_obs_signals = nullptr;
+/* Tools-menu action. OBS owns the QAction (there is no remove API), but its
+   `triggered` slot lives in this DLL, so it MUST be disconnected on unload or a
+   click after unload jumps into unmapped code. */
+static QAction *zc_tools_action = nullptr;
 
 static void on_frontend_event(enum obs_frontend_event event, void *)
 {
@@ -170,6 +174,7 @@ bool obs_module_load(void)
 	QObject::connect(action, &QAction::triggered, [](bool) {
 		show_zcamera_control_dock(nullptr, nullptr);
 	});
+	zc_tools_action = action;
 
 	/* Bring the dock forward when a ZCamera source is created (see above). */
 	obs_frontend_add_event_callback(on_frontend_event, nullptr);
@@ -188,6 +193,12 @@ void obs_module_unload(void)
 		zc_obs_signals = nullptr;
 	}
 	obs_frontend_remove_event_callback(on_frontend_event, nullptr);
+	/* Disconnect (do not delete — OBS still owns it) the tools-menu action so a
+	   later click cannot call into this now-unmapped module. */
+	if (zc_tools_action) {
+		QObject::disconnect(zc_tools_action, nullptr, nullptr, nullptr);
+		zc_tools_action = nullptr;
+	}
 	stop_mdns_loop();
 	/* Null already when Qt took the dock down with the main window. */
 	if (zc_control_dock) {

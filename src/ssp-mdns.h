@@ -22,6 +22,7 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 
 #include <string>
 #include <map>
+#include <vector>
 
 struct ssp_device_item {
 	std::string device_name;
@@ -46,8 +47,10 @@ public:
 	ssp_device_item *next();
 
 private:
-	uint64_t current_time;
-	std::map<std::string, mdns_record>::const_iterator iter;
+	/* A snapshot of the live records taken in the ctor; iteration never holds
+	   the global lock. */
+	std::vector<ssp_device_item> snapshot_;
+	size_t index_ = 0;
 };
 
 void create_mdns_loop();

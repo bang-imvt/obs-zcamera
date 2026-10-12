@@ -26,10 +26,20 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <QDateTime>
 #include <QRandomGenerator>
 #include <QList>
+#include <QTimer>
 
 namespace zc {
 
 namespace {
+/* Handshake watchdog: the design promises a 10 s cap on the HTTP 101 upgrade. */
+const int kHandshakeTimeoutMs = 10000;
+
+/* The notification socket only ever carries small JSON frames. A frame that
+   advertises more than this is corrupt or hostile: reject it before allocating
+   or slicing (the removed (int) cast truncated a >2 GiB length and mis-sliced
+   the stream). */
+const quint64 kMaxFrameBytes = 4 * 1024 * 1024;
+
 /* Case-insensitive lookup of a header value inside a raw HTTP header block. */
 QByteArray headerValue(const QByteArray &header, const QByteArray &name)
 {
@@ -46,7 +56,36 @@ QByteArray headerValue(const QByteArray &header, const QByteArray &name)
 }
 } // namespace
 
-ZcWsClient::ZcWsClient(QObject *parent) : QObject(parent) {}
+ZcWsClient::ZcWsClient(QObject *parent) : QObject(parent)
+{
+	/* Handshake watchdog: a server that completes the TCP/TLS dial but then
+	   answers nothing would otherwise leave the client stuck before the 101. */
+	handshakeTimer_.setSingleShot(true);
+	connect(&handshakeTimer_, &QTimer::timeout, this, [this]() {
+		if (handshakeDone_)
+			return;
+		emit error(QStringLiteral("WebSocket handshake timed out"));
+		if (socket_)
+			socket_->abort();
+	});
+
+	/* Read-idle watchdog: notifications arrive as text frames and the peer may
+	   also ping/pong; a stretch with none of that means the TCP channel is
+	   half-open and would otherwise keep isOpen()/the notifier's live_ true
+	   forever. */
+	idleTimer_.setSingleShot(true);
+	connect(&idleTimer_, &QTimer::timeout, this, [this]() {
+		emit error(QStringLiteral("WebSocket idle timeout"));
+		if (socket_)
+			socket_->abort();
+	});
+}
+
+void ZcWsClient::setIdleTimeoutMs(int ms)
+{
+	if (ms > 0)
+		idleTimeoutMs_ = ms;
+}
 
 ZcWsClient::~ZcWsClient()
 {
@@ -60,6 +99,8 @@ void ZcWsClient::open(const QUrl &url, const QByteArray &extraHeaders)
 	handshakeDone_ = false;
 	recvBuffer_.clear();
 	handshake_.clear();
+	handshakeTimer_.stop();
+	idleTimer_.stop();
 
 	/* Reconnect path: dispose of the previous socket before creating a new
 	   one so we never leak sockets across opens. Detach its signals FIRST:
@@ -89,15 +130,29 @@ void ZcWsClient::open(const QUrl &url, const QByteArray &extraHeaders)
 	/* The camera's self-signed certificate is accepted inside ZcTlsSocket
 	   (host-scoped trust is enforced by the caller's camera allow-list). */
 	socket_->connectToHost(url.host(), (quint16)url.port(), isTls_);
+
+	/* From here the 101 upgrade must land inside the handshake timeout. The
+	   idle watchdog only starts once the upgrade is done. */
+	handshakeTimer_.start(kHandshakeTimeoutMs);
 }
 
 void ZcWsClient::close()
 {
-	if (socket_ && socket_->isConnected()) {
+	handshakeTimer_.stop();
+	idleTimer_.stop();
+	if (!socket_)
+		return;
+	if (socket_->isConnected()) {
 		/* Send a close frame (0x8) then close. */
 		writeFrame(0x8, QByteArray());
 		socket_->disconnectFromHost();
+		return;
 	}
+	/* A dial still in flight (TCP connect / TLS handshake) has no usable
+	   channel on which to say goodbye; abort it so it cannot complete into a
+	   live connection — and emit connected()/readyRead() — after the caller
+	   (ZcWsNotifier::stop) asked to stop. */
+	socket_->abort();
 }
 
 bool ZcWsClient::isOpen() const
@@ -154,10 +209,15 @@ void ZcWsClient::onSocketReadyRead()
 		int idx = handshake_.indexOf("\r\n\r\n");
 		if (idx < 0) {
 			/* Guard against a server that never completes headers. */
-			if (handshake_.size() > 16384)
+			if (handshake_.size() > 16384) {
+				handshakeTimer_.stop();
 				emit error("WebSocket handshake too large");
+			}
 			return;
 		}
+		/* The headers are complete: the handshake watchdog has done its job
+		   (whether the outcome is a valid 101 or a failure below). */
+		handshakeTimer_.stop();
 		QByteArray header = handshake_.left(idx);
 		/* Verify the 101 Switching Protocols response and Sec-WebSocket-Accept. */
 		if (!header.startsWith("HTTP/1.1 101") && !header.startsWith("HTTP/1.0 101")) {
@@ -179,6 +239,9 @@ void ZcWsClient::onSocketReadyRead()
 			return;
 		}
 		handshakeDone_ = true;
+		/* The upgrade is done: switch from the handshake watchdog to the
+		   read-idle one. */
+		idleTimer_.start(idleTimeoutMs_);
 		/* Only the bytes AFTER the header are frames; anything already read
 		   past the header lives in handshake_.mid(idx + 4). */
 		QByteArray leftover = handshake_.mid(idx + 4);
@@ -188,11 +251,16 @@ void ZcWsClient::onSocketReadyRead()
 		emit connected();
 		return;
 	}
+	/* Any post-handshake traffic (notifications, ping/pong) proves the peer is
+	   alive; push the idle watchdog back. */
+	idleTimer_.start(idleTimeoutMs_);
 	handleIncoming(chunk);
 }
 
 void ZcWsClient::onSocketDisconnected()
 {
+	handshakeTimer_.stop();
+	idleTimer_.stop();
 	handshakeDone_ = false;
 	emit disconnected();
 }
@@ -201,6 +269,8 @@ void ZcWsClient::onSocketError(const QString &error)
 {
 	/* Connect/handshake failure or a dropped connection. The channel has
 	   already torn itself down; the notifier owns the reconnect policy. */
+	handshakeTimer_.stop();
+	idleTimer_.stop();
 	handshakeDone_ = false;
 	emit this->error(error);
 }
@@ -231,8 +301,19 @@ void ZcWsClient::handleIncoming(const QByteArray &data)
 				len = (len << 8) | (unsigned char)recvBuffer_[2 + i];
 			headerLen = 10;
 		}
-		int maskLen = masked ? 4 : 0;
-		if (recvBuffer_.size() < headerLen + maskLen + (int)len)
+		/* A length past the cap (including the RFC-nonconforming high bit of a
+		   64-bit length) is never a frame this socket carries. Fail the
+		   connection cleanly instead of truncating it to int — the old
+		   `(int)len` wrapped a >2 GiB length negative and mis-sliced the
+		   buffer. */
+		if (len > kMaxFrameBytes) {
+			emit error(QStringLiteral("WebSocket frame too large"));
+			socket_->abort();
+			return;
+		}
+		const int maskLen = masked ? 4 : 0;
+		const quint64 total = (quint64)headerLen + maskLen + len;
+		if ((quint64)recvBuffer_.size() < total)
 			return;
 
 		QByteArray payload = recvBuffer_.mid(headerLen + maskLen, (int)len);
@@ -241,7 +322,7 @@ void ZcWsClient::handleIncoming(const QByteArray &data)
 			for (int i = 0; i < payload.size(); ++i)
 				payload[i] = payload[i] ^ mask[i % 4];
 		}
-		recvBuffer_.remove(0, headerLen + maskLen + (int)len);
+		recvBuffer_.remove(0, (int)total);
 
 		if (opcode == 0x1) { /* text */
 			if (fin)

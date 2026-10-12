@@ -90,6 +90,11 @@ private:
 	void failTls(const char *what, int code);
 	void stopTimer();
 
+#ifdef ZC_HAVE_MBEDTLS
+	/* Trust-on-first-use pin check; false means the peer certificate changed. */
+	bool pinPeerCertificate();
+#endif
+
 	/* mbedTLS BIO: mbedTLS writes/reads through the QTcpSocket, so the Qt event
 	   loop drives everything and nothing blocks. */
 	static int bioSend(void *ctx, const unsigned char *buf, size_t len);
@@ -101,6 +106,7 @@ private:
 	QTcpSocket *tcp_ = nullptr;
 	QTimer *timer_ = nullptr;
 	Tls *tls_ = nullptr;
+	QString host_;          /* peer host, for the TOFU certificate pin */
 	bool is_tls_ = false;
 	bool ready_ = false;    /* handshake done / plain TCP connected */
 	bool reported_ = false; /* an error was already reported */

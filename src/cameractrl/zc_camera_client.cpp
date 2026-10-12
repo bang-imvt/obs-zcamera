@@ -41,6 +41,10 @@ ZcCameraClient::ZcCameraClient(QObject *parent) : QObject(parent)
 	settings_.setTransport(&transport_);
 	QObject::connect(&settings_, &ZcSettingsEngine::groupRefreshed, this,
 			 &ZcCameraClient::groupRefreshed);
+	/* Forward the transport's request log so the debug panel (built only with
+	   ZC_ENABLE_DEBUG_PANEL) actually has a producer; harmless when unconnected. */
+	QObject::connect(&transport_, &ZcHttpTransport::requestLogged, this,
+			 &ZcCameraClient::requestLogged);
 }
 
 ZcCameraClient::~ZcCameraClient() = default;
@@ -87,8 +91,11 @@ bool ZcCameraClient::connect(const QString &host, int port,
 	}
 
 	/* Start the WebSocket notifications (wss when origin is https), carrying
-	   the Digest Authorization / cookie / x-auth-token from the transport. */
+	   the Digest Authorization / cookie / x-auth-token from the transport. The
+	   notifier rebuilds that header from the live transport on every reconnect
+	   (a /login/ no-op success leaves the stored snapshot empty otherwise). */
 	bool https = transport_.baseUrl().startsWith("https://");
+	notifier_.setTransport(&transport_);
 	notifier_.start(host, https, transport_.upgradeHeaderBlock());
 
 	/* Read initial state. */
@@ -96,6 +103,14 @@ bool ZcCameraClient::connect(const QString &host, int port,
 	refreshCameraInfo();
 
 	connected_ = true;
+
+	/* A camera left in playback mode (from its own web UI) shows no live stream
+	   and ignores every setting write, with no error — it looks like the plugin
+	   is broken (bug list "camera in playback mode"). Put it back in record
+	   standby as part of connecting (RD: set rec mode, not play). Best effort:
+	   a camera that does not have the endpoint just ignores it. */
+	setMode(QStringLiteral("to_rec"));
+
 	emit connectionStateChanged(true);
 	return true;
 }
@@ -182,6 +197,13 @@ void ZcCameraClient::handleWsEvent(const QString &what,
 				   obj.value("roi_y").toDouble(),
 				   obj.value("roi_w").toDouble(),
 				   obj.value("roi_h").toDouble());
+	} else if (what == ws_events::kPtzfChange) {
+		/* The head reports its live pan/tilt (and zoom position) here as it
+		   moves, so the panel's position read-out follows the joystick without
+		   polling the camera's single-threaded HTTP server. */
+		emit ptzPositionChanged(obj.value("pan_pos").toDouble(),
+					obj.value("tilt_pos").toDouble(),
+					obj.value("fPosPercent").toDouble());
 	} else if (what == ws_events::kFramingStatus) {
 		/* The live switches ride on this message (detect/trace as 1/0), so the
 		   panel repaints straight from it — no extra request to the camera's
@@ -325,6 +347,20 @@ void ZcCameraClient::ptzQuery(bool detail,
 	if (detail)
 		q.addQueryItem("detail", "y");
 	transport_.getQuery(http::kPt, q, jsonObjectCb(cb), 20000);
+}
+
+/* Range limit: move one corner of the head's travel box. `direct` selects the
+   corner the camera moves — "upright" (pan_max/tilt_max) or "downleft"
+   (pan_min/tilt_min) — and the camera's own web UI always sends the whole pair
+   for that corner, so both numbers are passed through. */
+void ZcCameraClient::ptzLimitUpdate(const QString &direct, double pan, double tilt)
+{
+	QUrlQuery q;
+	q.addQueryItem("action", "limit");
+	q.addQueryItem("direct", direct);
+	q.addQueryItem("pan_pos", QString::number(qRound(pan)));
+	q.addQueryItem("tilt_pos", QString::number(qRound(tilt)));
+	sendQuery(transport_, http::kPt, "", q);
 }
 
 void ZcCameraClient::ptzGoto(float pan, float tilt, float speed,
@@ -602,9 +638,13 @@ void ZcCameraClient::ptzPresetSetSpeedByIndex(int index, int speed)
 
 void ZcCameraClient::ptzPresetSetSpeedByDuration(int index, int seconds)
 {
-	/* The camera stores the duration in milliseconds. */
+	/* The wire unit is seconds: the camera's own web UI sends
+	   `preset_time = s.time / 1e3`, i.e. its millisecond value converted to
+	   seconds. Sending the raw millisecond value instead made every recall time
+	   collapse back to the camera's default (bug list "recall speed is
+	   ineffective when the unit is Time"). */
 	sendPreset(transport_, "preset_speed", index,
-		   {{"preset_time", QString::number(seconds * 1000)}});
+		   {{"preset_time", QString::number(seconds)}});
 }
 
 QString ZcCameraClient::presetThumbnailPath(int index)

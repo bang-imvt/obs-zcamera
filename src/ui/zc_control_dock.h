@@ -54,6 +54,7 @@ class QCheckBox;
 class QSpinBox;
 class QFrame;
 class QBoxLayout;
+class QScrollArea;
 class QTabWidget;
 class QPaintEvent;
 class QMouseEvent;
@@ -168,6 +169,9 @@ public:
 	   backend). hidden again by hidePrompts() once connected. */
 	void showLoginPrompt(const QString &host);
 	void showTlsPrompt(const QString &host);
+	/* The submitted credentials were rejected: keep the form up and say so
+	   (bug list "wrong credentials are not validated or reported"). */
+	void showLoginError();
 	void hidePrompts();
 
 public slots:
@@ -193,6 +197,10 @@ private:
 	/* Write one setting and, when the camera applies it by restarting, tell the
 	   dock so it can wait for the camera and reconnect (bug 8). */
 	void writeKey(const QString &key, const QString &value);
+	/* Show only the row the PTZ "common speed unit" selects: the speed row for
+	   unit 0, the time row for unit 1, hiding the other (bug list "switching the
+	   common speed unit does not show the matching speed/time row"). */
+	void updatePtzCommonRows();
 
 	/* The stream bar: the encoder's own document, always at the top of the tab
 	   rather than in the group list, because these are the settings that matter
@@ -210,6 +218,10 @@ private:
 	ZcCameraClient *client_ = nullptr;
 	QListWidget *subtabList_ = nullptr;
 	QWidget *rowsContainer_ = nullptr;
+	/* The label + control widgets of each rendered row, keyed by setting id, so
+	   a row can be hidden/shown without rebuilding the pane (used by the PTZ
+	   common-speed-unit linkage). Rebuilt on every buildRows(). */
+	QHash<QString, QList<QWidget *>> rowWidgets_;
 	/* The catalog currently rendered, so a late getbatch reply knows whether
 	   it still owns the rows pane. */
 	QString catalog_;
@@ -218,6 +230,8 @@ private:
 	   connected; hidden once it is). */
 	QWidget *loginPage_ = nullptr;
 	QLabel *promptHint_ = nullptr;
+	/* Rejection notice shown under the form after a failed login. */
+	QLabel *loginError_ = nullptr;
 	/* The username/password fields + login button, wrapped as one unit so the
 	   HTTPS notice can hide the whole form at once (labels included). */
 	QWidget *loginFields_ = nullptr;
@@ -257,6 +271,12 @@ public:
 
 	void setClient(ZcCameraClient *client);
 
+	/* Re-read the current position and the range limit from the camera and
+	   repaint. A no-op without a client. */
+	void refreshState();
+	/* Live position from a ptzfChange notification. */
+	void setPosition(double pan, double tilt);
+
 signals:
 	void moveRequested(int pan, int tilt);
 	void homeRequested();
@@ -269,6 +289,9 @@ protected:
 
 private:
 	enum class JoystickMode { None, Sector, FreeDrag };
+	/* The four edges of the travel box, in the order the sliders are stacked
+	   (matching the camera's web UI "Range Limit" group). */
+	enum Edge { EdgeUp = 0, EdgeRight, EdgeDown, EdgeLeft, EdgeCount };
 
 	/* Recompute joystick geometry from the (fixed-size) joystick area. */
 	void updateGeometry();
@@ -280,11 +303,37 @@ private:
 	void moveAnalog(const QPointF &offset);
 	void stopMoving();
 
+	/* Lay the four range-limit sliders out from the stored limit/unlimit box:
+	   with the limit on they sit on the stored boundary, with it off on the
+	   camera's full travel. */
+	void applyLimitBox(bool enabled);
+	/* Send the corner an edge belongs to (up/right -> "upright", down/left ->
+	   "downleft"), taking the other axis from the neighbouring slider. */
+	void pushLimit(Edge edge);
+	/* Refresh one edge's degree read-out. */
+	void updateLimitLabel(Edge edge);
+	/* Set one edge to the head's current position (the web UI's "取当前位"). */
+	void setEdgeToCurrent(Edge edge);
+
 	ZcCameraClient *client_ = nullptr;
 	QWidget *joystickArea_ = nullptr;
 	QSlider *speedSlider_ = nullptr;
 	QPushButton *homeButton_ = nullptr;
 	QPushButton *stopButton_ = nullptr;
+
+	/* Current Position read-out (live, from ptzfChange / the query reply). */
+	QLabel *positionLabel_ = nullptr;
+	/* Range Limit group: enable + four edge sliders + their degree read-outs and
+	   per-edge "set to current" buttons (bug list: the Range Limit group was not
+	   implemented). */
+	QCheckBox *limitCheck_ = nullptr;
+	QSlider *limitSlider_[EdgeCount] = {};
+	QLabel *limitValue_[EdgeCount] = {};
+	QPushButton *limitCurrent_[EdgeCount] = {};
+	bool limitLoaded_ = false;
+	/* Stored limit (current) and unlimit (full travel) box, in whole degrees. */
+	int panMin_ = 0, panMax_ = 0, tiltMin_ = 0, tiltMax_ = 0;
+	int upanMin_ = 0, upanMax_ = 0, utiltMin_ = 0, utiltMax_ = 0;
 
 	QRectF joystickRect_;
 	QPointF joyCenter_;
@@ -299,12 +348,12 @@ private:
 /* Auto-framing, split out of the PTZ joystick into its own tab (the camera's web
    UI keeps a matching panel too).
 
-   DEFERRED FROM THE UI: this panel speaks the whole /ctrl/framing API, but its
-   layout is still far from the camera's own page — that one drives a
-   framing-box canvas, a FOV composition preview and EzFraming
-   click-to-centre/zoom — so ZcControlDock keeps the tab out of the tab bar
-   (kFramingPanelVisible in zc_control_dock.cpp). The class, its client calls and
-   its WebSocket wiring are all retained so re-enabling is a one-line change.
+   SHOWN IN THE UI: this panel speaks the whole /ctrl/framing API and
+   ZcControlDock inserts it as its own tab for a camera whose /info reports auto
+   framing. Its layout mirrors the camera page's non-canvas controls; the
+   framing-box canvas, the FOV composition preview and EzFraming
+   click-to-centre/zoom are not reproduced. `kFramingPanelVisible` in
+   zc_control_dock.cpp is the single switch that shows/hides the tab.
 
    This mirrors that panel's non-canvas controls:
    the switches, the scene / start-position / target-number / lost-action
@@ -505,6 +554,10 @@ private slots:
 	void tryReconnect();
 
 private:
+	/* The body of openCamera(): connects a fresh client and, on failure, tears it
+	   down again. Split out so openCamera() can hold the re-entrancy guard around
+	   it (see opening_ below). */
+	bool openCameraNow(const QString &host, const ZcCredentials &creds);
 	/* Create/reuse an obs-zcamera source pointing at `host` and add it to the
 	   current scene. Runs on the OBS frontend (Qt main) thread. */
 	void addCameraToSource(const QString &host);
@@ -532,6 +585,9 @@ private:
 	/* Container for the PTZ tab (joystick + preset list); only inserted into
 	   the tab bar when the camera supports PTZ. */
 	QWidget *ptzTab_ = nullptr;
+	/* The PTZ pad scrolls inside this (it carries the joystick, the position
+	   read-out and the range-limit rows). */
+	QScrollArea *ptzScroll_ = nullptr;
 	/* Container for the auto-framing tab, shown alongside the PTZ tab. */
 	QWidget *framingTab_ = nullptr;
 	QTabWidget *tabs_ = nullptr;
@@ -557,6 +613,17 @@ private:
 	   discovered camera that does not answer, instead of clearing it at the next
 	   scan (spec §1, L11). */
 	QSet<QString> unreachableHosts_;
+	/* Re-entrancy guard: ZcCameraClient::connect() runs a nested event loop (the
+	   origin probe), so openCamera() — and onCameraClicked() under it — can be
+	   re-entered from an event delivered while a connect is in flight. A second
+	   entry would run `delete client_` while the first client's connect() frame
+	   is still on the stack, freeing its transport mid-call (crash in
+	   negotiateOrigin at the base_url_ build). While true, a second request is
+	   remembered instead of served. */
+	bool opening_ = false;
+	/* A camera pick that arrived while opening_; served once opening_ clears. */
+	bool pendingClick_ = false;
+	QString pendingClickHost_;
 	/* mDNS discovery refresh. */
 	QTimer *scanTimer_ = nullptr;
 	/* Polls for a camera that a setting write made restart (bug 8). */

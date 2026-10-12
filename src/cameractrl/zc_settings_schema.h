@@ -97,6 +97,9 @@ constexpr const char *kTemp = "TempUpdate";
 constexpr const char *kStreamChanged = "UpdateStreamSetting";
 constexpr const char *kConfigChanged = "ConfigChanged";
 constexpr const char *kAfArea = "UpdateAfArea";
+/* Live PTZ position: {"what":"ptzfChange","pan_pos":..,"tilt_pos":..,
+   "fPosPercent":..} (the camera's own web UI reads the same message). */
+constexpr const char *kPtzfChange = "ptzfChange";
 /* Auto framing. The status event carries the live switches (detect/trace, as
    1/0); the setting event means the stored configuration changed. */
 constexpr const char *kFramingStatus = "FramingStatusChanged";

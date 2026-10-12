@@ -128,6 +128,14 @@ public:
 	/* Those three as ready-to-send CRLF-separated upgrade header lines. */
 	QByteArray upgradeHeaderBlock() const;
 
+	/* Same block, but rebuilt from the CURRENT auth state first. The cached
+	   Authorization goes stale between WebSocket reconnects — login() clears it
+	   and nc must advance per nonce — so the notifier calls this at every
+	   (re)connect instead of replaying the snapshot handed to start(). Computes
+	   a fresh Digest response for the upgrade request line (GET /) when a nonce
+	   is known. */
+	QByteArray currentUpgradeHeaderBlock();
+
 	/* One-shot GET/POST. Enqueued behind any in-flight request. */
 	void get(const QString &path, ZcHttpCallback cb,
 		 int timeoutMs = 20000);
@@ -155,11 +163,20 @@ private:
 						const QString &error,
 						bool timedOut)>;
 
+	/* Cancels an in-flight exchange without delivering its result. Handed back
+	   by dispatch() so the nested-loop watchdogs (requestSync/loginSync) can
+	   abort a timed-out exchange before they return — otherwise a late
+	   completion would write into stack variables that no longer exist. Empty
+	   when no exchange was created. */
+	using ExchangeCancel = std::function<void()>;
+
 	void enqueue(std::function<void()> run);
 	void pump();
-	/* Start one request on a fresh connection and report it through `done`. */
+	/* Start one request on a fresh connection and report it through `done`.
+	   `cancel`, when supplied, receives a handle that aborts the exchange. */
 	void dispatch(const char *method, const QString &pathWithQuery,
-		      const QByteArray &body, int timeoutMs, ExchangeDone done);
+		      const QByteArray &body, int timeoutMs, ExchangeDone done,
+		      ExchangeCancel *cancel = nullptr);
 	/* Event-loop-driven "synchronous" request for the probes, which the callers
 	   already treat as blocking. */
 	bool requestSync(const char *method, const QString &pathWithQuery,
