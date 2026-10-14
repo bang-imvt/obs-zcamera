@@ -112,6 +112,10 @@ static QString settingLabel(const QString &key)
 		{QStringLiteral("max_shutter"), "ZCameraPlugin.Setting.MaxShutter"},
 		{QStringLiteral("sht_operation"),
 		 "ZCameraPlugin.Setting.ShutterOperation"},
+		{QStringLiteral("exposure_window_idx"),
+		 "ZCameraPlugin.Setting.ExposureWindow"},
+		{QStringLiteral("extended_iso"),
+		 "ZCameraPlugin.Setting.ExtendedIso"},
 		{QStringLiteral("flicker"), "ZCameraPlugin.Setting.Flicker"},
 		{QStringLiteral("meter_mode"), "ZCameraPlugin.Setting.MeterMode"},
 		{QStringLiteral("iris"), "ZCameraPlugin.Setting.Iris"},
@@ -135,6 +139,14 @@ static QString settingLabel(const QString &key)
 		{QStringLiteral("mwb_r"), "ZCameraPlugin.Setting.MwbR"},
 		{QStringLiteral("mwb_g"), "ZCameraPlugin.Setting.MwbG"},
 		{QStringLiteral("mwb_b"), "ZCameraPlugin.Setting.MwbB"},
+		/* Some firmwares name the white-balance offsets with the _offset
+		   suffix; both forms get the readable label (bug list #45). */
+		{QStringLiteral("mwb_r_offset"),
+		 "ZCameraPlugin.Setting.MwbROffset"},
+		{QStringLiteral("mwb_g_offset"),
+		 "ZCameraPlugin.Setting.MwbGOffset"},
+		{QStringLiteral("mwb_b_offset"),
+		 "ZCameraPlugin.Setting.MwbBOffset"},
 		/* lens / focus */
 		{QStringLiteral("focus"), "ZCameraPlugin.Setting.Focus"},
 		{QStringLiteral("af_mode"), "ZCameraPlugin.Setting.AfMode"},
@@ -174,6 +186,10 @@ static QString settingLabel(const QString &key)
 		 "ZCameraPlugin.Setting.SplitDuration"},
 		{QStringLiteral("rec_fps"), "ZCameraPlugin.Setting.RecFps"},
 		{QStringLiteral("preroll"), "ZCameraPlugin.Setting.Preroll"},
+		{QStringLiteral("preroll_duration"),
+		 "ZCameraPlugin.Setting.PrerollDuration"},
+		{QStringLiteral("rec_frame_indicator"),
+		 "ZCameraPlugin.Setting.RecFrameIndicator"},
 		{QStringLiteral("video_tl_interval"),
 		 "ZCameraPlugin.Setting.VideoTlInterval"},
 		{QStringLiteral("record_meta"), "ZCameraPlugin.Setting.RecordMeta"},
@@ -201,6 +217,8 @@ static QString settingLabel(const QString &key)
 		{QStringLiteral("ain_gain_type"), "ZCameraPlugin.Setting.InputGainType"},
 		{QStringLiteral("audio_input_level"),
 		 "ZCameraPlugin.Setting.AudioInputLevel"},
+		{QStringLiteral("xlr_input_level"),
+		 "ZCameraPlugin.Setting.XlrInputLevel"},
 		{QStringLiteral("audio_input_gain"),
 		 "ZCameraPlugin.Setting.AudioInputGain"},
 		{QStringLiteral("audio_noise_reduction"),
@@ -839,7 +857,24 @@ ZcSettingsPanel::ZcSettingsPanel(QWidget *parent) : QWidget(parent)
 					  loginFields_));
 		loginPass_ = new QLineEdit(loginFields_);
 		loginPass_->setEchoMode(QLineEdit::Password);
+		/* A reveal toggle: the typed password stays visible on demand
+		   instead of only dots (bug list "no show/hide toggle"). */
+		passReveal_ = new QToolButton(loginFields_);
+		passReveal_->setCheckable(true);
+		passReveal_->setText(ztr("ZCameraPlugin.Dock.AuthShow"));
+		passReveal_->setToolTip(ztr("ZCameraPlugin.Dock.AuthShowTip"));
+		const auto applyReveal = [this](bool shown) {
+			loginPass_->setEchoMode(shown ? QLineEdit::Normal
+						      : QLineEdit::Password);
+			passReveal_->setText(ztr(shown ? "ZCameraPlugin.Dock."
+							 "AuthHide"
+						       : "ZCameraPlugin.Dock."
+							 "AuthShow"));
+		};
+		applyReveal(false);
+		connect(passReveal_, &QToolButton::toggled, this, applyReveal);
 		pRow->addWidget(loginPass_, 1);
+		pRow->addWidget(passReveal_);
 		lf->addLayout(pRow);
 		loginBtn_ = new QPushButton(ztr("ZCameraPlugin.Dock.AuthLogin"), loginFields_);
 		lf->addWidget(loginBtn_, 0, Qt::AlignRight);
@@ -901,6 +936,12 @@ void ZcSettingsPanel::showLoginPrompt(const QString &host)
 	loginHost_ = host;
 	if (loginError_)
 		loginError_->hide();
+	/* Re-arm a form that a previous run of failed logins locked out: a fresh
+	   prompt is a fresh chance (bug list #3). */
+	loginBtn_->setEnabled(true);
+	loginUser_->setEnabled(true);
+	loginPass_->setEnabled(true);
+	passReveal_->setEnabled(true);
 	promptHint_->setText(ztr("ZCameraPlugin.Dock.AuthNeeded").arg(host));
 	loginFields_->show();
 	loginPage_->show();
@@ -911,7 +952,9 @@ void ZcSettingsPanel::showLoginPrompt(const QString &host)
 
 /* The camera rejected the submitted credentials: show the form again with a
    notice so the operator knows the login was tried and failed rather than the
-   click doing nothing (bug list "wrong credentials are not reported"). */
+   click doing nothing (bug list "wrong credentials are not reported"). The
+   typed password is KEPT (bug list #30): clearing it made a retry start from
+   nothing and hid what had actually been sent. */
 void ZcSettingsPanel::showLoginError()
 {
 	if (loginError_) {
@@ -922,8 +965,27 @@ void ZcSettingsPanel::showLoginError()
 	loginPage_->show();
 	subtabList_->hide();
 	rowsContainer_->hide();
-	loginPass_->clear();
 	loginPass_->setFocus();
+}
+
+/* Five rejected logins in a row: the camera has locked the account (bug list
+   #3 — after 5 wrong passwords the camera stops accepting logins and the old
+   build fell through to an empty settings page). Say so, and take the form
+   out of action until a fresh prompt re-arms it. */
+void ZcSettingsPanel::showLoginLocked()
+{
+	if (loginError_) {
+		loginError_->setText(ztr("ZCameraPlugin.Dock.AuthLocked"));
+		loginError_->show();
+	}
+	loginBtn_->setEnabled(false);
+	loginUser_->setEnabled(false);
+	loginPass_->setEnabled(false);
+	passReveal_->setEnabled(false);
+	loginFields_->show();
+	loginPage_->show();
+	subtabList_->hide();
+	rowsContainer_->hide();
 }
 
 /* HTTPS-only camera with no TLS backend: tell the operator to switch to HTTP,
@@ -1004,6 +1066,14 @@ void ZcSettingsPanel::writeKey(const QString &key, const QString &value)
 	   and reconnect instead of leaving the pane dead (bug 8). */
 	if (zc::settingRebootsCamera(key))
 		emit cameraRestarting();
+	/* The camera follows the main resolution / recording fps when it lays out
+	   its network stream: changing either here silently changes what stream1
+	   offers, so re-read the stream document a moment later and repaint the
+	   top bar (bug list "changing the main resolution/fps does not refresh
+	   stream1"). The camera needs a beat to apply the write first. */
+	if (key == QLatin1String("resolution") ||
+	    key == QLatin1String("project_fps"))
+		QTimer::singleShot(600, this, [this]() { loadStream(); });
 }
 
 /* Read the stream document and repaint the bar. The first read of a camera also
@@ -1250,9 +1320,10 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		    rowsContainer_);
 		label->setMinimumWidth(170);
 		label->setStyleSheet("color:#eef2ed;");
-		/* The camera's own key stays reachable: a locale may rename a row, but
-		   the raw id is what the camera and its web UI use. */
-		label->setToolTip(key);
+		/* Bug list #46: in the Chinese UI the tooltip must read Chinese too —
+		   it repeats the localized label (a row whose label is elided by a
+		   narrow pane stays readable), not the raw camera id. */
+		label->setToolTip(settingLabel(key));
 		row->addWidget(label);
 		row->addStretch(1);
 
@@ -2180,18 +2251,51 @@ void ZcPtzPad::moveInDirection(int dirIndex)
 
 void ZcPtzPad::moveAnalog(const QPointF &offset)
 {
-	qreal px = offset.x() / joyOuterRadius_;
-	qreal py = offset.y() / joyOuterRadius_;
-	px = std::max<qreal>(-1.0, std::min<qreal>(1.0, px));
-	py = std::max<qreal>(-1.0, std::min<qreal>(1.0, py));
-	/* Drag distance from centre is the speed (0-1); the direction is where the
-	   knob is dragged (bug 9). */
-	const float fspeed = (float)std::min<qreal>(1.0, std::hypot(px, py));
-	const int pan = (px > 0) - (px < 0);
-	const int tilt = (py > 0) - (py < 0);
+	/* The camera page's own centre-knob math (controller.js, the PTZ
+	   joystick): the drag vector is clamped radially, split per axis with the
+	   sign carrying the direction -- positive pan = right, positive tilt = UP
+	   (the page negates screen-down) -- and scaled by sqrt-2 so a
+	   full-length diagonal still drives both axes at full speed. The page
+	   sends it as `action=pt&pan_speed=&tilt_speed=` (Api.pt.ptMove), so the
+	   centre knob sends exactly that now instead of a direction word with
+	   one fspeed (bug list #28). The sector keys keep the fspeed path. */
+	const qreal lim = qMax(8.0, joyInnerRadius_ * 0.42);
+	qreal px = qBound(-1.0, offset.x() / lim, 1.0);
+	qreal py = qBound(-1.0, offset.y() / lim, 1.0);
+	const qreal len = std::hypot(px, py);
+	if (len > 1.0) {
+		px /= len;
+		py /= len;
+	}
+	const qreal kSqrt2 = 1.4142135623730951;
+	qreal pan = qBound(-1.0, px * kSqrt2, 1.0);
+	qreal tilt = qBound(-1.0, -py * kSqrt2, 1.0);
+	/* The page's 3% centre dead zone; inside it the head is stopped, and the
+	   stop is sent once, not on every mouse move. */
+	const qreal kDead = 0.03;
+	if (std::abs(pan) < kDead)
+		pan = 0.0;
+	if (std::abs(tilt) < kDead)
+		tilt = 0.0;
+	if (pan == 0.0 && tilt == 0.0) {
+		if (analogMoving_) {
+			analogMoving_ = false;
+			stopMoving();
+		}
+		return;
+	}
+	/* Mouse moves arrive far faster than the single-threaded httpd can
+	   answer, so quantize to 1/20 steps and skip repeats of the same pair. */
+	const float qPan = float(qRound(pan * 20.0)) / 20.0f;
+	const float qTilt = float(qRound(tilt * 20.0)) / 20.0f;
+	if (analogMoving_ && qPan == analogPan_ && qTilt == analogTilt_)
+		return;
+	analogMoving_ = true;
+	analogPan_ = qPan;
+	analogTilt_ = qTilt;
 	if (client_)
-		client_->ptzMoveAction(QLatin1String(ptzActionFor(pan, tilt)), fspeed);
-	emit moveRequested(pan, tilt);
+		client_->ptzMoveAnalog(qPan, qTilt);
+	emit moveRequested((px > 0) - (px < 0), (py > 0) - (py < 0));
 }
 
 void ZcPtzPad::stopMoving()
@@ -2319,6 +2423,7 @@ void ZcPtzPad::mouseReleaseEvent(QMouseEvent *event)
 		mode_ = JoystickMode::None;
 		activeDir_ = -1;
 		dragOffset_ = QPointF(0, 0);
+		analogMoving_ = false;
 		releaseMouse();
 		update();
 	}
@@ -2353,6 +2458,10 @@ const char *const kFramingScenes[] = {"General", "Sports"};
 const char *const kFramingLostActions[] = {"Remain", "Wide", "Start Position"};
 constexpr int kFramingTargetNumMin = 1;
 constexpr int kFramingTargetNumMax = 8;
+/* The camera ships five built-in composition presets (bug list #12.4): they
+   are the factory defaults and its page refuses to delete them, so Delete on
+   their rows is refused too. */
+constexpr int kFramingPresetDefaultCount = 5;
 /* The camera's speed sliders run the full signed range on this firmware. */
 constexpr int kFramingSpeedMin = -100;
 constexpr int kFramingSpeedMax = 100;
@@ -3315,6 +3424,13 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		if (painting_ || !client_)
 			return;
 		client_->setFramingAutoTarget(index == 1);
+		/* Mirror the page at once (#15/#16): the refresh that follows the
+		   write re-states this from the camera, but the click should not
+		   leave a dead control looking live for a second. */
+		if (waitTimeSp_)
+			waitTimeSp_->setEnabled(index != 1);
+		if (detectRestartSp_)
+			detectRestartSp_->setEnabled(index == 1);
 	};
 
 	lostTimeoutSp_ = new ZcSliderSpin(colLost->parentWidget());
@@ -3559,6 +3675,18 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 				const int i = selectedRow();
 				if (!client_ || i < 0)
 					return;
+				/* The five factory presets are permanent (#12.4): the
+				   page never removes them, so a delete click on one is
+				   answered instead of being sent to a camera that will
+				   only refuse it. */
+				if (i < kFramingPresetDefaultCount) {
+					QMessageBox::information(
+					    this,
+					    ztr("ZCameraPlugin.Framing.GroupPreset"),
+					    ztr("ZCameraPlugin.Framing."
+						"PresetDefaultLocked"));
+					return;
+				}
 				if (!askConfirm(
 					ztr("ZCameraPlugin.Framing.PresetDeleteConfirm")
 					    .arg(presetNames_.value(i))))
@@ -4286,6 +4414,26 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 		gate(zoomLockSeg_, doc.contains("zoom_lock"));
 		gate(sensitivitySp_, doc.contains("sensitivity"));
 		gate(accelerationSp_, doc.contains("acceleration"));
+		/* "Recording triggered by tracking" does not exist on the firmwares
+		   whose all_status has no tracking_record (bug list #19) -- same
+		   treatment as Lock zoom: disabled with the reason, not a click that
+		   can only fail. */
+		gate(trackingRecordSeg_, doc.contains("tracking_record"));
+
+		/* Bug list #15/#16: the page greys the two delays against Auto
+		   Target (_cam_framing.js: wait_time goes read-only while auto
+		   target is On -- the camera re-picks a target itself, so a
+		   lost-action wait never runs -- and detect_restart goes read-only
+		   while it is Off -- with automatic target picking there is no
+		   "detect again" delay to wait out). The delays sit on the Settings
+		   page, which stays live with detection off, so this is the only
+		   gate they have. */
+		const bool autoTarget = autoTargetSeg_ &&
+					autoTargetSeg_->currentIndex() == 1;
+		if (waitTimeSp_)
+			waitTimeSp_->setEnabled(!autoTarget);
+		if (detectRestartSp_)
+			detectRestartSp_->setEnabled(autoTarget);
 		haveSnapshot_ = true;
 	}
 
@@ -4484,10 +4632,20 @@ void ZcPresetPanel::buildUi()
 	modeRow->addWidget(modeLabel_);
 	layout->addLayout(modeRow);
 
-	connect(presetModeBtn_, &QPushButton::clicked, this,
-		[this]() { setTraceMode(false); });
-	connect(traceModeBtn_, &QPushButton::clicked, this,
-		[this]() { setTraceMode(true); });
+	/* Clicking the active button toggles it visually unchecked before the
+	   handler runs, which used to leave BOTH family buttons unchecked (bug
+	   list "Preset/Trace toggle can leave both unselected"). Re-assert the
+	   check states here; setTraceMode then ignores the no-op change. */
+	connect(presetModeBtn_, &QPushButton::clicked, this, [this]() {
+		presetModeBtn_->setChecked(true);
+		traceModeBtn_->setChecked(false);
+		setTraceMode(false);
+	});
+	connect(traceModeBtn_, &QPushButton::clicked, this, [this]() {
+		traceModeBtn_->setChecked(true);
+		presetModeBtn_->setChecked(false);
+		setTraceMode(true);
+	});
 
 	/* Page selector: one button per page of 10 slots. */
 	auto *pageRow = new QHBoxLayout;
@@ -5260,6 +5418,18 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 
 	/* Status bar. */
 	auto *statusBar = new QHBoxLayout;
+	/* Recording badge (bug list #20): the camera can start recording itself
+	   when "recording triggered by tracking" is on and tracking locks on,
+	   and nothing else in the dock said so. Driven by the camera's own
+	   RecStarted / RecStoped notifications, which cover every way recording
+	   begins -- a track-triggered one included. */
+	recBadge_ = new QLabel("● REC", container);
+	recBadge_->setStyleSheet(
+	    "color:#ff6b6b;background:rgba(0,0,0,.35);border-radius:3px;"
+	    "padding:2px 8px;font-weight:bold;");
+	recBadge_->setToolTip(ztr("ZCameraPlugin.Dock.RecBadgeTip"));
+	recBadge_->hide();
+	statusBar->addWidget(recBadge_);
 	statusBarLabel_ = new QLabel(ztr("ZCameraPlugin.Dock.StatusDisconnected"), container);
 	statusBarLabel_->setStyleSheet("color:#8a9bb2;padding:2px 6px;");
 	statusBar->addWidget(statusBarLabel_);
@@ -5802,10 +5972,68 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 	client_->refreshStatus();
 	settings_->refreshGroup();
 
+	/* The status line, with the playback caveat (bug list #94): a camera left
+	   in its playback mode ignores every setting write, and the only symptom
+	   was "nothing works". The client already forces record mode on connect
+	   (RD note), but the operator can still switch it on the camera itself;
+	   when that happens the line says so in amber instead of the plain
+	   connected text. */
+	const auto updateModeStatus = [this]() {
+		if (!client_)
+			return;
+		const QString mode = client_->mode();
+		if (mode.contains(QLatin1String("play"),
+				  Qt::CaseInsensitive)) {
+			statusBarLabel_->setStyleSheet(
+			    "color:#d8b878;padding:2px 6px;");
+			statusBarLabel_->setText(
+			    ztr("ZCameraPlugin.Dock.PlaybackMode")
+				.arg(currentHost_));
+		} else {
+			statusBarLabel_->setStyleSheet(
+			    "color:#8a9bb2;padding:2px 6px;");
+			statusBarLabel_->setText(
+			    ztr("ZCameraPlugin.Dock.ConnectedMode")
+				.arg(currentHost_)
+				.arg(mode));
+		}
+	};
 	connect(client_, &ZcCameraClient::statusChanged, this,
-		[this](const QJsonObject &) {
+		[this, updateModeStatus](const QJsonObject &status) {
 			if (client_)
-				statusBarLabel_->setText(ztr("ZCameraPlugin.Dock.ConnectedMode").arg(currentHost_).arg(client_->mode()));
+				updateModeStatus();
+			if (recBadge_ &&
+			    status.contains(QLatin1String("recording")))
+				recBadge_->setVisible(
+				    status.value(QLatin1String("recording"))
+					.toBool());
+		});
+	connect(client_, &ZcCameraClient::modeChanged, this,
+		[updateModeStatus](const QString &) { updateModeStatus(); });
+	/* The REC badge (bug list #20). A fresh client starts not recording;
+	   from here the camera's own notifications keep it true. Some firmwares
+	   restate the recording flag in camera_status, so honour it when the
+	   payload carries it -- that also covers "already recording when we
+	   connected", which no RecStarted event will arrive for. */
+	if (recBadge_)
+		recBadge_->hide();
+	connect(client_, &ZcCameraClient::recordingStarted, this,
+		[this]() {
+			if (recBadge_)
+				recBadge_->show();
+		});
+	connect(client_, &ZcCameraClient::recordingStopped, this,
+		[this]() {
+			if (recBadge_)
+				recBadge_->hide();
+		});
+	/* A duration tick means the camera is recording right now -- this is
+	   also how a dock that attached mid-recording learns it, when the
+	   firmware's camera_status carries no recording flag for it. */
+	connect(client_, &ZcCameraClient::recordingDuration, this,
+		[this](int seconds) {
+			if (recBadge_ && seconds > 0)
+				recBadge_->show();
 		});
 	/* The camera's notification socket is a live heartbeat: when it drops (power
 	   loss / network drop) the row must show offline without the operator
@@ -5983,6 +6211,7 @@ void ZcControlDock::onLoginSubmitted(const QString &user, const QString &passwor
 	if (g_controlDockClosing)
 		return;
 	if (ok) {
+		loginAttempts_ = 0;
 		reachableHosts_.insert(currentHost_);
 		unreachableHosts_.remove(currentHost_);
 	} else if (lastAuthRequired_) {
@@ -5991,8 +6220,19 @@ void ZcControlDock::onLoginSubmitted(const QString &user, const QString &passwor
 		   like it did nothing (bug list "wrong credentials not validated").
 		   Only claim rejection when the camera actually challenged: a network
 		   timeout here is not a wrong password, and telling the operator the
-		   password was rejected sends them chasing the wrong thing. */
-		settings_->showLoginError();
+		   password was rejected sends them chasing the wrong thing.
+		   Five rejections in a row is the camera's own lockout (bug list #3),
+		   so at that point the form says the account is locked and stops
+		   accepting clicks. */
+		++loginAttempts_;
+		if (loginAttempts_ >= 5)
+			settings_->showLoginLocked();
+		else
+			settings_->showLoginError();
+	} else if (g_controlDockClosing == false) {
+		/* A failure that is not a rejection (timeout, unreachable) does not
+		   count toward the lockout. */
+		loginAttempts_ = 0;
 	}
 	refreshRailPresence();
 }

@@ -5,10 +5,8 @@
 # =====================================================================
 
 # ---- Design / planning docs ----
-# Track the markdown docs README links to; keep the bulky spreadsheet exports
-# (camra-buglist-*.xlsx, ~22 MB) out of the code repo.
-/doc/*
-!/doc/*.md
+# The whole doc folder stays out of the repo (bug lists, plans, spreadsheets).
+/doc/
 
 # ---- Build output (never commit) ----
 /build/

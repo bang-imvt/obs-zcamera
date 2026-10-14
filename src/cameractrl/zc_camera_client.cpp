@@ -348,6 +348,19 @@ void ZcCameraClient::ptzMoveAction(const QString &action, float fspeed)
 	sendQuery(transport_, http::kPt, "", q);
 }
 
+/* The web page's ptMove: `/ctrl/pt?action=pt&pan_speed=&tilt_speed=` with a
+   signed per-axis speed in -1..1 (controller.js Api.pt.ptMove). The camera
+   reads the direction from the sign, so a diagonal is one request with two
+   non-zero speeds. */
+void ZcCameraClient::ptzMoveAnalog(float panSpeed, float tiltSpeed)
+{
+	QUrlQuery q;
+	q.addQueryItem("action", "pt");
+	q.addQueryItem("pan_speed", QString::number(panSpeed, 'f', 2));
+	q.addQueryItem("tilt_speed", QString::number(tiltSpeed, 'f', 2));
+	sendQuery(transport_, http::kPt, "", q);
+}
+
 void ZcCameraClient::ptzStop()
 {
 	QUrlQuery q;

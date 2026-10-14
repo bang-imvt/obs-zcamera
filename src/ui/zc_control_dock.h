@@ -187,6 +187,11 @@ public:
 	/* The submitted credentials were rejected: keep the form up and say so
 	   (bug list "wrong credentials are not validated or reported"). */
 	void showLoginError();
+	/* Five rejected logins in a row: the camera locks the account out, so the
+	   form says so and stops accepting clicks until a fresh prompt (bug list
+	   "after 5 wrong passwords the login dialog vanishes and the main UI
+	   loads empty"). */
+	void showLoginLocked();
 	void hidePrompts();
 
 public slots:
@@ -252,6 +257,8 @@ private:
 	QWidget *loginFields_ = nullptr;
 	QLineEdit *loginUser_ = nullptr;
 	QLineEdit *loginPass_ = nullptr;
+	/* Reveal (show/hide) toggle for the password row (bug list #30). */
+	QToolButton *passReveal_ = nullptr;
 	QPushButton *loginBtn_ = nullptr;
 	QString loginHost_;
 
@@ -384,6 +391,11 @@ private:
 	JoystickMode mode_ = JoystickMode::None;
 	int activeDir_ = -1;
 	QPointF dragOffset_;
+	/* Centre-knob analog move (see moveAnalog): the last speeds sent, so a
+	   drag streams one request per change, not one per mouse move. */
+	bool analogMoving_ = false;
+	float analogPan_ = 0.0f;
+	float analogTilt_ = 0.0f;
 };
 
 /* Auto-framing, in its own tab, mirroring the camera's own Auto Framing pages
@@ -743,6 +755,9 @@ private:
 	QTabWidget *tabs_ = nullptr;
 	ZcCameraClient *client_ = nullptr;
 	QLabel *statusBarLabel_ = nullptr;
+	/* "● REC" while the camera records -- including the recording the camera
+	   starts itself when tracking triggers it (bug list #20). */
+	QLabel *recBadge_ = nullptr;
 	QPushButton *debugButton_ = nullptr;
 	ZcDebugPanel *debugPanel_ = nullptr;
 	QSplitter *splitter_ = nullptr;
@@ -778,6 +793,9 @@ private:
 	bool opening_ = false;
 	/* A camera pick that arrived while opening_; served once opening_ clears. */
 	bool pendingClick_ = false;
+	/* Rejected logins for the current camera (bug list: the camera locks the
+	   account after 5 wrong passwords). */
+	int loginAttempts_ = 0;
 	QString pendingClickHost_;
 	/* mDNS discovery refresh. */
 	QTimer *scanTimer_ = nullptr;

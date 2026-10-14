@@ -104,6 +104,11 @@ public:
 	   0-1 speed: the camera's /ctrl/pt expects `action=<dir>&fspeed=<0-1>`,
 	   not separate pan/tilt numbers. */
 	void ptzMoveAction(const QString &action, float fspeed);
+	/* Analog move: the centre of the joystick ball. The camera's own web page
+	   drives it with `action=pt&pan_speed=<signed>&tilt_speed=<signed>` —
+	   per-axis speeds in -1..1, sign = direction — not a direction word plus
+	   one fspeed (bug list #28). The sector keys keep ptzMoveAction. */
+	void ptzMoveAnalog(float panSpeed, float tiltSpeed);
 	void ptzStop();
 	void ptzHome();
 	/* Full PTZ state: current pan/tilt, flip, range limit (+ detail=y). */
