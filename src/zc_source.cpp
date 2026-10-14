@@ -65,13 +65,15 @@ extern "C" {
 #include "obs-ssp.h"
 
 #ifdef ENABLE_CAMERA_CONTROL
-/* The Properties bitrate control writes through the camera's HTTP API (see
-   ZcSspSource::applyBitrate). The cameractrl sources are compiled into this
-   plugin target only when camera control is on (CMakeLists), which is what
-   these #ifdef guards mirror; the property itself is hidden when camera
-   control is compiled out. */
-#include "cameractrl/zc_camera_client.h"
+/* The cameractrl sources are compiled into this plugin target only when camera
+   control is on (CMakeLists), which is what these #ifdef guards mirror. The
+   source itself writes nothing to the camera — the dock owns that — but the AI
+   overlay reads the camera's notification socket directly (see
+   ZcSspSource::startAiFeed), so it needs the notifier and its payload parser. */
 #include "cameractrl/zc_settings_schema.h"
+#include "cameractrl/zc_ws_notifier.h"
+#include "cameractrl/zc_ai_detect.h"
+#include <QThread>
 #include <QSet>
 #endif
 
@@ -119,10 +121,44 @@ static void release_frame_direct(struct zc_decoded_frame *frame)
 #define PROP_WAIT_I_FRAME "zc_wait_i_frame"
 #define PROP_SYNC_MODE "zc_sync_mode"
 #define PROP_LED_TALLY "zc_led_tally"
-/* Camera-side streaming bitrate in kbps, pushed to the camera's HTTP API on
-   Apply (0 = leave the camera's own value alone). Only offered when camera
-   control is compiled in. */
-#define PROP_BITRATE "zc_bitrate"
+/* Draw the camera's AI detection boxes (people / heads / faces) over this
+   source's picture. Only offered when camera control is compiled in. This is
+   the master switch: with it unticked drawAiOverlay() draws nothing at all,
+   whatever the camera is reporting — see ZcSspSource::drawAiOverlay. */
+#define PROP_AI_OVERLAY "zc_ai_overlay"
+/* Where the boxes may be drawn: a box in the program output is also a box in
+   the recording and the stream, and only a box in the program output is
+   visible in the standard preview pane. */
+#define PROP_AI_OVERLAY_MODE "zc_ai_overlay_mode"
+
+/* Values of PROP_AI_OVERLAY_MODE. PROGRAM draws the boxes into the picture
+   itself, so they show up wherever the source is rendered -- the preview
+   pane, a projector, the recording and the stream (this is what the camera's
+   own web page does). MONITOR keeps them out of the program output and draws
+   them only in passes that render this source on their own.
+
+   MONITOR is the default. It is the only choice that cannot leak a box into a
+   recording. Its cost is that OBS's standard preview pane shows nothing: that
+   pane does not render sources at all when Studio Mode is off, it blits the
+   already-rendered program texture (UI/window-basic-main.cpp, RenderMain ->
+   obs_render_main_texture_src_color_only), so anything held out of the program
+   is held out of that pane too. The passes that DO render the source by itself
+   -- and are therefore where monitor-only boxes appear -- are the Properties /
+   Filters / Interaction dialog previews, a Windowed Projector, and the Studio
+   Mode preview pane. */
+enum { ZC_AI_OVERLAY_PROGRAM = 0, ZC_AI_OVERLAY_MONITOR = 1 };
+
+/* macOS zero-copy. With ENABLE_ZERO_COPY the macOS source becomes an ordinary
+   OBS_SOURCE_VIDEO source: the native VideoToolbox session decodes straight
+   into a BGRA IOSurface, gs binds it as a GL_TEXTURE_RECTANGLE, and
+   video_render draws it — the same shape as the Windows path, no CPU copy and
+   no per-frame upload. Without ENABLE_ZERO_COPY the source stays on the
+   asynchronous CPU-frame path (obs_source_output_video2), which is also the
+   only path that keeps OBS's native 10-bit / HDR handling; a zero-copy build
+   renders 10-bit streams as 8-bit. */
+#if defined(__APPLE__) && defined(ENABLE_ZERO_COPY)
+#define ZC_MAC_ZERO_COPY 1
+#endif
 
 #define SYNC_INTERNAL 0
 #define SYNC_SSP_TIMESTAMP 1
@@ -186,15 +222,15 @@ private:
 	void teardownConnection();
 
 #ifdef ENABLE_CAMERA_CONTROL
-	/* Apply the Properties "Bitrate (kbps)" value to the camera's main
-	   stream: connect with the dock's remembered credentials, discover the
-	   stream index (app_stream1 -> legacy fallback, as the dock's Stream
-	   bar does) and write it. Never touches the SSP video path. */
-	void applyBitrate(int kbps);
-	void writeBitrate(ZcCameraClient *client, int kbps, const QString &index);
-	/* Delete ctrlClient_ and clear the in-flight flags. Caller must hold
-	   ctrlMutex_. */
-	void releaseControlClientLocked();
+	/* AI detection overlay (Properties checkbox). startAiFeed() opens the
+	   camera's own notification socket and keeps the latest detection in
+	   aiBoxes_; stopAiFeed() closes it; drawAiOverlay() paints it. All three
+	   run on the OBS UI thread except drawAiOverlay(), which runs on the
+	   graphics thread and only takes aiMutex_. */
+	void setAiOverlay(bool on);
+	void startAiFeed();
+	void stopAiFeed();
+	void drawAiOverlay(gs_effect_t *effect);
 #endif
 
 	/* Decoder swap helpers. createDecoder() touches the OBS graphics device,
@@ -346,43 +382,74 @@ private:
 #endif
 
 #ifdef ENABLE_CAMERA_CONTROL
-	/* Properties "Bitrate (kbps)" push (see applyBitrate). Everything here
-	   runs on the OBS UI thread — update() and stop() are OBS's calls there,
-	   and the client's replies are delivered by the Qt event loop that
-	   connect() pumps — but ctrlMutex_ still guards the client pointer so a
-	   future caller cannot race it. It is never held across connect(),
-	   which runs a nested event loop. */
-	std::mutex ctrlMutex_;
-	/* Lazily created; destroyed in stop() with the connection. */
-	ZcCameraClient *ctrlClient_ = nullptr;
-	/* The host ctrlClient_ was created for: a source re-pointed at another
-	   camera must not reuse that client. */
-	QString ctrlHost_;
-	/* The bitrate last written to the camera. Nothing is written unless the
-	   Properties value differs from it — obs_source_update fires for every
-	   unrelated property change too — and a failed write leaves it alone so
-	   the next Apply retries. */
-	int lastAppliedBitrate_ = 0;
-	/* A discovery + write round trip is live; connect() runs a nested event
-	   loop, so a re-entrant update() must not start a second one. */
-	bool bitratePushInFlight_ = false;
-	bool bitratePushSkipLogged_ = false;
-	/* stop() ran while applyBitrate() had connect() on the stack and
-	   deferred the client teardown to that frame (see the connect call). */
-	bool ctrlClientRetirePending_ = false;
+	/* AI detection overlay (see setAiOverlay / drawAiOverlay).
+	   aiNotifier_ lives on aiThread_, its own QThread, not on the thread that
+	   happened to call update(): the notifier owns a socket and two QTimers,
+	   which need a thread with a Qt event loop, and OBS does not guarantee that
+	   about the update() caller (see startAiFeed).
+
+	   aiOverlay_ is the whole overlay's master switch and is written by the
+	   thread that applies settings while drawAiOverlay() reads it on the
+	   graphics thread, so it is atomic: unticking "Draw AI box" must stop the
+	   boxes on the next frame, not eventually. */
+	std::atomic<bool> aiOverlay_{false};
+	/* Where a box is allowed to appear. Monitor-only keeps it out of the
+	   program output -- and therefore out of the recording and the stream --
+	   but that also hides it from the standard preview pane, which just blits
+	   the program mix; the *only* way to see boxes in the preview is to draw
+	   into the program as well, which is what the camera's own web page does
+	   (it paints them over the live view). Chosen in Properties. Written by
+	   the update thread, read by the graphics thread. */
+	std::atomic<bool> aiInProgram_{false};
+	ZcWsNotifier *aiNotifier_ = nullptr;
+	QThread *aiThread_ = nullptr;
+	/* The host aiNotifier_ was opened for, so re-applying the same settings
+	   does not tear the socket down and re-open it. */
+	QString aiFeedHost_;
+	/* One log line for the first detection the feed delivers, so a "no boxes
+	   on screen" report can be told apart from "no detection arriving". */
+	std::atomic<bool> aiFirstEventLogged_{false};
+	/* The most recent detection, written by the notifier (UI thread) and read
+	   by the graphics thread. aiStampNs_ is when it arrived: a camera that
+	   stops sending stops being drawn, instead of freezing its last box on
+	   screen forever. */
+	std::mutex aiMutex_;
+	QVector<ZcAiBox> aiBoxes_;
+	uint64_t aiStampNs_ = 0;
+	/* 1x1 solid texture the box edges are stretched from. Created and
+	   destroyed on the graphics thread only, exactly like cpuTex_. */
+	gs_texture_t *aiSolid_ = nullptr;
+	/* Diagnostics, graphics thread only. Paced by TIME, not by a line count:
+	   the first frames of a fresh source land within milliseconds and a
+	   six-line budget was spent before the notification feed had connected and
+	   its first `AI` message arrived — so the one line that explains a
+	   "no boxes on screen" report was never written (bug report "I enabled the
+	   camera's detection and the boxes still did not show", with a log that
+	   only held six "no detection received yet" lines).
+
+	   The canvas-mix gate in drawAiOverlay() must stay ABOVE the first diag()
+	   call: libobs renders that pass on every frame, and if it ever spends the
+	   pacing budget the log fills with mix-sized "nothing drawn" lines that
+	   both say nothing and crowd out whatever a real preview pass reports. */
+	uint64_t aiDiagNextNs_ = 0;
+	/* Whether the "suppressed because this pass is the canvas mix" explanation
+	   has been given; it is a design note, not a per-frame condition. */
+	bool aiMixExplained_ = false;
+	/* One line the first time the camera reports detections that carry no box,
+	   so "the feed works but nobody is in frame" can be told apart from "no
+	   detection arriving at all". */
+	std::atomic<bool> aiEmptyLogged_{false};
+	/* One line the first time a box is drawn into EACH distinct pass, naming
+	   that pass's size. Nothing else logs a success, so without this a "the
+	   boxes never appear" report cannot be told apart from "the boxes are
+	   being drawn into a pane the reporter is not looking at" — and a
+	   once-ever line was not enough to tell them apart either: it was spent on
+	   the first pass of the session, which is always the program mix, leaving
+	   every later pass (the Properties preview, a projector window, the
+	   Studio Mode pane) silent. Guarded by aiMutex_ and bounded. */
+	QSet<quint64> aiLoggedPasses_;
 #endif
 };
-
-#ifdef ENABLE_CAMERA_CONTROL
-/* Sources whose applyBitrate() currently has a ZcCameraClient::connect() on
-   the stack. connect() pumps a nested event loop, and an event delivered in
-   it can even destroy the source (OBS releases it from a frontend action);
-   ~ZcSspSource unregisters, so the connect frame can tell — when it resumes
-   — whether the source it belongs to still exists, and stop() can tell it
-   must not delete the client mid-connect (the use-after-free the dock's
-   opening_ guard exists for). UI thread only, like the push itself. */
-static QSet<ZcSspSource *> g_bitrateConnectLive;
-#endif
 
 /* ------------------------------------------------------------------ */
 /* Construction / destruction                                          */
@@ -396,13 +463,6 @@ ZcSspSource::ZcSspSource(obs_source_t *source, bool async)
 ZcSspSource::~ZcSspSource()
 {
 	stop();
-#ifdef ENABLE_CAMERA_CONTROL
-	/* If stop() found a connect() frame live it deferred the client
-	   teardown to that frame; unregister here so the frame can tell the
-	   source is gone when connect() returns, and retire the orphaned
-	   client itself. */
-	g_bitrateConnectLive.remove(this);
-#endif
 	/* The CPU texture is only ever touched on the graphics thread; the source
 	   destructor runs after OBS has stopped rendering it, so this is the one
 	   place besides videoRender() where cpuTex_ may be destroyed. */
@@ -411,6 +471,14 @@ ZcSspSource::~ZcSspSource()
 		gs_texture_destroy(cpuTex_);
 		cpuTex_ = nullptr;
 	}
+#ifdef ENABLE_CAMERA_CONTROL
+	/* Same rule for the overlay's solid colour (drawAiOverlay() creates it on
+	   the graphics thread). stop() already closed the notification socket. */
+	if (aiSolid_) {
+		gs_texture_destroy(aiSolid_);
+		aiSolid_ = nullptr;
+	}
+#endif
 	obs_leave_graphics();
 }
 
@@ -558,14 +626,6 @@ void ZcSspSource::update(obs_data_t *settings)
 		       (waitI != waitIFrame_) || (lowNoise != lowNoise_);
 	if (changed) {
 		stop();
-#ifdef ENABLE_CAMERA_CONTROL
-		/* A different camera carries its own stream settings: forget the
-		   bitrate applied to the previous one, so the value is pushed to
-		   the new host even when the Properties number did not change.
-		   (stop() already tore down the old control client.) */
-		if (ip != ip_)
-			lastAppliedBitrate_ = 0;
-#endif
 		ip_ = ip;
 		{
 			std::lock_guard<std::mutex> lock(decoderMutex_);
@@ -577,179 +637,480 @@ void ZcSspSource::update(obs_data_t *settings)
 		start();
 	}
 #ifdef ENABLE_CAMERA_CONTROL
-	/* The bitrate is a camera-side setting, not a pipeline one: it must
-	   never restart a healthy SSP stream, so it is handled outside the
-	   `changed` block; the helper itself decides whether anything actually
-	   needs writing (only a value that changed since the last applied one,
-	   and only when it is > 0). Done after the pipeline handling so a
-	   settings change that also restarts the stream does not cancel the
-	   write this is about to issue. */
-	applyBitrate((int)obs_data_get_int(settings, PROP_BITRATE));
+	/* The AI overlay is a display-only setting: it never restarts the stream
+	   and never writes to the camera, it only opens or closes this source's
+	   notification socket. Read after the pipeline handling so an IP change in
+	   the same Apply — which did stop()/start() — re-opens the feed for the new
+	   camera instead of leaving it pointed at the old one. */
+	setAiOverlay(obs_data_get_bool(settings, PROP_AI_OVERLAY));
+	/* Where the boxes may go. Read here rather than in drawAiOverlay() so the
+	   render path only ever reads an already-built value, and so a change in
+	   the Properties dialog takes effect on the next frame without touching
+	   the notification feed.
+
+	   The default is seeded first, because obs_data_get_int() answers 0 for a
+	   key it has never seen and 0 is PROGRAM - the one value that puts the
+	   boxes into the recording. A settings blob that never carried this key
+	   (a source created straight from the dock's "add to scene", an instance
+	   whose settings were cleared) must land on the safe side instead. */
+	if (settings)
+		obs_data_set_default_int(settings, PROP_AI_OVERLAY_MODE,
+					 ZC_AI_OVERLAY_MONITOR);
+	aiInProgram_.store(obs_data_get_int(settings, PROP_AI_OVERLAY_MODE) !=
+			       ZC_AI_OVERLAY_MONITOR,
+			   std::memory_order_relaxed);
 #endif
 }
 
 #ifdef ENABLE_CAMERA_CONTROL
-/* Push the Properties "Bitrate (kbps)" value to the camera's main stream —
-   GET /ctrl/stream_setting?index=<app_stream1|stream1>&bitrate=<kbps * 1000>,
-   the same request the dock's Stream bar issues. The SSP video path (the
-   ssp-connector subprocess on TCP 9999) is a separate connection: a failure
-   here is logged and otherwise ignored, the stream keeps running. */
-void ZcSspSource::applyBitrate(int kbps)
+/* A detection stops being drawn this long after the last `AI` message. The
+   camera pushes about 10 Hz while its AI is running, so this only bites when
+   the feed goes quiet (the camera rebooted, its AI was switched off, the
+   socket dropped): the boxes then disappear instead of freezing on screen. */
+static constexpr uint64_t ZC_AI_STALE_NS = 1500000000ULL;
+
+/* Apply the Properties "AI detection overlay" checkbox. Nothing here touches
+   the SSP video path or writes to the camera, so the overlay can be toggled
+   without restarting a healthy stream. */
+void ZcSspSource::setAiOverlay(bool on)
 {
-	/* 0 means "leave the camera's own value alone" (see the property
-	   tooltip): the default, and the only way to opt out. */
-	if (kbps <= 0)
+	aiOverlay_ = on;
+	if (!on) {
+		stopAiFeed();
 		return;
-	/* No write unless changed: obs_source_update fires for every unrelated
-	   property change too, and a re-write on each would churn the camera.
-	   A failed push leaves lastAppliedBitrate_ alone, so the next Apply
-	   retries. */
-	if (kbps == lastAppliedBitrate_)
+	}
+	/* startAiFeed() is a no-op when a feed for this exact camera is already
+	   up, so re-applying unrelated settings costs nothing; and because
+	   stop() closed the feed with the connection, this is also what re-opens
+	   it after a pipeline change re-started the source. */
+	startAiFeed();
+}
+
+void ZcSspSource::startAiFeed()
+{
+#if defined(__APPLE__) && !defined(ZC_MAC_ZERO_COPY)
+	/* Nothing to draw on: without a zero-copy build the macOS source is an
+	   ASYNC_VIDEO source, so OBS renders its frames itself and the plugin has
+	   no video_render hook to overlay onto (see create_ssp_source_info). The
+	   Properties checkbox is not offered there either; this guard also covers a
+	   profile carried over from Windows with the option saved on. */
+	return;
+#endif
+	if (!aiOverlay_)
 		return;
-	if (ip_.empty() || !isValidHostAddress(ip_))
-		return;
-	/* connect() pumps a nested Qt event loop, so an OBS event delivered
-	   during it can re-enter update(). One round trip at a time; the skip
-	   is logged once per in-flight push, not once per re-entrant update. */
-	if (bitratePushInFlight_) {
-		if (!bitratePushSkipLogged_) {
-			bitratePushSkipLogged_ = true;
-			blog(LOG_WARNING,
-			     "[obs-zcamera] a bitrate write to %s is still in "
-			     "flight; ignoring further bitrate changes until "
-			     "it completes",
-			     ip_.c_str());
-		}
+	if (ip_.empty() || !isValidHostAddress(ip_)) {
+		/* The overlay keys on the Properties IP field, and a source can exist
+		   with it empty (its name carries the address instead, which the video
+		   path recovers but this does not). Say so: without this line the
+		   checkbox just looks broken, with nothing in the log to follow up. */
+		blog(LOG_WARNING,
+		     "[obs-zcamera] AI detection overlay is on but this source has no "
+		     "camera address (%s): nothing to listen to",
+		     ip_.empty() ? "empty" : ip_.c_str());
 		return;
 	}
 
 	const QString host = QString::fromStdString(ip_);
-	ZcCameraClient *client = nullptr;
-	bool needConnect = false;
-	{
-		/* Reuse a client already connected to this host; a fresh host
-		   gets a fresh one (the transport is locked to its origin). */
-		std::lock_guard<std::mutex> lock(ctrlMutex_);
-		if (ctrlClient_ && ctrlHost_ == host && ctrlClient_->isConnected()) {
-			client = ctrlClient_;
+	if (aiNotifier_ && aiFeedHost_ == host)
+		return;
+	stopAiFeed();
+
+	/* The notification socket is opened directly rather than through
+	   ZcCameraClient: the camera answers the port-81 upgrade whether or not
+	   its control API is authenticated (measured on e2ptz sw 1.0.3), so the
+	   overlay works for a source whose camera was never logged in from the
+	   dock, and — unlike a ZcCameraClient — opening it issues no command at
+	   all (a client connect() also puts the camera into rec standby).
+
+	   The notifier gets a thread of its own. It owns a socket and two QTimers,
+	   so it needs a thread with a Qt event loop, and update() — the only caller
+	   here — is not guaranteed to arrive on one: measured on OBS 31, turning the
+	   overlay on from the Properties dialog logged
+	   "QObject::startTimer: Timers can only be used with threads started with
+	   QThread" twice and the upgrade never completed, so no detection ever
+	   reached the source and nothing was drawn. */
+	aiThread_ = new QThread;
+	aiThread_->setObjectName(QStringLiteral("zc-ai-feed"));
+	aiNotifier_ = new ZcWsNotifier;
+	aiNotifier_->moveToThread(aiThread_);
+	QObject::connect(aiNotifier_, &ZcWsNotifier::eventReceived, aiNotifier_,
+			 [this, host](const QString &what, const QJsonObject &payload) {
+				 if (what != QLatin1String(ws_events::kAiDetect))
+					 return;
+				 /* AI feed thread. Only the decoded box list and its
+				    arrival stamp cross to the graphics thread. */
+				 const QVector<ZcAiBox> boxes = parseAiDetection(payload);
+				 const uint64_t now = os_gettime_ns();
+				 {
+					 std::lock_guard<std::mutex> lock(aiMutex_);
+					 aiBoxes_ = boxes;
+					 aiStampNs_ = now;
+				 }
+				 /* The first event that carries something is the one
+				    worth logging: an empty room still sends events, and
+				    "0 box(es)" says nothing about whether the drawing
+				    path works. The coordinates go with the line so a
+				    box in the wrong place can be pinned against the
+				    camera's own numbers. */
+				 if (!boxes.isEmpty() && !aiFirstEventLogged_.exchange(true)) {
+					 QString where;
+					 for (int i = 0; i < boxes.size() && i < 3; ++i)
+						 where += QStringLiteral(" [x%1 y%2 w%3 h%4]")
+							 .arg(boxes[i].x, 0, 'f', 3)
+							 .arg(boxes[i].y, 0, 'f', 3)
+							 .arg(boxes[i].width, 0, 'f', 3)
+							 .arg(boxes[i].height, 0, 'f', 3);
+					 blog(LOG_INFO,
+					      "[obs-zcamera] AI detection overlay: first "
+					      "detection from %s, %d box(es)%s",
+					      host.toUtf8().constData(), (int)boxes.size(),
+					      where.toUtf8().constData());
+				 }
+				 /* The other half of that report, said once: events are
+				    arriving, so the socket, the port-81 upgrade and the
+				    camera's own detection are all alive, and the only
+				    reason nothing is drawn is that no target is in
+				    frame. Without this line a room with no face in it
+				    and a dead overlay look identical in the log. */
+				 if (boxes.isEmpty() && !aiEmptyLogged_.exchange(true)) {
+					 blog(LOG_INFO,
+					      "[obs-zcamera] AI detection overlay: %s is "
+					      "sending detection events but they carry no "
+					      "box (nothing in frame), so the camera's "
+					      "detection is running and the overlay simply "
+					      "has nothing to draw yet",
+					      host.toUtf8().constData());
+				 }
+			 });
+	/* start() opens the socket and arms the timers, so it has to run on the feed
+	   thread; QThread::started is delivered there. */
+	QObject::connect(aiThread_, &QThread::started, aiNotifier_,
+			 [notifier = aiNotifier_, host] { notifier->start(host, false); });
+	aiFeedHost_ = host;
+	aiThread_->start();
+	blog(LOG_INFO, "[obs-zcamera] AI detection overlay: listening to %s notifications",
+	     host.toUtf8().constData());
+}
+
+void ZcSspSource::stopAiFeed()
+{
+	if (aiNotifier_) {
+		/* stop() closes the socket and disarms the reconnect timer, and both
+		   belong to the feed thread — so run it there, and block until it
+		   has: the socket is really gone when this returns, which is what
+		   re-pointing a source at another camera relies on. */
+		ZcWsNotifier *notifier = aiNotifier_;
+		aiNotifier_ = nullptr;
+		if (aiThread_ && aiThread_->isRunning()) {
+			QMetaObject::invokeMethod(
+			    notifier,
+			    [notifier] {
+				    notifier->stop();
+				    notifier->deleteLater();
+			    },
+			    Qt::BlockingQueuedConnection);
 		} else {
-			releaseControlClientLocked();
-			ctrlClient_ = new ZcCameraClient(nullptr);
-			ctrlHost_ = host;
-			client = ctrlClient_;
-			needConnect = true;
+			/* The feed thread is already down: nothing pumps this object
+			   any more, so tear it down here instead. */
+			notifier->stop();
+			delete notifier;
 		}
 	}
-
-	bitratePushInFlight_ = true;
-	if (needConnect) {
-		/* Credentials come from the dock's shared in-memory store: a
-		   source has no login UI of its own. */
-		g_bitrateConnectLive.insert(this);
-		const bool ok = client->connect(host, 80, zc::lookupCredentials(host));
-		/* connect() pumped a nested event loop: an event delivered in it
-		   may have destroyed this source (its stop() deferred the client
-		   teardown because this frame was live). If the source is gone,
-		   touch nothing but the set and the orphaned client. */
-		if (!g_bitrateConnectLive.remove(this)) {
-			delete client;
-			return;
-		}
-		if (ctrlClientRetirePending_) {
-			/* stop() ran during connect() and deferred the teardown
-			   to this frame: honour it. The bitrate was not applied,
-			   and lastAppliedBitrate_ stays put so the next Apply
-			   retries. */
-			std::lock_guard<std::mutex> lock(ctrlMutex_);
-			releaseControlClientLocked();
-			return;
-		}
-		if (!ok) {
-			bitratePushInFlight_ = false;
-			blog(LOG_WARNING,
-			     "[obs-zcamera] could not reach the camera at %s to "
-			     "apply the bitrate (%d kbps not written; %s); the "
-			     "video stream is unaffected",
-			     host.toUtf8().constData(), kbps,
-			     client->authRequired()
-				 ? "the camera requires a login — log in from "
-				   "the ZCamera Control Dock first"
-				 : "is the camera online?");
-			std::lock_guard<std::mutex> lock(ctrlMutex_);
-			if (ctrlClient_ == client)
-				releaseControlClientLocked();
-			return;
-		}
+	if (aiThread_) {
+		/* The blocking call above already ran, so the notifier's
+		   deleteLater() is queued on that loop and QThread's own cleanup
+		   performs it as the thread finishes. */
+		aiThread_->quit();
+		aiThread_->wait();
+		delete aiThread_;
+		aiThread_ = nullptr;
 	}
-
-	/* Which index the firmware offers is the camera's choice, not ours:
-	   try app_stream1 and fall back to the legacy one, exactly like the
-	   dock's loadStream() discovery. */
-	client->streamSettingQuery(
-	    QString::fromLatin1(zc::kAppStreamIndex),
-	    [this, client, kbps](const QJsonObject &doc) {
-		    const QString index =
-			zc::isStreamDocument(doc)
-			    ? QString::fromLatin1(zc::kAppStreamIndex)
-			    : QString::fromLatin1(zc::kLegacyStreamIndex);
-		    writeBitrate(client, kbps, index);
-	    });
+	aiFeedHost_.clear();
+	/* Re-arm the one-shot log lines: the next feed may be a different camera,
+	   and "first detection" / "detections with no box" are worth hearing
+	   again for it. Only the atomics are touched here — the pacing and
+	   mix-explanation members belong to the graphics thread and are left
+	   alone (they are diagnostics, and letting them keep their pace across a
+	   feed restart only ever costs a line, never correctness). */
+	aiFirstEventLogged_.store(false);
+	aiEmptyLogged_.store(false);
+	std::lock_guard<std::mutex> lock(aiMutex_);
+	aiBoxes_.clear();
+	aiStampNs_ = 0;
 }
 
-/* The write itself. `bitrate` is the firmware's write name and takes bps,
-   while the document reports kbps (spec §2 Stream), hence the scale. The
-   reply is the (updated) document: log the camera's read-back value so the
-   operator can see what the camera actually took. */
-void ZcSspSource::writeBitrate(ZcCameraClient *client, int kbps,
-			       const QString &index)
+/* Whether the render target currently bound is one of libobs's canvas mixes —
+   the pass that fills the texture program, preview, recording and streaming
+   all read from. libobs offers a plugin no "am I rendering a preview" flag, so
+   the mix is recognised by what it is: an off-screen target the size of the
+   canvas, drawn into whole (obs-video.c binds video->render_texture before it
+   renders the main mix).
+
+   Every preview path fails that test, which is what makes this work:
+   a display — the Properties / Filters / Interaction dialog panes, a projector
+   window, the main preview pane — draws straight into its own swapchain
+   (obs-display.c render_display_begin() calls gs_load_swapchain()), where
+   gs_get_render_target() is NULL; and the main preview pane in normal mode
+   does not render sources at all, it blits the mix texture. Skipping the mix
+   is therefore what keeps this overlay out of recordings and streams while
+   still showing it where the operator frames the shot. The size + viewport
+   test is the secondary guard: it also catches a source rendered into an
+   off-screen canvas-sized texture by something other than the mix. */
+static bool zc_render_target_is_canvas_mix()
 {
-	client->streamSettingWrite(
-	    index,
-	    {{QStringLiteral("bitrate"),
-	      QString::number((qlonglong)kbps * zc::kBitrateWriteScale)}},
-	    [this, client, kbps, index](const QJsonObject &doc) {
-		    std::lock_guard<std::mutex> lock(ctrlMutex_);
-		    /* The transport owns its exchanges, so this only runs while
-		       its client is alive; the identity check is belt and
-		       braces against a client swapped under a late reply. */
-		    if (client != ctrlClient_)
-			    return;
-		    bitratePushInFlight_ = false;
-		    bitratePushSkipLogged_ = false;
-		    if (doc.isEmpty()) {
-			    blog(LOG_WARNING,
-				 "[obs-zcamera] the camera did not answer the "
-				 "bitrate write (index %s); %d kbps may not "
-				 "have been applied",
-				 index.toUtf8().constData(), kbps);
-			    return;
-		    }
-		    /* Only a camera that answered counts as applied: a refused
-		       or unanswered write stays un-applied so the next Apply
-		       retries. */
-		    lastAppliedBitrate_ = kbps;
-		    blog(LOG_INFO,
-			 "[obs-zcamera] camera stream %s bitrate is now %d "
-			 "kbps (Properties asked for %d kbps)",
-			 index.toUtf8().constData(), doc.value("bitrate").toInt(),
-			 kbps);
-	    });
+	gs_texture_t *target = gs_get_render_target();
+	if (!target)
+		return false;
+
+	obs_video_info ovi;
+	if (!obs_get_video_info(&ovi) || !ovi.base_width || !ovi.base_height)
+		return false;
+	if (gs_texture_get_width(target) != ovi.base_width ||
+	    gs_texture_get_height(target) != ovi.base_height)
+		return false;
+
+	gs_rect vp;
+	gs_get_viewport(&vp);
+	return vp.x <= 0 && vp.y <= 0 && (uint32_t)vp.cx >= ovi.base_width &&
+	       (uint32_t)vp.cy >= ovi.base_height;
 }
 
-/* Delete ctrlClient_ and retire the push state with it. Deleting the client
-   destroys its transport, which owns the in-flight exchanges: a pending
-   bitrate reply is cancelled with it and can never run against a source that
-   is going away. Caller must hold ctrlMutex_. */
-void ZcSspSource::releaseControlClientLocked()
+void ZcSspSource::drawAiOverlay(gs_effect_t *effect)
 {
-	if (ctrlClient_) {
-		delete ctrlClient_;
-		ctrlClient_ = nullptr;
+	/* The Properties checkbox switches the whole overlay. Tested first, so
+	   unticking "Draw AI box" stops the boxes on the very next frame: the
+	   feed stops as well (setAiOverlay -> stopAiFeed), but that alone would
+	   leave the last detection painted until the staleness timer ran out --
+	   and any later refresh would paint it again. Nothing below can draw a
+	   box while this is false. */
+	if (!aiOverlay_.load(std::memory_order_relaxed))
+		return;
+
+	/* Which gate stopped the overlay, at most one line every five seconds and
+	   only when the gate is reached: the target named here is the one the
+	   source is being drawn into, which is what tells a mix-suppression apart
+	   from a preview that simply has no data. */
+	auto diag = [this](const char *why) {
+		const uint64_t now = os_gettime_ns();
+		if (now < aiDiagNextNs_)
+			return;
+		aiDiagNextNs_ = now + 5000000000ULL;
+		gs_texture_t *t = gs_get_render_target();
+		blog(LOG_INFO,
+		     "[obs-zcamera] AI overlay: nothing drawn (%s) into %s%ux%u",
+		     why, t ? "off-screen target " : "a display, ",
+		     t ? gs_texture_get_width(t) : 0, t ? gs_texture_get_height(t) : 0);
+	};
+
+	/* The canvas mix is tested BEFORE anything else, and returns without
+	   spending the budget above. libobs renders this pass every frame, and the
+	   recording, the stream and the main preview pane all read it, so it is
+	   the one pass that is *supposed* to be empty. Letting it reach diag()
+	   first made the log a stream of "nothing drawn ... into off-screen target
+	   1920x1080" — the mix, at the canvas size — that both said nothing and
+	   used up the one line every five seconds, hiding whatever a preview pass
+	   had to report. (Seen live: a "1 box(es) are ready, but ... canvas mix"
+	   note followed immediately by three mix-sized "nothing drawn" lines,
+	   while the actual preview render — the one that draws — never got a
+	   word in.) */
+	if (!aiInProgram_.load(std::memory_order_relaxed) &&
+	    zc_render_target_is_canvas_mix()) {
+		if (!aiMixExplained_) {
+			int ready = 0;
+			{
+				std::lock_guard<std::mutex> lock(aiMutex_);
+				ready = (int)aiBoxes_.size();
+			}
+			if (ready > 0) {
+				aiMixExplained_ = true;
+				blog(LOG_INFO,
+				     "[obs-zcamera] AI overlay: %d box(es) are ready, but "
+				     "this render pass is the program canvas mix and they "
+				     "are left out of it by design (the stream and the "
+				     "recording encode this pass). The standard preview "
+				     "pane only blits the mix, so it cannot show them "
+				     "either - watch them in the source's Properties, "
+				     "Filters or Interaction dialog, in a Windowed "
+				     "Projector, or with Studio Mode on.",
+				     ready);
+			}
+		}
+		return;
 	}
-	ctrlHost_.clear();
-	bitratePushInFlight_ = false;
-	bitratePushSkipLogged_ = false;
-	ctrlClientRetirePending_ = false;
+
+	QVector<ZcAiBox> boxes;
+	uint64_t stamp = 0;
+	{
+		std::lock_guard<std::mutex> lock(aiMutex_);
+		boxes = aiBoxes_;
+		stamp = aiStampNs_;
+	}
+	if (boxes.isEmpty()) {
+		diag("no `AI` message with a box yet - the camera's own "
+		     "detection (Face AF or auto framing) must be running, or "
+		     "the notification socket is down");
+		return;
+	}
+	if (os_gettime_ns() - stamp > ZC_AI_STALE_NS) {
+		diag("the last detection is stale - the camera stopped reporting");
+		return;
+	}
+
+	/* The camera reports normalized frame coordinates, so they are scaled by
+	   the decoded picture size — the same space OBS projects the source into
+	   in every preview pane that reaches this code. */
+	const uint32_t fw = lastWidth_.load(std::memory_order_relaxed);
+	const uint32_t fh = lastHeight_.load(std::memory_order_relaxed);
+	if (!fw || !fh) {
+		diag("no decoded picture size yet - no frame has been decoded into "
+		     "the source's own texture");
+		return;
+	}
+
+	gs_effect_t *e = effect ? effect : gs_get_effect();
+	if (!e) {
+		diag("no effect to draw with");
+		return;
+	}
+	gs_eparam_t *img = gs_effect_get_param_by_name(e, "image");
+	if (!img) {
+		diag("the effect has no `image` parameter");
+		return;
+	}
+
+	if (!aiSolid_) {
+		/* A single opaque red pixel; every edge is a stretched sprite of
+		   it, so the overlay costs four tiny draws per box and needs no
+		   geometry of its own. Created here, on the graphics thread, and
+		   released in ~ZcSspSource like cpuTex_. */
+		uint8_t red[4] = {255, 0, 0, 255};
+		const uint8_t *data = red;
+		aiSolid_ = gs_texture_create(1, 1, GS_RGBA, 1, &data, 0);
+		if (!aiSolid_)
+			return;
+	}
+
+	/* Thick enough to see at any source size, thin enough not to hide the
+	   person: about 3 px at 1080p, 2 px at 720p, never less than 1. A pass
+	   that renders the source smaller than its own frame -- the Properties
+	   dialog's preview, a Windowed Projector, the Studio Mode pane -- would
+	   otherwise scale a 3 px border down to a fraction of a pixel and lose it
+	   entirely, so there the border is grown from the size gs_get_viewport()
+	   reports for the pass. In the program mix the viewport is the whole
+	   canvas, so the thickness there is unchanged.
+
+	   Written without std::min/std::max because this file includes Windows.h,
+	   which brings the min/max macros in and breaks the template form. */
+	uint32_t thick_px = (fw < fh ? fw : fh) / 360;
+	if (thick_px < 1)
+		thick_px = 1;
+	{
+		gs_rect vp;
+		gs_get_viewport(&vp);
+		if (vp.cx > 0 && (uint32_t)vp.cx < fw) {
+			const float scale = (float)vp.cx / (float)fw;
+			if (scale > 0.0f) {
+				const float want = 2.0f / scale;
+				if ((float)thick_px < want)
+					thick_px = (uint32_t)(want + 0.999f);
+			}
+		}
+		/* A pathological viewport (1x1) must not ask for a 2000 px border. */
+		if (thick_px > 24)
+			thick_px = 24;
+	}
+	const float thick = (float)thick_px;
+	int drawn = 0;
+
+	gs_blend_state_push();
+	gs_enable_blending(true);
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+	gs_effect_set_texture(img, aiSolid_);
+
+	for (const ZcAiBox &box : boxes) {
+		float x = (float)box.x * (float)fw;
+		float y = (float)box.y * (float)fh;
+		float w = (float)box.width * (float)fw;
+		float h = (float)box.height * (float)fh;
+		if (w <= 0.0f || h <= 0.0f)
+			continue;
+		/* A target half out of frame must not draw a box that wraps around
+		   the picture. */
+		if (x < 0.0f) {
+			w += x;
+			x = 0.0f;
+		}
+		if (y < 0.0f) {
+			h += y;
+			y = 0.0f;
+		}
+		if (x + w > (float)fw)
+			w = (float)fw - x;
+		if (y + h > (float)fh)
+			h = (float)fh - y;
+		if (w <= 0.0f || h <= 0.0f)
+			continue;
+
+		if (w <= thick * 2.0f || h <= thick * 2.0f) {
+			/* Smaller than its own border: fill it instead of drawing
+			   four edges on top of each other. */
+			gs_matrix_push();
+			gs_matrix_translate3f(x, y, 0.0f);
+			gs_draw_sprite(aiSolid_, 0, (uint32_t)w, (uint32_t)h);
+			gs_matrix_pop();
+			drawn++;
+			continue;
+		}
+
+		struct Edge {
+			float x, y, cx, cy;
+		};
+		const Edge edges[4] = {
+			{x, y, w, thick},
+			{x, y + h - thick, w, thick},
+			{x, y, thick, h},
+			{x + w - thick, y, thick, h},
+		};
+		for (const Edge &edge : edges) {
+			gs_matrix_push();
+			gs_matrix_translate3f(edge.x, edge.y, 0.0f);
+			gs_draw_sprite(aiSolid_, 0, (uint32_t)edge.cx, (uint32_t)edge.cy);
+			gs_matrix_pop();
+		}
+		drawn++;
+	}
+
+	gs_blend_state_pop();
+
+	/* Said once per distinct pass. Nothing else in this file logs a successful
+	   draw, so without this line "the boxes never show" and "the boxes are
+	   being drawn into a pane you are not looking at" read identically in a
+	   log -- which is exactly the report that prompted the scope option above.
+	   The pass size is the tell: the program mix is the canvas size, anything
+	   else is the Properties dialog's preview, a projector window or the
+	   Studio Mode pane. */
+	if (drawn > 0) {
+		gs_rect vp;
+		gs_get_viewport(&vp);
+		const quint64 pass = ((quint64)vp.cx << 32) | (quint64)vp.cy;
+		bool first = false;
+		{
+			std::lock_guard<std::mutex> lock(aiMutex_);
+			if (!aiLoggedPasses_.contains(pass) &&
+			    aiLoggedPasses_.size() < 8) {
+				aiLoggedPasses_.insert(pass);
+				first = true;
+			}
+		}
+		if (first) {
+			blog(LOG_INFO,
+			     "[obs-zcamera] AI overlay: drew %d box(es) into a %ux%u pass%s",
+			     drawn, (unsigned)vp.cx, (unsigned)vp.cy,
+			     aiInProgram_.load(std::memory_order_relaxed)
+				 ? ""
+				 : " (monitor-only mode, so this pass is not the program)");
+		}
+	}
 }
 #endif /* ENABLE_CAMERA_CONTROL */
 
@@ -843,6 +1204,15 @@ void ZcSspSource::start()
 
 	/* SSPClientIso wires Start->doStart internally in its constructor. */
 	client_->Start();
+
+#ifdef ENABLE_CAMERA_CONTROL
+	/* stop() closed the overlay feed along with the connection, and the
+	   reconnect path reaches start() without ever going through update() — so
+	   without this the boxes would silently stay gone after the first camera
+	   link blip. startAiFeed() does nothing when the overlay is off or a feed
+	   for this camera is already up. */
+	startAiFeed();
+#endif
 }
 
 void ZcSspSource::stop()
@@ -857,21 +1227,11 @@ void ZcSspSource::stop()
 	teardownConnection();
 
 #ifdef ENABLE_CAMERA_CONTROL
-	/* The control client exists only to apply Properties settings to this
-	   camera's HTTP API, so it goes down with the connection. This also
-	   cancels an in-flight bitrate write (the transport owns its
-	   exchanges), so its callback can never run against a source that is
-	   being destroyed. Exception: if applyBitrate() has connect() on the
-	   stack right now, deleting the client mid-connect is the use-after-
-	   free the dock's opening_ guard exists for — defer the teardown to
-	   that frame instead. */
-	{
-		std::lock_guard<std::mutex> lock(ctrlMutex_);
-		if (g_bitrateConnectLive.contains(this))
-			ctrlClientRetirePending_ = true;
-		else
-			releaseControlClientLocked();
-	}
+	/* The AI overlay belongs to this camera connection as well: closing the
+	   source must not leave a notification socket open. Any stale boxes go
+	   with it, so a source re-pointed at another camera cannot show the old
+	   camera's people for a frame. */
+	stopAiFeed();
 #endif
 
 	/* Join the reconnect thread so it never touches freed `this`. Done with
@@ -1067,7 +1427,31 @@ void ZcSspSource::installDecoder(struct zc_hw_decoder *fresh)
 		decoder_ = fresh;
 	}
 	if (old) {
+		/* drawn_ and pending_ were produced by the decoder being replaced.
+		   The VideoToolbox backend owns the texture it rebinds every frame
+		   and destroys it with the decoder (owns_texture is false there),
+		   so a cached drawn_ would be a dangling gs_texture on the next
+		   render — unlike the FFmpeg backends, whose textures are made per
+		   frame and owned by the frame. Drop both first.
+		   Lock order stays graphics -> frameMutex_ -> decoderMutex_, the
+		   same order videoRender uses. */
+		struct zc_decoded_frame stale = {};
+		struct zc_decoded_frame last = {};
 		obs_enter_graphics();
+		{
+			std::lock_guard<std::mutex> lock(frameMutex_);
+			if (hasPending_) {
+				stale = pending_;
+				pending_ = {};
+				hasPending_ = false;
+			}
+			if (drawn_.texture || drawn_.avframe) {
+				last = drawn_;
+				drawn_ = {};
+			}
+		}
+		release_frame_direct(&stale);
+		release_frame_direct(&last);
 		zc_hw_decoder_destroy(old);
 		obs_leave_graphics();
 	}
@@ -1297,7 +1681,7 @@ void ZcSspSource::outputVideo(struct zc_decoded_frame *frame)
 	/* Async mode already handed the frame to OBS inside onVideoData. */
 	if (async_)
 		return;
-	if (frame->avframe) {
+	if (zc_frame_is_gpu(frame)) {
 		/* Zero-copy GPU path: take ownership of the frame and hand it to
 		   the graphics thread, which imports + draws + releases it. */
 		struct zc_decoded_frame stale = {};
@@ -1642,7 +2026,7 @@ void ZcSspSource::videoRender(gs_effect_t *effect)
 	watchdog();
 	{
 		std::lock_guard<std::mutex> lock(frameMutex_);
-		if (hasPending_ && pending_.avframe) {
+		if (hasPending_ && zc_frame_is_gpu(&pending_)) {
 			/* Zero-copy GPU path: import the surface into an OBS
 			   texture. decoderMutex_ is held only for the import, so
 			   a decoder swap waits for it and vice versa. */
@@ -1767,6 +2151,12 @@ void ZcSspSource::videoRender(gs_effect_t *effect)
 		gs_effect_set_texture(
 			gs_effect_get_param_by_name(draw_effect, "image"), tex);
 		gs_draw_sprite(tex, 0, 0, 0);
+
+#ifdef ENABLE_CAMERA_CONTROL
+		/* The AI overlay goes on top of the picture, in this source's own
+		   pixel space, and only into a preview display — see the helper. */
+		drawAiOverlay(draw_effect);
+#endif
 	}
 }
 
@@ -1823,16 +2213,42 @@ static obs_properties_t *zc_source_getproperties(void *data)
 				obs_module_text("SSPPlugin.SourceProps.SourceIp"),
 				OBS_TEXT_DEFAULT);
 #ifdef ENABLE_CAMERA_CONTROL
-	/* The camera's streaming bitrate, written to the camera on Apply (see
-	   ZcSspSource::applyBitrate). The minimum is 0 rather than the
-	   camera's own floor because 0 is the value that means "leave the
-	   camera alone". */
-	obs_properties_add_int(props, PROP_BITRATE,
-			       obs_module_text("ZCameraPlugin.SourceProps.Bitrate"),
-			       0, 100000, 100);
+	/* Draw what the camera's AI sees over its own picture. Unticking this
+	   stops every box on the next frame (drawAiOverlay returns at once).
+	   Not offered on a non-zero-copy macOS build, where the source has no
+	   render hook to draw on (see ZcSspSource::startAiFeed). */
+#if !defined(__APPLE__) || defined(ZC_MAC_ZERO_COPY)
+	obs_properties_add_bool(props, PROP_AI_OVERLAY,
+				obs_module_text("ZCameraPlugin.SourceProps.AiOverlay"));
 	obs_property_set_long_description(
-	    obs_properties_get(props, PROP_BITRATE),
-	    obs_module_text("ZCameraPlugin.SourceProps.BitrateTip"));
+	    obs_properties_get(props, PROP_AI_OVERLAY),
+	    obs_module_text("ZCameraPlugin.SourceProps.AiOverlayTip"));
+
+	/* Monitor-only is listed first and is the default: the program output is
+	   what the recording and the stream encode, and a box burned into it is
+	   not undoable afterwards. Choosing Program is therefore the deliberate
+	   act, not the accident. The trade is that the standard preview pane
+	   blits the program mix rather than rendering the source
+	   (UI/window-basic-main.cpp RenderMain -> obs_render_main_texture_src_color_only
+	   whenever Studio Mode is off), so monitor-only boxes cannot appear in
+	   that pane however the plugin behaves. They are visible where the source
+	   *is* rendered in its own right: this Properties dialog's own preview,
+	   the Filters dialog, a Windowed Projector (the dock's "Monitor window"
+	   button), and the Studio Mode preview pane. */
+	obs_property_t *mode = obs_properties_add_list(
+	    props, PROP_AI_OVERLAY_MODE,
+	    obs_module_text("ZCameraPlugin.SourceProps.AiOverlayWhere"),
+	    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(mode,
+				  obs_module_text("ZCameraPlugin.AiOverlayWhere.Monitor"),
+				  ZC_AI_OVERLAY_MONITOR);
+	obs_property_list_add_int(mode,
+				  obs_module_text("ZCameraPlugin.AiOverlayWhere.Program"),
+				  ZC_AI_OVERLAY_PROGRAM);
+	obs_property_set_long_description(
+	    obs_properties_get(props, PROP_AI_OVERLAY_MODE),
+	    obs_module_text("ZCameraPlugin.SourceProps.AiOverlayWhereTip"));
+#endif
 #endif
 	obs_properties_add_text(
 	    props, "zc_dock_hint",
@@ -1857,14 +2273,26 @@ static void zc_source_getdefaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, PROP_LED_TALLY, false);
 	obs_data_set_default_bool(settings, PROP_LOW_NOISE, false);
 #ifdef ENABLE_CAMERA_CONTROL
-	/* 0 = leave the camera's own bitrate alone (see applyBitrate). */
-	obs_data_set_default_int(settings, PROP_BITRATE, 0);
+	/* Off by default: it opens a second connection to the camera per source. */
+	obs_data_set_default_bool(settings, PROP_AI_OVERLAY, false);
+	/* Monitor-only by default. A box drawn into the program is also a box in
+	   the recording and the stream, and that mistake is not undoable after the
+	   fact -- the boxes exist to help frame a shot, not to be published -- so
+	   the safe side is the default and the other entry is the deliberate
+	   choice. Watch the boxes in the Properties dialog's own preview, in a
+	   Windowed Projector, or in the Studio Mode preview pane; the dock's Auto
+	   framing tab opens a projector window for this camera in one click. */
+	obs_data_set_default_int(settings, PROP_AI_OVERLAY_MODE,
+				 ZC_AI_OVERLAY_MONITOR);
 #endif
 }
 
 static void *zc_source_create(obs_data_t *settings, obs_source_t *source)
 {
-#ifdef __APPLE__
+#ifdef ZC_MAC_ZERO_COPY
+	/* Zero-copy: the source draws its own texture, so it is not async. */
+	ZcSspSource *s = new (std::nothrow) ZcSspSource(source);
+#elif defined(__APPLE__)
 	ZcSspSource *s = new (std::nothrow) ZcSspSource(source, true);
 #else
 	ZcSspSource *s = new (std::nothrow) ZcSspSource(source);
@@ -1915,6 +2343,39 @@ static uint32_t zc_source_get_height(void *data)
 	return static_cast<ZcSspSource *>(data)->getHeight();
 }
 
+/* What colour space the decoded picture is in.
+
+   A source that does not answer this is taken to be sRGB (obs-source.c,
+   obs_source_get_color_space), and whenever the renderer's space differs
+   libobs converts the picture first - by drawing the whole source into a
+   canvas-sized off-screen texture and compositing that (obs-source.c,
+   source_render, the "convert_tech" branch). That is what made the AI
+   overlay's "where am I being drawn?" test useless: inside video_render()
+   every pass looked identical, because the program mix, the Properties
+   preview, a Windowed Projector and the Studio Mode panes all arrived as a
+   full-canvas off-screen pass, so the box code could not tell the pass the
+   recording encodes apart from a monitor pane - and it either drew into the
+   recording or drew nowhere.
+
+   Saying the picture is already in the target's space removes that
+   conversion, and with it the extra pass: every caller then reaches
+   video_render() as itself, a display with no render target or the canvas
+   mix, which is exactly what the overlay needs to see.
+
+   This is what libobs does for its own async video sources (obs-source.c,
+   the OBS_SOURCE_ASYNC branch: it hands back a preferred space when none
+   matches the source's native one). The picture is BT.709 camera video, so
+   claiming the canvas's 709 or a preview's sRGB is a statement about how to
+   interpret it, not a conversion being skipped. */
+static enum gs_color_space zc_source_get_color_space(
+	void *data, size_t count, const enum gs_color_space *preferred_spaces)
+{
+	(void)data;
+	if (count > 0 && preferred_spaces)
+		return preferred_spaces[0];
+	return GS_CS_709_EXTENDED;
+}
+
 static void zc_source_enum_active_sources(void *data,
 					  obs_source_enum_proc_t cb,
 					  void *param)
@@ -1936,9 +2397,15 @@ struct obs_source_info create_ssp_source_info()
 	/* The camera's audio arrives on the same SSP connection and is decoded into
 	   obs_source_output_audio, so the source carries a real audio track (and a
 	   mixer control) instead of a permanently silent one (bugs 10/11). */
-#ifdef __APPLE__
-	/* The OpenGL backend cannot import the camera's 420v IOSurface. Decode in
-	   software and let OBS upload/convert the frame asynchronously. */
+#ifdef ZC_MAC_ZERO_COPY
+	/* Zero-copy on macOS: decode into a BGRA IOSurface and draw it here, so
+	   the source owns its rendering like it does on Windows. */
+	info.output_flags =
+		OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE;
+#elif defined(__APPLE__)
+	/* No zero-copy build: the OpenGL backend cannot import the camera's 420v
+	   IOSurface, so decode in software and let OBS upload/convert the frame
+	   asynchronously. This is also the path that keeps 10-bit / HDR. */
 	info.output_flags =
 		OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE;
 #else
@@ -1954,15 +2421,19 @@ struct obs_source_info create_ssp_source_info()
 	info.activate = zc::zc_source_activate;
 	info.deactivate = zc::zc_source_deactivate;
 	/* video_tick drives the stall watchdog on every platform, so a hidden or
-	   unrendered source still notices a dead stream; on macOS it is the only
-	   path (the source is ASYNC_VIDEO there), on Windows it supplements
-	   video_render (watchdog() is idempotent). */
+	   unrendered source still notices a dead stream; on a non-zero-copy macOS
+	   build (ASYNC_VIDEO, no video_render) it is the only path, elsewhere it
+	   supplements video_render (watchdog() is idempotent). */
 	info.video_tick = zc::zc_source_video_tick;
-#ifndef __APPLE__
+#if !defined(__APPLE__) || defined(ZC_MAC_ZERO_COPY)
 	info.video_render = zc::zc_source_video_render;
 #endif
 	info.get_width = zc::zc_source_get_width;
 	info.get_height = zc::zc_source_get_height;
+	/* Keep libobs from wrapping every pass in a colour-space conversion, which
+	   is what stops the AI overlay from telling a monitor pane from the pass
+	   the recording encodes - see zc_source_get_color_space(). */
+	info.video_get_color_space = zc::zc_source_get_color_space;
 	info.enum_active_sources = zc::zc_source_enum_active_sources;
 	return info;
 }

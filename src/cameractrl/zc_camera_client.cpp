@@ -540,6 +540,69 @@ void ZcCameraClient::setFramingGestureFov(bool enabled)
 	framingIndex(transport_, "/gesture", "closeup", enabled ? 1 : 0);
 }
 
+/* Both composition offsets live on the same /fov endpoint; the web UI's
+   setFovPlacement / setFovFaceHeight are one query parameter each. */
+void ZcCameraClient::setFramingPlacement(int value)
+{
+	framingIndex(transport_, "/fov", "placement", value);
+}
+
+void ZcCameraClient::setFramingFaceHeight(int value)
+{
+	framingIndex(transport_, "/fov", "face_height", value);
+}
+
+/* The page's "View Angle" (a 4-entry dropdown) and "Size" (a 5-step
+   stepper) are two parameters of the same /fov endpoint. `fov_size` is not a
+   third: the camera answers that query with the whole record and stores
+   nothing, so there is no setter for it. */
+void ZcCameraClient::setFramingFovType(int type)
+{
+	framingIndex(transport_, "/fov", "type", type);
+}
+
+void ZcCameraClient::setFramingFovBodySize(int size)
+{
+	framingIndex(transport_, "/fov", "body_size", size);
+}
+
+void ZcCameraClient::setFramingMarker(bool enabled)
+{
+	framingFlag(transport_, "/marker", enabled);
+}
+
+void ZcCameraClient::framingFovQuery(std::function<void(const QJsonObject &)> cb)
+{
+	transport_.getQuery(QString(http::kFraming) + "/fov", QUrlQuery(),
+			    jsonObjectCb(cb), 20000);
+}
+
+void ZcCameraClient::framingExportProfile(
+    std::function<void(const QJsonObject &)> cb)
+{
+	transport_.getQuery(QString(http::kFraming) + "/export", QUrlQuery(),
+			    jsonObjectCb(cb), 20000);
+}
+
+/* The framing-box control's two boxes. Both are flags, and the page's
+   getFixAngleBox() probe is the same GET without ?enable=. */
+void ZcCameraClient::setFramingFixAngleBoxEnabled(bool enabled)
+{
+	framingFlag(transport_, "/fix_angle_box", enabled);
+}
+
+void ZcCameraClient::setFramingTrackingBoxEnabled(bool enabled)
+{
+	framingFlag(transport_, "/tracking_box", enabled);
+}
+
+void ZcCameraClient::framingFixAngleBoxQuery(
+    std::function<void(const QJsonObject &)> cb)
+{
+	transport_.getQuery(QString(http::kFraming) + "/fix_angle_box", QUrlQuery(),
+			    jsonObjectCb(cb), 20000);
+}
+
 void ZcCameraClient::framingPresetQuery(
     std::function<void(const QJsonObject &)> cb)
 {
@@ -603,6 +666,15 @@ void ZcCameraClient::framingPresetDelete(int index)
 void ZcCameraClient::framingQuery(std::function<void(const QJsonObject &)> cb)
 {
 	transport_.getQuery(QString(http::kFraming) + "/all_status", QUrlQuery(),
+			    jsonObjectCb(cb), 20000);
+}
+
+/* The one-word framing state the camera's page prints next to the three
+   buttons (its `#aframe_tips`). Read separately because all_status carries the
+   stored configuration but not the live state word. */
+void ZcCameraClient::framingStatusQuery(std::function<void(const QJsonObject &)> cb)
+{
+	transport_.getQuery(QString(http::kFraming) + "/status", QUrlQuery(),
 			    jsonObjectCb(cb), 20000);
 }
 

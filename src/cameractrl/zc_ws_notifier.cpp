@@ -54,6 +54,7 @@ void ZcWsNotifier::start(const QString &host, bool secure,
 	extraHeaders_ = extraHeaders;
 	retry_ = 0;
 	stopped_ = false;
+	flipLogged_ = false;
 	doConnect();
 }
 
@@ -73,10 +74,13 @@ void ZcWsNotifier::doConnect()
 	QUrl url;
 	url.setScheme(secure_ ? "wss" : "ws");
 	url.setHost(host_);
-	/* The notification server always listens on the camera's own port 81, even
-	   when the HTTP origin is HTTPS (only the scheme changes to wss). Pointing
-	   wss at the HTTPS port made the upgrade land on the web UI and come back
-	   301 -> /www/index.html. */
+	/* The notification server always lives on the camera's own port 81, not on
+	   the web server's port: pointing the upgrade at the HTTPS port lands on the
+	   web UI and comes back 301 -> /www/index.html. The scheme is a guess that
+	   gets probed — measured on e2ptz sw 1.0.3 with HTTPS and identity auth
+	   enabled, port 81 answers plain ws (no auth headers needed) and refuses a
+	   TLS handshake outright, while the HTTP origin for that same camera is
+	   https. Following the origin alone therefore never connects. */
 	url.setPort(81);
 	url.setPath("/");
 
@@ -95,6 +99,7 @@ void ZcWsNotifier::doConnect()
 	   handed to start() would leave a later reconnect unauthenticated. */
 	const QByteArray headers =
 		transport_ ? transport_->currentUpgradeHeaderBlock() : extraHeaders_;
+	dialConnected_ = false;
 	socket_.open(url, headers);
 }
 
@@ -108,8 +113,10 @@ void ZcWsNotifier::onConnected()
 		return;
 	}
 	live_ = true;
+	dialConnected_ = true;
 	retry_ = 0;
 	failureLogged_ = false;
+	flipLogged_ = false;
 	qWarning().noquote() << "[obs-zcamera] notifications connected:"
 			     << (secure_ ? "wss" : "ws") << host_ << "port 81";
 	emit socketStateChanged(true);
@@ -127,6 +134,7 @@ void ZcWsNotifier::onDisconnected()
 				     << host_;
 		emit socketStateChanged(false);
 	}
+	noteDialFailure();
 	scheduleReconnect();
 }
 
@@ -165,7 +173,28 @@ void ZcWsNotifier::onSocketError(const QString &error)
 	}
 	live_ = false;
 	emit socketStateChanged(false);
+	noteDialFailure();
 	scheduleReconnect();
+}
+
+void ZcWsNotifier::noteDialFailure()
+{
+	/* Only a dial that never reached the handshake says something about the
+	   scheme. A socket that connected and later dropped is a network event, and
+	   flipping the scheme there would just make the next attempt wrong too.
+	   Flipping (rather than pinning) keeps working on firmware whose port 81
+	   really does speak TLS: that one simply gets tried again on the next
+	   failure. */
+	if (dialConnected_)
+		return;
+	secure_ = !secure_;
+	if (!flipLogged_) {
+		flipLogged_ = true;
+		qWarning().noquote()
+			<< "[obs-zcamera] notifications: port 81 refused"
+			<< (secure_ ? "ws" : "wss") << host_
+			<< "- retrying with" << (secure_ ? "wss" : "ws");
+	}
 }
 
 void ZcWsNotifier::scheduleReconnect()

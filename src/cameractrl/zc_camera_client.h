@@ -125,6 +125,10 @@ public:
 	/* Restart detection right now (the web UI's Restart button). */
 	void setFramingRestartNow();
 	void framingQuery(std::function<void(const QJsonObject &)> cb);
+	/* GET /ctrl/framing/status -> {"status":N}. N indexes the web UI's status
+	   words: 0 IDLE, 1 Detecting, 2 Tracking, 3 Target Lost, 4 Disabled. The
+	   same index rides on the FramingStatusChanged notification as `value`. */
+	void framingStatusQuery(std::function<void(const QJsonObject &)> cb);
 
 	/* The rest of the camera's framing page — the same calls its web UI makes.
 	   Every one of these is a GET on a /ctrl/framing/<sub> endpoint. */
@@ -148,6 +152,41 @@ public:
 	/* The web UI's "View Angle Adjustment" writes all three gesture FOV
 	   switches (fullbody/waist/closeup) to the same value at once. */
 	void setFramingGestureFov(bool enabled);
+	/* The framing canvas' composition offsets: how far the subject sits from
+	   the centre (placement) and how tall the head should be (face_height).
+	   Both are the same -12..12 grid the web UI draws as a segment menu, and
+	   both are what its four-arrow framing pad nudges one step at a time. */
+	void setFramingPlacement(int value);      /* /fov?placement= */
+	void setFramingFaceHeight(int value);     /* /fov?face_height= */
+	/* The page's own "View Angle" and "Size" pair, which are two parameters
+	   of the same /fov endpoint:
+	     type      0..3 — Full Body / Waist / Close Up / Remain, i.e. which of
+	               the four composition guides is active;
+	     body_size 0..4 — the guide's 80% / 90% / 100% / 110% / 120% step.
+	   `fov_size` looks like a third and is not one: the camera answers
+	   `GET /fov?fov_size=N` with the whole {type,body_size,face_height,
+	   placement} record and stores nothing, so writing it does nothing. */
+	void setFramingFovType(int type);         /* /fov?type= */
+	void setFramingFovBodySize(int size);     /* /fov?body_size= */
+	/* GET /fov -> {"type":N,"body_size":N,"face_height":N,"placement":N}. The
+	   page re-reads this after each nudge so its copy of the offsets cannot
+	   drift from the camera's; so does the dock's framing pad. */
+	void framingFovQuery(std::function<void(const QJsonObject &)> cb);
+	/* Whether the camera draws its own marker on the subject it has locked
+	   onto — the page's "Detected Indicator". /marker?enable= (its older
+	   spelling /indicator answers {"code":-1}). */
+	void setFramingMarker(bool enabled);      /* /marker?enable= */
+	/* GET /export -> the framing profile as JSON, for the page's Export
+	   button. A camera without it answers {"code":-1}. */
+	void framingExportProfile(std::function<void(const QJsonObject &)> cb);
+	/* The page's framing-box control (FramingBoxCtrl): two boxes, the fixed
+	   angle box and the tracking box, each a GET with ?enable=. Its
+	   getFixAngleBox() probe is how the page learns whether the firmware has
+	   the feature at all; that reply is {"code":-1} on a camera that does
+	   not. */
+	void setFramingFixAngleBoxEnabled(bool enabled); /* /fix_angle_box?enable= */
+	void setFramingTrackingBoxEnabled(bool enabled); /* /tracking_box?enable= */
+	void framingFixAngleBoxQuery(std::function<void(const QJsonObject &)> cb);
 
 	/* Composition presets (/ctrl/framing/preset): the row of tiles the web UI
 	   draws under the framing controls. The reply carries `presets` (each with

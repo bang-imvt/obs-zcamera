@@ -38,6 +38,7 @@ Exit code is non-zero when any check fails.
 #include "zc_settings_schema.h"
 #include "zc_http_transport.h"
 #include "zc_settings_engine.h"
+#include "zc_ai_detect.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -1257,6 +1258,104 @@ static void testSettingsEngine()
 }
 
 /* ================================================================== */
+/* Part E: AI detection payload                                      */
+/* ================================================================== */
+static QJsonObject jsonOf(const char *text)
+{
+	return QJsonDocument::fromJson(QByteArray(text)).object();
+}
+
+static void testAiDetection()
+{
+	std::printf("--- Part E: zc_ai_detect payload decoding ---\n");
+
+	/* Captured verbatim from a P2-R1-18x (model e2ptz, sw 1.0.3) on its
+	   port-81 notification socket. This is the "nothing in frame" state, and
+	   the camera pushes it about ten times a second while its AI runs. */
+	const QJsonObject idle = jsonOf(
+		"{\"what\":\"AI\",\"num\":0,\"pending\":0,\"cols\":8,\"sel\":174,"
+		"\"debug\":0,\"target_ids\":[],\"objs\":[]}");
+	check(zc::parseAiDetection(idle).isEmpty(),
+	      "the measured num=0 payload decodes to no boxes");
+
+	/* The same camera actually detecting two people, captured verbatim on
+	   192.168.10.106 (P2-R1-18x) while it was auto-framing: two 8-wide records,
+	   the second one the tracked target (`sel` matches its id). This is the
+	   sample that settles the field order against real firmware output. */
+	const QJsonObject live = jsonOf(
+		"{\"what\":\"AI\",\"num\":2,\"pending\":0,\"cols\":8,\"sel\":147,"
+		"\"debug\":0,\"target_ids\":[],\"objs\":["
+		"2,145,0,81,0.18125,0.18611,0.09296,0.18888,"
+		"2,147,0,61,0.88984,0.16249,0.09843,0.23194]}");
+	const QVector<zc::ZcAiBox> liveBoxes = zc::parseAiDetection(live);
+	check(liveBoxes.size() == 2, "the captured live payload decodes two boxes");
+	if (liveBoxes.size() == 2) {
+		const zc::ZcAiBox &first = liveBoxes[0];
+		check(first.app == 2 && first.id == 145 && first.type == 0 &&
+			      first.confidence == 81,
+		      "captured record 0: app=2 id=145 type=0 confidence=81");
+		check(qFuzzyCompare(first.x, 0.18125) && qFuzzyCompare(first.y, 0.18611) &&
+			      qFuzzyCompare(first.width, 0.09296) &&
+			      qFuzzyCompare(first.height, 0.18888),
+		      "captured record 0 box lands where the camera reported it");
+		check(liveBoxes[1].id == 147 && liveBoxes[1].confidence == 61 &&
+			      qFuzzyCompare(liveBoxes[1].x, 0.88984) &&
+			      qFuzzyCompare(liveBoxes[1].height, 0.23194),
+		      "captured record 1 (the tracked target) decodes independently");
+	}
+
+	/* Two records laid out exactly as the camera's own web client reads them
+	   (app, id, type, condident, x, y, width, height, `cols` at a time), with
+	   the coordinates as normalized fractions of the frame. */
+	const QJsonObject two = jsonOf(
+		"{\"what\":\"AI\",\"num\":2,\"cols\":8,\"sel\":7,\"objs\":["
+		"1,7,1,-1,0.10,0.20,0.30,0.40,"
+		"0,9,0,88,0.5,0.25,0.125,0.5]}");
+	const QVector<zc::ZcAiBox> boxes = zc::parseAiDetection(two);
+	check(boxes.size() == 2, "num=2 with cols=8 decodes two records");
+	if (boxes.size() == 2) {
+		check(boxes[0].app == 1 && boxes[0].id == 7 && boxes[0].type == 1 &&
+			      boxes[0].confidence == -1,
+		      "record 0 keeps app/id/type/confidence in that order");
+		check(qFuzzyCompare(boxes[0].x, 0.10) &&
+			      qFuzzyCompare(boxes[0].y, 0.20) &&
+			      qFuzzyCompare(boxes[0].width, 0.30) &&
+			      qFuzzyCompare(boxes[0].height, 0.40),
+		      "record 0 reads x/y/width/height as normalized frame fractions");
+		check(boxes[1].id == 9 && boxes[1].confidence == 88 &&
+			      qFuzzyCompare(boxes[1].x, 0.5) &&
+			      qFuzzyCompare(boxes[1].height, 0.5),
+		      "record 1 starts at offset cols*1, not after the previous record's fields");
+	}
+
+	/* A short array must neither read the next record's fields as this one's
+	   nor run off the end. */
+	check(zc::parseAiDetection(jsonOf(
+		      "{\"num\":2,\"cols\":8,\"objs\":[0,1,0,50,0.1,0.1,0.2,0.2]}"))
+		      .size() == 1,
+	      "a truncated objs array yields only the record that is complete");
+	check(zc::parseAiDetection(jsonOf(
+		      "{\"num\":3,\"cols\":8,\"objs\":[0,1,0,50,0.1,0.1,0.2]}"))
+		      .isEmpty(),
+	      "a partial record yields nothing rather than a half box");
+
+	/* A firmware that widens the record still decodes the known prefix. */
+	const QVector<zc::ZcAiBox> wide = zc::parseAiDetection(jsonOf(
+		"{\"num\":1,\"cols\":10,\"objs\":[2,3,0,60,0.25,0.25,0.5,0.5,999,998]}"));
+	check(wide.size() == 1 && wide[0].id == 3 && qFuzzyCompare(wide[0].width, 0.5),
+	      "cols wider than the known record still decodes its 8-wide prefix");
+
+	/* Junk, and a camera that never sends this event. */
+	check(zc::parseAiDetection(jsonOf("{}")).isEmpty(),
+	      "a payload without num/cols decodes to no boxes");
+	check(zc::parseAiDetection(jsonOf("{\"num\":5,\"cols\":0,\"objs\":[1,2,3]}"))
+		      .isEmpty(),
+	      "cols=0 is rejected instead of laying the array out by nothing");
+	check(zc::parseAiDetection(jsonOf("{\"num\":2,\"cols\":8,\"objs\":[]}")).isEmpty(),
+	      "num>0 with an empty objs array decodes to no boxes");
+}
+
+/* ================================================================== */
 int main(int argc, char **argv)
 {
 	QCoreApplication app(argc, argv);
@@ -1270,6 +1369,7 @@ int main(int argc, char **argv)
 	testCameraCapability();
 	testDigestTransport();
 	testSettingsEngine();
+	testAiDetection();
 
 	std::printf("=== %s: %d passed, %d failed, %d skipped ===\n",
 		    g_fail ? "FAILED" : "OK", g_pass, g_fail, g_skip);

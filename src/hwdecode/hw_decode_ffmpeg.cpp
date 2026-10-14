@@ -279,9 +279,15 @@ static enum AVHWDeviceType pick_hw_device(struct zc_hw_ffmpeg *f,
 	static const enum AVHWDeviceType priority[] = {
 #ifdef _WIN32
 		AV_HWDEVICE_TYPE_D3D11VA,
-#elif defined(__APPLE__)
-		AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
 #else
+		/* macOS: no FFmpeg hwaccel at all in this list. FFmpeg's
+		   VideoToolbox hwaccel hands back a 420yCbCr8BiPlanarVideoRange
+		   ('420v') pixel buffer, and gs's OpenGL backend can only bind
+		   'BGRA'/'l10r' IOSurfaces (libobs-opengl/gl-cocoa.m), so there is
+		   no importer that could turn it into an OBS texture without a
+		   copy. macOS zero-copy is the native VideoToolbox session that
+		   decodes straight to BGRA — see hw_decode_vt_mac.mm and
+		   zc_hw_resolve(). */
 		AV_HWDEVICE_TYPE_NONE,
 #endif
 	};

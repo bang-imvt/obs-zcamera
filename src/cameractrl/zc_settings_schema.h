@@ -104,6 +104,18 @@ constexpr const char *kPtzfChange = "ptzfChange";
    1/0); the setting event means the stored configuration changed. */
 constexpr const char *kFramingStatus = "FramingStatusChanged";
 constexpr const char *kFramingSetting = "FramingSettingChanged";
+/* What the camera's AI sees, pushed unsolicited at roughly 10 Hz while its
+   detection is running (auto framing or face AF):
+   {"what":"AI","num":N,"cols":8,"sel":<tracked id>,"pending":0,"debug":0,
+    "target_ids":[],"objs":[app,id,type,confidence,x,y,w,h, ...]}
+   with the coordinates normalized to the frame. Measured on e2ptz sw 1.0.3;
+   the camera's own web client draws these as human/head/face rectangles.
+   num == 0 with an empty objs array is the normal "nothing in frame" state. */
+constexpr const char *kAiDetect = "AI";
+/* The framing target was acquired / lost: {"what":"FramingEvent",
+   "value":"Target Lost"}. Not acted on yet; listed because it is what tells
+   us the camera is not currently tracking anyone. */
+constexpr const char *kFramingEvent = "FramingEvent";
 constexpr const char *kBasicInfo = "basicInfo";
 constexpr const char *kShutdown = "Shutdown";
 constexpr const char *kHeartbeat = "hb";

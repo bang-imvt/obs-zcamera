@@ -23,6 +23,9 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #endif
 #ifdef ENABLE_ZERO_COPY
 #include "hw_decode_ffmpeg.h"
+#ifdef __APPLE__
+#include "hw_decode_vt_mac.h"
+#endif
 #endif
 
 const char *zc_hw_backend_name(enum zc_hw_backend backend)
@@ -50,11 +53,25 @@ enum zc_hw_backend zc_hw_resolve(enum zc_hw_backend requested,
 				 enum zc_codec_id codec)
 {
 #ifdef ENABLE_ZERO_COPY
+#ifdef __APPLE__
+	/* macOS zero-copy is the native VideoToolbox backend, not FFmpeg's
+	   VideoToolbox hwaccel. FFmpeg hands back a 420yCbCr8BiPlanarVideoRange
+	   ('420v') pixel buffer, and libobs's OpenGL backend can only bind the
+	   'BGRA' and 'l10r' IOSurface formats — it logs "Unexpected pixel
+	   format" for anything else (libobs-opengl/gl-cocoa.m,
+	   device_texture_create_from_iosurface) — so that surface cannot become a
+	   gs_texture at all. The native session asks the decoder for 32BGRA
+	   output instead and binds the resulting IOSurface directly
+	   (hw_decode_vt_mac.mm). */
+	if (requested == ZC_HW_AUTO || requested == ZC_HW_VIDEOTOOLBOX)
+		return ZC_HW_VIDEOTOOLBOX;
+#else
 	if (requested != ZC_HW_SOFTWARE) {
 		enum zc_hw_backend hw = zc_hw_ffmpeg_detect(requested, codec);
 		if (hw != ZC_HW_SOFTWARE)
 			return hw;
 	}
+#endif
 #else
 	(void)requested;
 	(void)codec;
@@ -73,16 +90,31 @@ struct zc_hw_decoder *zc_hw_decoder_create(enum zc_hw_backend backend,
 {
 #ifdef ENABLE_ZERO_COPY
 	if (backend != ZC_HW_SOFTWARE && backend != ZC_HW_COUNT) {
-		struct zc_hw_decoder *hw = zc_hw_ffmpeg_create(backend, width,
-							       height, codec,
-							       ten_bit, source);
-		if (hw) {
-			hw->backend = backend;
-			return hw;
+#ifdef __APPLE__
+		/* See zc_hw_resolve: on macOS the zero-copy path is the native
+		   VideoToolbox session, and the FFmpeg hwaccel is deliberately
+		   not tried for it (its 420v surface is not importable). */
+		if (backend == ZC_HW_VIDEOTOOLBOX) {
+			struct zc_hw_decoder *vt = zc_hw_vt_mac_create(
+				width, height, codec, source);
+			if (vt)
+				return vt;
+			blog(LOG_WARNING,
+			     "[obs-zcamera] VideoToolbox zero-copy decode "
+			     "unavailable, falling back to software");
+		} else
+#endif
+		{
+			struct zc_hw_decoder *hw = zc_hw_ffmpeg_create(
+				backend, width, height, codec, ten_bit, source);
+			if (hw) {
+				hw->backend = backend;
+				return hw;
+			}
+			blog(LOG_WARNING,
+			     "[obs-zcamera] zero-copy decode unavailable, "
+			     "falling back to software");
 		}
-		blog(LOG_WARNING,
-		     "[obs-zcamera] zero-copy decode unavailable, "
-		     "falling back to software");
 	}
 #else
 	(void)backend;

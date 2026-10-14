@@ -84,8 +84,13 @@ private:
 	int port_ = 81;           /* notification port, for the Host header */
 	bool isTls_ = false;
 
-	QTimer handshakeTimer_;    /* bounds the wait for the HTTP 101 upgrade   */
-	QTimer idleTimer_;         /* fails a half-open channel with no traffic  */
+	/* Parented on purpose: a QTimer belongs to the thread its object lives on,
+	   and a caller that moves this client to its own thread must move the
+	   watchdogs with it. Unparented they stay behind on the constructing thread
+	   and every start() is refused ("QObject::startTimer: Timers cannot be
+	   started from another thread"), leaving the handshake and idle guards dead. */
+	QTimer handshakeTimer_{this}; /* bounds the wait for the HTTP 101 upgrade   */
+	QTimer idleTimer_{this};      /* fails a half-open channel with no traffic  */
 	int idleTimeoutMs_ = 60000; /* read-idle watchdog period (configurable)  */
 };
 

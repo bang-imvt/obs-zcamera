@@ -73,6 +73,18 @@ struct zc_decoded_frame {
 	struct obs_source_frame2 *frame2; /* CPU frame for Software backend  */
 };
 
+/* True when a decoded frame is a GPU frame that the graphics thread must
+   import and draw from its texture, as opposed to a CPU frame2 from software
+   decode. Every backend stamps `backend` on the frame it produces. Note that a
+   GPU frame does not necessarily carry an AVFrame: the native macOS
+   VideoToolbox backend owns its pixel buffer inside the decoder, so the
+   backend — not `avframe` — is the discriminator. */
+static inline int zc_frame_is_gpu(const struct zc_decoded_frame *f)
+{
+	return f->backend != ZC_HW_SOFTWARE && f->backend != ZC_HW_AUTO &&
+	       f->backend != ZC_HW_COUNT;
+}
+
 /* Backend interface implemented per platform. */
 struct zc_hw_decoder {
 	/* The backend that actually produced this decoder. The factory may

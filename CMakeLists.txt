@@ -93,12 +93,23 @@ if(ENABLE_ZERO_COPY)
     # at runtime. nvcuda.dll is loaded dynamically, so no CUDA toolkit is needed.
     target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE d3d11 dxgi d3dcompiler)
   elseif(APPLE)
+    # Native VideoToolbox session that decodes straight into a BGRA IOSurface
+    # (see src/hwdecode/hw_decode_vt_mac.h for why this is not FFmpeg's
+    # VideoToolbox hwaccel). CoreMedia supplies the format description and
+    # sample-buffer plumbing the decompression session needs.
+    # First .mm in this project: enable the language explicitly rather than rely
+    # on CMake inferring it from the extension (the project() call lists no
+    # LANGUAGES, and the Xcode-generator presets are the ones that build macOS).
+    enable_language(OBJCXX)
+    list(APPEND obs-zcamera_SOURCES src/hwdecode/hw_decode_vt_mac.mm)
+    list(APPEND obs-zcamera_HEADERS src/hwdecode/hw_decode_vt_mac.h)
     find_library(VIDEOTOOLBOX_FW VideoToolbox REQUIRED)
     find_library(COREVIDEO_FW CoreVideo REQUIRED)
+    find_library(COREMEDIA_FW CoreMedia REQUIRED)
     find_library(IOSURFACE_FW IOSurface REQUIRED)
     target_link_libraries(${CMAKE_PROJECT_NAME}
                           PRIVATE ${VIDEOTOOLBOX_FW} ${COREVIDEO_FW}
-                                  ${IOSURFACE_FW})
+                                  ${COREMEDIA_FW} ${IOSURFACE_FW})
   endif()
 endif()
 
@@ -118,6 +129,7 @@ if(ENABLE_CAMERA_CONTROL AND ENABLE_QT AND ENABLE_FRONTEND_API)
        src/cameractrl/zc_http_transport.cpp
        src/cameractrl/zc_ws_client.cpp
        src/cameractrl/zc_ws_notifier.cpp
+       src/cameractrl/zc_ai_detect.cpp
        src/cameractrl/zc_settings_engine.cpp
        src/cameractrl/zc_camera_client.cpp
        src/cameractrl/zc_settings_schema.cpp
@@ -128,6 +140,7 @@ if(ENABLE_CAMERA_CONTROL AND ENABLE_QT AND ENABLE_FRONTEND_API)
        src/cameractrl/zc_http_transport.h
        src/cameractrl/zc_ws_client.h
        src/cameractrl/zc_ws_notifier.h
+       src/cameractrl/zc_ai_detect.h
        src/cameractrl/zc_settings_engine.h
        src/cameractrl/zc_camera_client.h
        src/cameractrl/zc_settings_schema.h

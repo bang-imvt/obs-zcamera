@@ -20,9 +20,11 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 /* Camera WebSocket notifications, ported from ZCamGuiOpen notifications.ts
    + camera-state.ts.
 
-   Socket: <scheme>://<address>:81/ — always the camera's notification port, on
-   ws:// or wss:// depending on whether the HTTP origin negotiated https.
-   Messages are JSON objects dispatched on the `what` field.
+   Socket: <scheme>://<address>:81/ — always the camera's notification port. The
+   scheme starts out following the HTTP origin, but that is only a guess: at
+   least some firmware serves plain ws on 81 even when its web UI is https, so a
+   dial that fails before the handshake flips the scheme for the next attempt
+   (see onSocketError). Messages are JSON objects dispatched on the `what` field.
 
    On disconnect we mark state stale, reconnect with backoff, and temporarily
    refresh important state by HTTP — but we never send commands as part of
@@ -47,10 +49,12 @@ public:
 	explicit ZcWsNotifier(QObject *parent = nullptr);
 
 	/* Start connecting to the camera's notification socket. The socket always
-	   lives on the camera's own port 81; only the scheme follows the HTTP origin
-	   (secure=false -> ws, secure=true -> wss). extraHeaders carries the Digest
-	   Authorization / Cookie / x-auth-token lines for the upgrade request (from
-	   ZcHttpTransport). */
+	   lives on the camera's own port 81; `secure` only picks the scheme to try
+	   FIRST (secure=false -> ws, secure=true -> wss) — a dial that fails before
+	   the handshake flips it, because the notification service does not
+	   necessarily follow the web UI's TLS setting. extraHeaders carries the
+	   Digest Authorization / Cookie / x-auth-token lines for the upgrade request
+	   (from ZcHttpTransport). */
 	void start(const QString &host, bool secure,
 		   const QByteArray &extraHeaders = QByteArray());
 	void stop();
@@ -79,13 +83,28 @@ private slots:
 private:
 	void scheduleReconnect();
 	void doConnect();
+	/* A dial that failed before the handshake: try the other scheme next. */
+	void noteDialFailure();
 
-	ZcWsClient socket_;
-	QTimer reconnectTimer_;
+	/* Parented on purpose: a caller that moves the notifier to its own thread
+	   (moveToThread) must move the socket and its timers with it. As a plain
+	   member it would stay on the thread that constructed the notifier, and if
+	   that thread has no Qt event loop — which is what OBS's update() caller can
+	   be — the socket's connected() signal is never delivered, so the upgrade
+	   request is never written: the TCP connection just sits there. */
+	ZcWsClient socket_{this};
+	QTimer reconnectTimer_{this};
 	QString host_;
 	QByteArray extraHeaders_; /* upgrade request headers (auth/cookie) */
 	ZcHttpTransport *transport_ = nullptr; /* live auth source (may be null) */
 	bool secure_ = false;
+	/* Whether the dial currently in flight ever reached the handshake. Only a
+	   dial that never connected says something about the SCHEME; a socket that
+	   connected and later dropped says something about the network. */
+	bool dialConnected_ = false;
+	/* One log line per failure streak for the scheme flip (failureLogged_ is
+	   already set by the time the flip is decided). */
+	bool flipLogged_ = false;
 	bool live_ = false;
 	bool stopped_ = true;
 	int retry_ = 0;

@@ -104,6 +104,11 @@ public:
 	   gold check instead of "＋" (spec §1, L4/L5). */
 	void setAddedHosts(const QSet<QString> &added);
 
+	/* Wait, scanning: replace the (empty) list with a busy page. Set while
+	   discovery has not produced a single row yet, so an empty rail reads as
+	   work in progress rather than as a scan that found nothing. */
+	void setBusy(bool busy);
+
 signals:
 	void cameraClicked(const QString &host);
 	/* A row's chip was clicked on a camera that is not yet a source: add that
@@ -118,9 +123,19 @@ private:
 	/* Compose the fields, glyph and tooltip of one row from its stored fields.
 	   The label itself is painted by ZcRailDelegate. */
 	void applyRow(QListWidgetItem *item);
+	/* Show exactly one of the three pages: the list once it has rows, the
+	   busy spin while scanning has yet to name one, and the "no camera" line
+	   once scanning has given up. */
+	void updateEmptyState();
 
 	QListWidget *list_ = nullptr;
 	QSet<QString> added_;
+	/* Starts busy: the dock is built before the first scan can run, and a rail
+	   that reads "no camera" during that first tick would be wrong. */
+	bool busy_ = true;
+	bool hasRows_ = false;
+	QWidget *busyPage_ = nullptr;
+	QWidget *emptyPage_ = nullptr;
 };
 
 /* Transparent HUD over the preview. */
@@ -315,11 +330,37 @@ private:
 	/* Set one edge to the head's current position (the web UI's "取当前位"). */
 	void setEdgeToCurrent(Edge edge);
 
+	/* Lens zoom. The camera's /ctrl/lens?action=zoomin|zoomout&fspeed= is a
+	   continuous move that only stops on zoomstop, and this firmware reports no
+	   zoom position at all (`z_status` answers {"moving":0}, and the
+	   `lens_zoom_pos` key is absent from its lens catalog), so the slider is a
+	   spring-return rocker rather than a position control: dragging up zooms
+	   in, down zooms out, speed follows the distance from the centre, and
+	   releasing recentres it and sends zoomstop. It is vertical and sits beside
+	   the joystick with T over W, which is how the camera's own page draws it
+	   (its #tab-ctrl-af-zoom-pos column) — the two controls that move the lens
+	   belong together, and the speed slider keeps a row of its own because it
+	   is not a lens command at all. `pushZoom` sends a command only when the
+	   direction or the speed bucket changes, because every request hits the
+	   camera's single-threaded httpd and one drag fires hundreds of value
+	   changes. */
+	void pushZoom(int value);
+	void updateZoomLabel(int value);
+
 	ZcCameraClient *client_ = nullptr;
 	QWidget *joystickArea_ = nullptr;
 	QSlider *speedSlider_ = nullptr;
 	QPushButton *homeButton_ = nullptr;
 	QPushButton *stopButton_ = nullptr;
+
+	/* Lens zoom rocker (see pushZoom). */
+	QSlider *zoomSlider_ = nullptr;
+	QLabel *zoomValue_ = nullptr;
+	bool zoomDragging_ = false;
+	/* Last command sent: direction (-1/0/+1) and speed bucket (0..5), so a
+	   drag sends one request per bucket instead of one per pixel. */
+	int zoomDir_ = 0;
+	int zoomBucket_ = 0;
 
 	/* Current Position read-out (live, from ptzfChange / the query reply). */
 	QLabel *positionLabel_ = nullptr;
@@ -345,23 +386,40 @@ private:
 	QPointF dragOffset_;
 };
 
-/* Auto-framing, split out of the PTZ joystick into its own tab (the camera's web
-   UI keeps a matching panel too).
+/* Auto-framing, in its own tab, mirroring the camera's own Auto Framing pages
+   control for control, so an operator who knows the web UI can read it without
+   relearning it.
 
    SHOWN IN THE UI: this panel speaks the whole /ctrl/framing API and
    ZcControlDock inserts it as its own tab for a camera whose /info reports auto
-   framing. Its layout mirrors the camera page's non-canvas controls; the
-   framing-box canvas, the FOV composition preview and EzFraming
-   click-to-centre/zoom are not reproduced. `kFramingPanelVisible` in
-   zc_control_dock.cpp is the single switch that shows/hides the tab.
+   framing. `kFramingPanelVisible` in zc_control_dock.cpp is the single switch
+   that shows/hides the tab.
 
-   This mirrors that panel's non-canvas controls:
-   the switches, the scene / start-position / target-number / lost-action
-   dropdowns, the speed and timeout spinners, the "restart now" button and the
-   composition-preset list. The canvas-only parts of the web page (the framing
-   box drag, the FOV preview, EzFraming click-to-centre) are deliberately not
-   here. Reads come from one /ctrl/framing/all_status snapshot; writes are the
-   same /ctrl/framing/<sub> calls the web UI makes. */
+   The panel is split exactly like the camera page:
+     - "Live" is its live Auto Framing panel — one status word, the three
+       Enable / Start / Restart buttons, the same two columns of tracking
+       controls in the same order, the four-arrow framing pad that nudges the
+       subject's position in frame, the vertical view-angle (FOV) slider, the
+       composition presets, and Refresh.
+     - "Settings" is its Auto Framing settings page — the power-on and gesture
+       switches, the two delays, the framing-box control and the framing
+       profile export.
+
+   Two deliberate departures:
+     - Every control writes on change, as the page's do; there is no Apply
+       button, so no control can ever be written with a value it is not
+       showing.
+     - The page draws the live camera frame inside the framing pad. That frame
+       belongs to the OBS source, not to this dock, so the pad draws a schematic
+       frame and prints the two offsets it is changing.
+
+   Reads come from one /ctrl/framing/all_status snapshot (plus /fov and
+   /status); writes are the same /ctrl/framing/<sub> calls the web UI makes. */
+
+class ZcSegmentedControl;
+class ZcSliderSpin;
+class ZcFramingPad;
+
 class ZcFramingPanel : public QWidget {
 	Q_OBJECT
 public:
@@ -377,49 +435,126 @@ public slots:
 	void applyStatus(const QJsonObject &doc);
 
 private:
-	/* Write every control to the camera in one go (the Apply button). */
-	void apply();
 	/* Re-read /ctrl/framing/preset and rebuild the tile list. */
 	void refreshPresets();
 	void rebuildPresets(const QJsonObject &doc);
-	/* Repaint the status line from the live switches. */
+	/* Re-read /ctrl/framing/fov, which carries the two offsets the framing pad
+	   nudges; the page re-reads it after every nudge so its copy cannot drift
+	   from the camera's. */
+	void refreshFovOffsets();
+	/* One probe per optional feature, on the first refresh after a camera is
+	   picked: the framing-box control and the profile export both answer
+	   {"code":-1} on a firmware without them, and a control that can only fail
+	   is better shown disabled with the reason in its tooltip. */
+	void probeOptionalFeatures();
+	/* Repaint the status word and the Enable/Start/Restart button faces from the
+	   live switches. */
 	void updateStatusLabel();
+	/* Grey the Live page's controls while the camera's detection is off, exactly
+	   as the camera's own page does (framing.js `_updateFramingUiStatus` puts
+	   `ui-state-disabled` on `.aframe_left_layout`, the whole live control
+	   block, because the camera ignores its contents until Enable is on). The
+	   Settings page is never greyed — the page leaves it live either way. */
+	void updateGating();
+	/* Move one /ctrl/framing/fov offset by one step and tell the camera. Only
+	   ever called from the framing pad; the read-out follows the write. */
+	void nudgeOffset(bool placement, int delta);
+	/* Repaint the two-offset read-out under the framing pad. */
+	void updatePadReadOut();
+	/* Open a projector window on this camera's own source. That window is one
+	   of the few views that renders the source by itself, so it is where a
+	   monitor-only detection overlay can be watched without any of it reaching
+	   the recording — the standard preview pane blits the program mix instead
+	   and therefore cannot show it. Falls back to a window on the current
+	   scene when this camera has no source in OBS yet. */
+	void openMonitorWindow();
 
-	/* Switches. */
-	QCheckBox *detectChk_ = nullptr;
-	QCheckBox *traceChk_ = nullptr;
-	QCheckBox *autoTargetChk_ = nullptr;
-	QCheckBox *zoomLockChk_ = nullptr;
-	QCheckBox *tiltLockChk_ = nullptr;
-	QCheckBox *faceTrackChk_ = nullptr;
-	QCheckBox *autoStartChk_ = nullptr;
-	QCheckBox *tallyChk_ = nullptr;
-	QCheckBox *trackingRecordChk_ = nullptr;
-	QCheckBox *maskChk_ = nullptr;
-	QCheckBox *wavingChk_ = nullptr;
-	QCheckBox *gestureFovChk_ = nullptr;
+	/* The camera's page is three live buttons, not a row of checkboxes:
+	   Enable/Disable toggles `detect`, Start/Stop toggles `trace`, and Restart
+	   re-runs detection. They act immediately, as on the page. */
+	QPushButton *enableBtn_ = nullptr;
+	QPushButton *startBtn_ = nullptr;
+	QPushButton *restartBtn_ = nullptr;
+	/* Opens the projector window described on openMonitorWindow(). */
+	QPushButton *monitorBtn_ = nullptr;
+	/* What the camera last reported, so the button faces can follow it. */
+	bool detectOn_ = false;
+	bool traceOn_ = false;
+	/* Set while applyStatus() paints the controls from a snapshot. Every change
+	   handler returns early on it, so a repaint can never look like an operator
+	   edit and write the camera back. This replaces the old Apply button — and
+	   with it the chance of applying index-0 defaults over the camera's stored
+	   scene / lost action / target count. */
+	bool painting_ = false;
+	/* Whether this camera exists in OBS as a source, which is the only thing the
+	   Detected Indicator switch can act on: it drives the source's AI-box master
+	   switch (zc_source.cpp's zc_ai_overlay), so with no source the switch has
+	   nothing to write and is shown dead. Set in applyStatus(). */
+	bool indicatorSourcePresent_ = false;
 
-	/* Dropdowns. */
+	/* The page's Off/On segments, in page order. */
+	ZcSegmentedControl *autoTargetSeg_ = nullptr;     /* Live: Auto Target */
+	ZcSegmentedControl *zoomLockSeg_ = nullptr;       /* Settings: Lock Zoom */
+	ZcSegmentedControl *tiltLockSeg_ = nullptr;       /* Live: Lock Tilt */
+	ZcSegmentedControl *maskSeg_ = nullptr;           /* Live: Mask */
+	ZcSegmentedControl *indicatorSeg_ = nullptr;      /* Live: Detected Indicator */
+	ZcSegmentedControl *faceTrackSeg_ = nullptr;      /* Live: Face Tracking */
+	ZcSegmentedControl *autoStartSeg_ = nullptr;      /* Settings: Start On Power Up */
+	ZcSegmentedControl *tallySeg_ = nullptr;          /* Settings: Green Tally */
+	ZcSegmentedControl *trackingRecordSeg_ = nullptr; /* Settings: Recording Triggered By Tracking */
+	ZcSegmentedControl *wavingSeg_ = nullptr;         /* Settings: Follow Me */
+	ZcSegmentedControl *gestureFovSeg_ = nullptr;     /* Settings: View Angle Adjustment */
+	/* Settings: the framing-box control's own two segments — which box, and
+	   whether it is on. A firmware that answers /ctrl/framing/fix_angle_box with
+	   {"code":-1} has neither. */
+	ZcSegmentedControl *boxModeSeg_ = nullptr;
+	ZcSegmentedControl *boxEnableSeg_ = nullptr;
+
+	/* The page's dropdowns. */
+	QComboBox *viewAngleCombo_ = nullptr; /* Live: View Angle (fov_type) */
 	QComboBox *sceneCombo_ = nullptr;
 	QComboBox *startPosCombo_ = nullptr;
 	QComboBox *targetNumCombo_ = nullptr;
 	QComboBox *lostActionCombo_ = nullptr;
 
-	/* Numbers. */
-	QSpinBox *restartSpin_ = nullptr;
-	QSpinBox *lostTimeoutSpin_ = nullptr;
-	QSpinBox *waitTimeSpin_ = nullptr;
-	QSpinBox *sensitivitySpin_ = nullptr;
-	QSpinBox *accelerationSpin_ = nullptr;
-	/* Value each spin had at construction (the panel's own defaults, e.g.
-	   restart = 30 s). setClient(nullptr) restores these — resetting to
-	   minimum() would park every spinner at 0/1, which is not the default
-	   the camera page shows. */
-	QHash<QSpinBox *, int> spinDefaults_;
+	/* The page's slider+spinner pairs. The page commits on release and so do
+	   these: the camera's httpd is single-threaded, so one write per drag tick
+	   would only queue behind itself. */
+	ZcSliderSpin *bodySizeSp_ = nullptr; /* Live: Size (fov body_size) */
+	ZcSliderSpin *sensitivitySp_ = nullptr;
+	ZcSliderSpin *accelerationSp_ = nullptr;
+	ZcSliderSpin *lostTimeoutSp_ = nullptr;
+	ZcSliderSpin *waitTimeSp_ = nullptr;
+	ZcSliderSpin *detectRestartSp_ = nullptr;
 
-	QPushButton *restartNowBtn_ = nullptr;
+	/* The framing pad and the read-out of the two offsets it changes. */
+	ZcFramingPad *pad_ = nullptr;
+	QLabel *padReadOut_ = nullptr;
 
-	/* Composition presets. */
+	/* Everything the camera's page greys out while detection is off. */
+	QList<QWidget *> gatedGroups_;
+	/* The framing-box control and the profile export, which this firmware does
+	   not have (/ctrl/framing/{fix_angle_box,tracking_box,export} all answer
+	   {"code":-1}). The page leaves them on screen but dead; so does this, with
+	   the reason in the tooltip, rather than accepting a click that can only
+	   fail. */
+	QList<QWidget *> optionalRows_;
+	QWidget *boxGroup_ = nullptr;
+	QWidget *profileGroup_ = nullptr;
+	/* Set once the optional-feature probe has run for the current camera, so a
+	   refresh does not re-ask on every tick. */
+	bool optionalProbed_ = false;
+
+	/* Composition presets, at the foot of the live page rather than inside its
+	   grid: the block is a list with a row of buttons of its own, and set
+	   among the fields it pushed the rest of the grid out of the page's order.
+	   It is tracked separately from gatedGroups_ because it is also
+	   conditional on the firmware — /ctrl/framing/preset answers {"code":-1}
+	   on a camera with no preset table at all, and the group is then hidden
+	   outright rather than shown dead. Starts hidden, because nothing is known
+	   about a camera until its first answer. */
+	QWidget *presetGroup_ = nullptr;
+	bool presetSupported_ = false;
 	QListWidget *presetList_ = nullptr;
 	QPushButton *presetAddBtn_ = nullptr;
 	QLabel *presetHint_ = nullptr;
@@ -430,6 +565,16 @@ private:
 	int presetMaxNameBytes_ = 0;
 
 	QLabel *statusLabel_ = nullptr;
+	/* Index into the camera's AI_STATUS_LABELS, i.e. the `status` field of
+	   /ctrl/framing/status and the `value` of FramingStatusChanged. */
+	int statusIndex_ = 0;
+	/* The two /ctrl/framing/fov offsets, as last read or written. */
+	int placement_ = 0;
+	int faceHeight_ = 0;
+	/* Set by the first full snapshot. Controls stay disabled until then, so a
+	   control that has never been filled from the camera cannot write its
+	   placeholder value back. */
+	bool haveSnapshot_ = false;
 
 	ZcCameraClient *client_ = nullptr;
 };
@@ -618,6 +763,11 @@ private:
 	   discovered camera that does not answer, instead of clearing it at the next
 	   scan (spec §1, L11). */
 	QSet<QString> unreachableHosts_;
+	/* How many consecutive scans have come back with no camera at all. The rail
+	   shows its busy spin for the first few (discovery needs a moment to be
+	   answered) and the plain "no camera" line after that, so a permanently
+	   empty rail does not sweep forever. Reset by any scan that lists one. */
+	int railEmptyScans_ = 0;
 	/* Re-entrancy guard: ZcCameraClient::connect() runs a nested event loop (the
 	   origin probe), so openCamera() — and onCameraClicked() under it — can be
 	   re-entered from an event delivered while a connect is in flight. A second

@@ -107,6 +107,7 @@ try {
         (Join-Path $Src 'zc_http_transport.cpp'),
         (Join-Path $Src 'zc_tls_socket.cpp'),
         (Join-Path $Src 'zc_settings_schema.cpp'),
+        (Join-Path $Src 'zc_ai_detect.cpp'),
         (Join-Path $Src 'zc_settings_engine.cpp')
     )
     $ctrlOut = Join-Path $Root 'cameractrl_tests.exe'

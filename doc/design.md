@@ -207,24 +207,50 @@ chroma. Hence the two-plane + shader design above.
 to a shared BGRA texture with an `ID3D11VideoProcessor` (§3.6). This path has no
 CUDA dependency and is the default for `Auto`.
 
-### 3.4 macOS backend (VideoToolbox / IOSurface)
+### 3.4 macOS backend (VideoToolbox / IOSurface) — corrected
 
-macOS decode uses FFmpeg's `AV_HWDEVICE_TYPE_VIDEOTOOLBOX`. VideoToolbox
-produces `CVPixelBuffer`s that are **IOSurfaces** (`IOSurfaceGetID`).
+The route described above (FFmpeg `AV_HWDEVICE_TYPE_VIDEOTOOLBOX` →
+`gs_texture_create_from_iosurface`) **does not work**, and the blocker is inside
+libobs, not in the camera:
 
-Zero-copy steps:
+```objc
+// libobs-opengl/gl-cocoa.m, device_texture_create_from_iosurface
+OSType pf = IOSurfaceGetPixelFormat(ref);
+// only 'BGRA' and 'l10r' are accepted; anything else logs
+//   "Unexpected pixel format: %d (%c%c%c%c)"
+// and is then bound as if it were BGRA.
+```
 
-1. Retrieve the decoded `CVImageBufferRef` from the `AVFrame`
-   (`CVPixelBufferGetIOSurface` / IOSurface port).
-2. Wrap the IOSurface into an OBS `gs_texture_t` using OBS's
-   `gs_texture_create_from_iosurface` (OBS Metal/OpenGL import an IOSurface by
-   its `IOSurfaceID`).
-3. Draw that texture in `video_render`.
+FFmpeg's VideoToolbox hwaccel hands back a
+`kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange` (`'420v'`) bi-planar surface,
+which is neither of those, so it cannot become a `gs_texture_t` at all. That is
+why the shipped macOS source was `OBS_SOURCE_ASYNC_VIDEO`: software decode, OBS
+uploads the frame.
 
-The IOSurface is GPU memory; OBS's Metal/OpenGL backend imports it directly, so
-there is no CPU copy. Color space/range come from the VT pixel buffer's
-CVImageBuffer attachments (BT.709/BT.2020/HLG/PQ), passed to OBS via the frame
-or rendered with the proper matrix.
+What does work is asking the decoder for the one format gs can bind: a **native
+`VTDecompressionSession`** whose destination attributes are
+`kCVPixelBufferPixelFormatTypeKey = kCVPixelFormatType_32BGRA` plus an empty
+`kCVPixelBufferIOSurfacePropertiesKey`, so the video engine writes BGRA straight
+into an IOSurface. gs binds that as a `GL_TEXTURE_RECTANGLE`
+(`gs_texture_create_from_iosurface` once, then `gs_texture_rebind_iosurface`
+per frame — the pattern OBS's own macOS capture plugins use). Implemented in
+`src/hwdecode/hw_decode_vt_mac.mm`: the Annex-B access units the SSP connector
+delivers are re-packed into AVCC samples, and their parameter sets seed the
+`CMVideoFormatDescription`. No CPU copy and no extra GPU pass — the decoder
+produces the format OBS samples.
+
+Consequences:
+
+- In a zero-copy build the macOS source is an ordinary `OBS_SOURCE_VIDEO`
+  source (`ZC_MAC_ZERO_COPY` in `zc_source.cpp`), so it owns a `video_render`
+  hook — the same shape as Windows, and what makes the display-only AI overlay
+  available there too.
+- FFmpeg's VideoToolbox hwaccel is deliberately **not** selected on macOS
+  (`hw_decode_ffmpeg.cpp`, `pick_hw_device`): nothing can import its surface.
+- 10-bit is the open gap. gs binds only `'l10r'` for 10-bit, which
+  VideoToolbox will not produce for H.264/HEVC, so a zero-copy build renders a
+  10-bit stream as 8-bit. Configuring with `ENABLE_ZERO_COPY=OFF` restores the
+  async source, which keeps OBS's native P010 + PQ/HLG handling.
 
 ### 3.5 Color handling
 
@@ -402,6 +428,38 @@ Port of `ZCamGuiOpen` `camera-client.ts` + `camera-state.ts`:
 no longer renders a HUD: the embedded preview and the REC/photo controls were
 removed, so nothing consumes these values in v1. The `refreshHud()` logic is
 therefore not implemented.
+
+### 4.7 AI detection overlay (preview only)
+
+The camera pushes detections over the same port-81 notification socket the dock
+uses (`what: "AI"`, normalized 0–1 box coordinates, ~10 Hz). A source opens its
+own `ZcWsNotifier` for that stream when `zc_ai_overlay` is on, on a dedicated
+`QThread`: the notifier owns a socket and three `QTimer`s, and OBS does not
+guarantee that `update()` runs on a thread with a Qt event loop — on a thread
+without one the socket connects, the upgrade request is never written, and no
+detection ever arrives. Only the decoded box list and its arrival stamp cross to
+the graphics thread (`aiMutex_`).
+
+`drawAiOverlay()` runs at the end of `video_render()`, in the source's own pixel
+space (normalized coordinates scaled by the decoded picture size), drawing each
+box as four stretched sprites of a 1×1 red texture. It returns without drawing
+when the render target is the **canvas mix** — the pass that fills the texture
+program, which the preview blits and which recording and streaming encode. libobs
+gives a plugin no "am I rendering a preview" flag, so the mix is recognised by
+what it is: an off-screen target the size of the canvas, drawn into whole. Every
+display path fails that test — a display draws into its own swapchain, where
+`gs_get_render_target()` is NULL — which is what keeps the boxes out of the
+stream and the recording while the operator still sees them. Accepted limitation:
+a projector, or a `GetSourceScreenshot`, sized exactly to the canvas base size is
+mistaken for the mix and suppresses the overlay.
+
+`tests/obs_ai_overlay_test.ps1` proves both halves end to end: it drives a
+headless OBS over obs-websocket, waits until the camera actually reports a person
+(an empty room correctly draws nothing), screenshots the source at a size that is
+*not* the canvas base size with the overlay on and off and counts red pixels, then
+records a few seconds and checks a frame extracted with ffmpeg carries only the
+camera's own red OSD. `tests/obs_ai_position_test.ps1` compares the drawn box
+against the coordinates the camera reported at the same instant.
 
 ## 5. Module layout
 

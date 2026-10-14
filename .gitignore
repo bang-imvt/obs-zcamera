@@ -28,6 +28,8 @@
 /.zcode/
 /.agents/
 /.agent/
+/.trae/
+/.workbuddy/
 /agent*/
 *zcode*
 *.tmp
@@ -58,3 +60,22 @@ obsfe_*.log
 
 # ---- OBS integration test output (tests\obs_integration_test.ps1) ----
 /tests/obs_out/
+
+# ---- AI overlay test output (tests\obs_ai_overlay_test.ps1) ----
+/tests/on.bmp
+/tests/off.bmp
+/tests/mix.bmp
+/tests/result.json
+/tests/pos_on.bmp
+/tests/pos_off.bmp
+/tests/position.json
+# ... and the PNG previews of those frames kept alongside them
+/tests/ai_overlay_on.png
+/tests/ai_overlay_off.png
+
+# ---- Dock screenshots (visual check of the framing tab) ----
+/tests/framing_tab_idle.png
+/tests/framing_tab_detecting.png
+# ... and the camera web-UI reference shots / box captures kept during that work
+/tests/web_*.png
+/tests/ai_overlay_box.png
