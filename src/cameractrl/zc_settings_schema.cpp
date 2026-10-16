@@ -280,12 +280,15 @@ bool catalogSupportedByModel(const QString &catalogId, const QString &model)
 bool settingRebootsCamera(const QString &key)
 {
 	/* HTTPS and identity auth restart the camera's web service; a network-type
-	   change can move it to another address entirely. */
+	   change can move it to another address entirely. Crop Sensor re-times the
+	   sensor and reboots the camera (bug list #82 — its reconnect must ride
+	   the same 20 s / 40 s / 90 s backoff as the other restart writes). */
 	return key == QStringLiteral("https_on") ||
 	       key == QStringLiteral("http_auth") ||
 	       key == QStringLiteral("ip_mode") ||
 	       key == QStringLiteral("net_mode") ||
-	       key == QStringLiteral("eth_mode");
+	       key == QStringLiteral("eth_mode") ||
+	       key == QStringLiteral("crop_sensor");
 }
 
 bool isPerKey(const QString &key)

@@ -708,6 +708,15 @@ void ZcHttpTransport::post(const QString &path, const QByteArray &body,
 	});
 }
 
+void ZcHttpTransport::postBody(const QString &path, const QByteArray &body,
+			       const QByteArray &contentType,
+			       ZcHttpCallback cb, int timeoutMs)
+{
+	enqueue([this, path, body, contentType, cb, timeoutMs]() {
+		doRequest("POST", path, body, cb, timeoutMs, 1, contentType);
+	});
+}
+
 QString ZcHttpTransport::hostHeader() const
 {
 	const int def = tls_ ? 443 : 80;
@@ -718,7 +727,8 @@ QString ZcHttpTransport::hostHeader() const
 
 QByteArray ZcHttpTransport::buildRequest(const char *method,
 					 const QString &pathWithQuery,
-					 const QByteArray &body) const
+					 const QByteArray &body,
+					 const QByteArray &contentType) const
 {
 	QByteArray req;
 	req += method;
@@ -737,9 +747,15 @@ QByteArray ZcHttpTransport::buildRequest(const char *method,
 		req += "x-auth-token: " + x_auth_token_ + "\r\n";
 	/*
 	 * A POST always carries a Content-Length (0 when empty), matching what the
-	 * previous Qt client sent. */
+	 * previous Qt client sent. postBody() overrides the type (multipart);
+	 * everything else keeps the urlencoded default. */
 	if (qstrcmp(method, "POST") == 0) {
-		req += "Content-Type: application/x-www-form-urlencoded\r\n";
+		req += "Content-Type: ";
+		req += contentType.isEmpty()
+			       ? QByteArrayLiteral(
+				     "application/x-www-form-urlencoded")
+			       : contentType;
+		req += "\r\n";
 		req += "Content-Length: " + QByteArray::number(body.size()) +
 		       "\r\n";
 	}
@@ -753,13 +769,15 @@ QByteArray ZcHttpTransport::buildRequest(const char *method,
 
 void ZcHttpTransport::dispatch(const char *method,
 			       const QString &pathWithQuery,
-			       const QByteArray &body, int timeoutMs,
+			       const QByteArray &body,
+			       const QByteArray &contentType, int timeoutMs,
 			       ExchangeDone done, ExchangeCancel *cancel)
 {
 	HttpExchange *ex =
 		new HttpExchange(host_, (quint16)port_, tls_,
-				 buildRequest(method, pathWithQuery, body), timeoutMs,
-				 std::move(done), this);
+				 buildRequest(method, pathWithQuery, body,
+					      contentType),
+				 timeoutMs, std::move(done), this);
 	if (cancel)
 		*cancel = [ex]() { ex->abort(); };
 }
@@ -791,7 +809,7 @@ bool ZcHttpTransport::requestSync(const char *method,
 	QEventLoop loop;
 	bool done = false;
 	ExchangeCancel cancel;
-	dispatch(method, pathWithQuery, body, timeoutMs,
+	dispatch(method, pathWithQuery, body, QByteArray(), timeoutMs,
 		 [&](int status, const QByteArray &headers,
 		     const QByteArray &rspBody, const QString &error,
 		     bool timedOut) {
@@ -838,7 +856,8 @@ bool ZcHttpTransport::requestSync(const char *method,
 void ZcHttpTransport::doRequest(const char *method,
 				const QString &pathWithQuery,
 				const QByteArray &body, ZcHttpCallback cb,
-				int timeoutMs, int retries)
+				int timeoutMs, int retries,
+				const QByteArray &contentType)
 {
 	const QByteArray methodBytes(method);
 
@@ -847,7 +866,7 @@ void ZcHttpTransport::doRequest(const char *method,
 		buildAuthorization(methodBytes, pathWithQuery.toUtf8());
 
 	dispatch(
-		method, pathWithQuery, body, timeoutMs,
+		method, pathWithQuery, body, contentType, timeoutMs,
 		[this, methodBytes, pathWithQuery, body, cb, timeoutMs,
 		 retries](int status, const QByteArray &headers,
 			  const QByteArray &payload, const QString &error,

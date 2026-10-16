@@ -77,6 +77,14 @@ public:
 
 	/* Camera identity from the /info reply (fetched on connect). */
 	QString cameraModel() const { return model_; }
+	/* The camera's firmware string ("1.0.3"), from /info `sw`. Empty until
+	   the first /info answer arrives. */
+	QString firmwareVersion() const { return firmwareVersion_; }
+	/* True when the firmware is at least `ver` ("1.0.5"). Drives the
+	   framing panel's version gates (bug list #10/#11/#48/#49). An empty
+	   version never satisfies a comparison — an unknown firmware keeps
+	   everything visible rather than hiding features it may have. */
+	bool firmwareAtLeast(const char *ver) const;
 	/* Whether the camera has a pan/tilt head: /info feature.lens_ctrl_ptz, or
 	   a model name that says "ptz". The PTZ tab is gated on this. */
 	bool cameraSupportsPtz() const { return supportsPtz_; }
@@ -152,6 +160,47 @@ public:
 	void setFramingLostAction(int action);    /* /target_lost?action= */
 	void setFramingLostTimeout(int seconds);  /* /target_lost?timeout_sec= */
 	void setFramingMaskEnable(bool enabled);  /* /mask_area?enable= */
+	/* The detection-area rectangle, normalized (0..1). The camera answers
+	   GET /mask_area with the current rect plus its w_min/h_min, and refuses
+	   a rect smaller than those. Firmware that does not implement the
+	   geometry still answers {"code":0} and keeps its old values, so a
+	   caller must read back rather than trust the reply. */
+	void setFramingMaskRect(bool enabled, float left, float top, float right,
+				float bottom); /* /mask_area?enable=&left=&… */
+	/* GET /mask_area -> {left,top,right,bottom,w_min,h_min,enable}. */
+	void framingMaskQuery(std::function<void(const QJsonObject &)> cb);
+
+	/* Registered-face database (bug list: face registration was missing).
+	   The family is /ctrl/facedb/*, NOT the older /ctrl/face (which this
+	   firmware answers "Face detection is not supported" for). The exact
+	   request shapes below are taken from the camera's own web client
+	   (controller.min.js, the static `facedb` object):
+	     query   -> GET /ctrl/facedb/query
+	                {status, max, max_active, next_priority,
+	                 faces:[{uid,name,priority,...}]}
+	     status  -> GET /ctrl/facedb/status   {status, enable, prepare_ready}
+	     set     -> GET /ctrl/facedb/set?enable=<0|1>
+	     prepare -> GET /ctrl/facedb/prepare[?face_id=<n>]
+	                captures a face from the live view:
+	                {status, detail, uid, thm}
+	     add     -> GET /ctrl/facedb/add?which=<uid>&name=&priority=&activate=
+	     update  -> GET /ctrl/facedb/update?uid=&name=&priority=&activate=
+	     delete  -> GET /ctrl/facedb/delete?uid=
+	   `prepare` fails with status 2 "face not found" until somebody is in
+	   frame, and `add` answers -1 "prepare not ready" until a prepare has
+	   succeeded, which is why adding is a two-step capture-then-name flow. */
+	void framingFaceQuery(std::function<void(const QJsonObject &)> cb);
+	void framingFaceStatus(std::function<void(const QJsonObject &)> cb);
+	/* Turn the face database on/off. The camera's page does this before it
+	   captures; harmless where the firmware ignores it. */
+	void setFramingFaceEnable(bool enabled); /* /facedb/set?enable= */
+	void framingFacePrepare(std::function<void(const QJsonObject &)> cb);
+	/* `which` is the uid a successful prepare returned. */
+	void framingFaceAdd(int which, const QString &name, int priority,
+			    bool activate = true);
+	void framingFaceUpdate(int uid, const QString &name, int priority,
+			       bool activate = true);
+	void framingFaceDelete(int uid);
 	void setFramingWaitTime(int seconds);     /* /manual_target?wait_time= */
 	void setFramingWaving(bool enabled);      /* /gesture?waving= */
 	/* The web UI's "View Angle Adjustment" writes all three gesture FOV
@@ -173,6 +222,11 @@ public:
 	   placement} record and stores nothing, so writing it does nothing. */
 	void setFramingFovType(int type);         /* /fov?type= */
 	void setFramingFovBodySize(int size);     /* /fov?body_size= */
+	/* The >=1.0.5 firmware's "Size" control: /fov?fov_size= 0..100. On the
+	   1.0.3 firmware this parameter answers with the whole /fov record and
+	   stores nothing (see the note above), so the panel only offers the Size
+	   row when all_status actually carries `fov_size` (bug list #10). */
+	void setFramingFovSize(int percent);
 	/* GET /fov -> {"type":N,"body_size":N,"face_height":N,"placement":N}. The
 	   page re-reads this after each nudge so its copy of the offsets cannot
 	   drift from the camera's; so does the dock's framing pad. */
@@ -182,8 +236,25 @@ public:
 	   spelling /indicator answers {"code":-1}). */
 	void setFramingMarker(bool enabled);      /* /marker?enable= */
 	/* GET /export -> the framing profile as JSON, for the page's Export
-	   button. A camera without it answers {"code":-1}. */
+	   button. A camera without it answers {"code":-1}. NOTE: this reply is
+	   only a work order — {"code":0,"filename":"..."} — the profile itself
+	   is a file the page then downloads from /app_data/preset/<filename>.
+	   framingExportProfile() hands back that raw work-order object;
+	   framingExportProfileFile() performs the two-step download and
+	   delivers the actual profile bytes. */
 	void framingExportProfile(std::function<void(const QJsonObject &)> cb);
+	/* Result code for framingExportProfileFile's callback:
+	   0  ok, `profile` holds the downloaded profile JSON
+	   <0 the camera has no profile export ({"code":-1} work order)
+	   1  transport/HTTP error, or the camera answered without a filename */
+	void framingExportProfileFile(
+	    std::function<void(int result, const QByteArray &profile)> cb);
+	/* Multipart POST /ctrl/framing/import (the page's
+	   showUploadFramingProfileDialog): upload a previously exported profile
+	   file. `result` is true when the camera answers {"code":0}. */
+	void framingImportProfile(const QByteArray &profile,
+				  const QString &filename,
+				  std::function<void(bool ok, const QString &error)> cb);
 	/* The page's framing-box control (FramingBoxCtrl): two boxes, the fixed
 	   angle box and the tracking box, each a GET with ?enable=. Its
 	   getFixAngleBox() probe is how the page learns whether the firmware has
@@ -192,6 +263,10 @@ public:
 	void setFramingFixAngleBoxEnabled(bool enabled); /* /fix_angle_box?enable= */
 	void setFramingTrackingBoxEnabled(bool enabled); /* /tracking_box?enable= */
 	void framingFixAngleBoxQuery(std::function<void(const QJsonObject &)> cb);
+	/* The tracking box's stored ROI: {enable, top, left, width, height,
+	   min_width, min_height}, normalized to the frame — the rect the web
+	   preview outlines and the overlay draws as the "range" frame (bug 17). */
+	void framingTrackingBoxQuery(std::function<void(const QJsonObject &)> cb);
 
 	/* Composition presets (/ctrl/framing/preset): the row of tiles the web UI
 	   draws under the framing controls. The reply carries `presets` (each with
@@ -223,18 +298,24 @@ public:
 	static QString presetThumbnailPath(int index);
 
 	/* Traces ("trajectories"): the camera's second PTZ slot family, served by
-	   /ctrl/ptrace over the same 0-based 0..99 index space as presets. */
-	void ptraceDelete(int index);
-	void ptraceSetName(int index, const QString &name);
+	   /ctrl/ptrace over the same 0-based 0..99 index space as presets. The
+	   optional `cb`, when given, receives the camera's `code` (0 = accepted;
+	   non-zero, e.g. -2 while auto-framing owns the head or the transport is
+	   still finalizing a recording) so the panel can say why nothing
+	   happened instead of silently falling back to the idle face. */
+	void ptraceDelete(int index,
+			  std::function<void(int)> cb = {});
+	void ptraceSetName(int index, const QString &name,
+			   std::function<void(int)> cb = {});
 	/* Start recording a trace over slot `index` (overwrites it). */
-	void ptraceRecordStart(int index);
+	void ptraceRecordStart(int index, std::function<void(int)> cb = {});
 	/* Stop the recording / the playback; both are transport-wide. */
-	void ptraceRecordStop();
-	void ptracePlayStop();
+	void ptraceRecordStop(std::function<void(int)> cb = {});
+	void ptracePlayStop(std::function<void(int)> cb = {});
 	/* Load slot `index` as the trace to play next. */
-	void ptracePlayPrepare(int index);
+	void ptracePlayPrepare(int index, std::function<void(int)> cb = {});
 	/* Play the prepared trace. */
-	void ptracePlayStart();
+	void ptracePlayStart(std::function<void(int)> cb = {});
 	/* Current transport state (TraceState); -1 when the camera did not
 	   answer. */
 	void ptraceQuery(std::function<void(int)> cb);
@@ -350,6 +431,7 @@ private:
 	bool recording_ = false;
 	double temperature_ = -1.0;
 	QString model_;
+	QString firmwareVersion_;
 	bool supportsPtz_ = false;
 	bool supportsAutoFraming_ = false;
 

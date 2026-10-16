@@ -34,6 +34,7 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <QPair>
 #include <QSet>
 #include <QStringList>
+#include <QElapsedTimer>
 #include <QJsonObject>
 #include <QHash>
 #include <QPixmap>
@@ -41,6 +42,8 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 
 /* ZcCredentials, held per host for the session (bug 4). */
 #include "zc_http_transport.h"
+/* The overlay interaction modes and the sink the source calls back into. */
+#include "zc_source_bridge.h"
 
 class QLabel;
 class QPushButton;
@@ -59,6 +62,7 @@ class QTabWidget;
 class QPaintEvent;
 class QMouseEvent;
 class QTimer;
+class QDialog;
 
 /* libobs callback types, declared exactly as <callback/signal.h> and
    <callback/calldata.h> do (obs.h is included after this header). */
@@ -109,6 +113,12 @@ public:
 	   work in progress rather than as a scan that found nothing. */
 	void setBusy(bool busy);
 
+	/* Spin the rescan button while a manual rescan is in flight, and stop it
+	   when the answers have landed. A second click during that window would
+	   only queue a duplicate query, so the button is disabled for the
+	   duration as well. */
+	void setRefreshing(bool refreshing);
+
 signals:
 	void cameraClicked(const QString &host);
 	/* A row's chip was clicked on a camera that is not yet a source: add that
@@ -118,6 +128,11 @@ signals:
 	/* A row's chip was clicked on a camera that IS already a source: remove the
 	   source from OBS (spec §1, L5). */
 	void removeRequested(const QString &host);
+	/* The rail header's rescan button was pressed. Discovery runs on its own
+	   schedule (a 2.5 s poll over a 1 s mDNS query), so this asks for an
+	   immediate one: re-read the records now and again once the replies to the
+	   forced query have landed. */
+	void refreshRequested();
 
 private:
 	/* Compose the fields, glyph and tooltip of one row from its stored fields.
@@ -129,6 +144,13 @@ private:
 	void updateEmptyState();
 
 	QListWidget *list_ = nullptr;
+	/* The rail header's rescan button (see refreshRequested()). */
+	QToolButton *refreshBtn_ = nullptr;
+	/* Turns refreshBtn_'s glyph while a rescan is in flight, so the press has a
+	   visible effect even though the list it rebuilds usually does not change
+	   (see setRefreshing). */
+	QTimer *spinTimer_ = nullptr;
+	int spinAngle_ = 0;
 	QSet<QString> added_;
 	/* Starts busy: the dock is built before the first scan can run, and a rail
 	   that reads "no camera" during that first tick would be wrong. */
@@ -286,12 +308,21 @@ private:
 /* Circular 8-direction PTZ joystick + speed/home/stop. The annular
    ring is painted in paintEvent(); hold-to-move sectors (or drag the
    center knob) drive ptzMove(), release calls ptzStop(). */
+class ZcOverlayLink;
+
 class ZcPtzPad : public QWidget {
 	Q_OBJECT
 public:
 	explicit ZcPtzPad(QWidget *parent = nullptr);
 
 	void setClient(ZcCameraClient *client);
+	/* The shared interaction link: the pad arms "click to move" through it
+	   (see ZcOverlayLink). */
+	void setOverlayLink(ZcOverlayLink *link) { link_ = link; }
+	/* The click-to-move button in the dial row, so the dock can keep it in
+	   step with the framing panel's detection-area toggle: both arm the same
+	   slot on the source, so arming one has to clear the other. */
+	QToolButton *clickMoveButton() const { return targetBtn_; }
 
 	/* Re-read the current position and the range limit from the camera and
 	   repaint. A no-op without a client. */
@@ -355,10 +386,22 @@ private:
 	void updateZoomLabel(int value);
 
 	ZcCameraClient *client_ = nullptr;
+	/* The interaction link, shared with the dock (click-to-move). */
+	ZcOverlayLink *link_ = nullptr;
 	QWidget *joystickArea_ = nullptr;
 	QSlider *speedSlider_ = nullptr;
 	QPushButton *homeButton_ = nullptr;
 	QPushButton *stopButton_ = nullptr;
+	/* Click-to-move target, in the dial row's top-right corner (see
+	   ZcOverlayLink). One button replaces the old "Click to move" tick and
+	   "Interact…" pair: armed, it also opens the Interact pane, which is the
+	   live view the clicks land in, and it closes that pane again on the way
+	   off. */
+	QToolButton *targetBtn_ = nullptr;
+	/* Watches for the Interact pane disappearing behind the button's back (its
+	   own X, or OBS closing it with the source), so the tick cannot claim a
+	   window that is gone. */
+	QTimer *interactTimer_ = nullptr;
 
 	/* Lens zoom rocker (see pushZoom). */
 	QSlider *zoomSlider_ = nullptr;
@@ -438,6 +481,20 @@ public:
 	explicit ZcFramingPanel(QWidget *parent = nullptr);
 
 	void setClient(ZcCameraClient *client);
+	/* The shared interaction link: the detection-area editor arms through it
+	   and the camera's rectangle is pushed back through it. */
+	void setOverlayLink(ZcOverlayLink *link) { link_ = link; }
+	/* The mask rectangle the camera last reported, so the source can draw it
+	   even before the operator touches anything. */
+	void setMaskFromCamera(bool enabled, float l, float t, float r, float b);
+	/* Firmware generation gate (bug list #10/#11/#48/#49): true when the
+	   camera's `sw` is at least 1.0.5, which removes the View Angle / Size /
+	   Detected Indicator controls and adds the Size slider and Lock-angle
+	   interlocks. Re-evaluates row visibility; snapshots re-and it with key
+	   presence. */
+	void setFirmwareNew(bool atLeast15);
+	/* The "edit detection area" tick, for the dock's mode sync. */
+	QPushButton *maskEditButton() const { return maskEditBtn_; }
 
 public slots:
 	/* Re-read the framing snapshot and the preset list, then repaint. */
@@ -468,18 +525,44 @@ private:
 	   block, because the camera ignores its contents until Enable is on). The
 	   Settings page is never greyed — the page leaves it live either way. */
 	void updateGating();
+	/* Show/hide the rows the firmware generation decides (bug list #10/#11/
+	   #14): View Angle + Size + Detected Indicator go, and the Settings page's
+	   unsupported rows hide, on a >=1.0.5 camera. */
+	void applyFirmwareGating();
 	/* Move one /ctrl/framing/fov offset by one step and tell the camera. Only
 	   ever called from the framing pad; the read-out follows the write. */
 	void nudgeOffset(bool placement, int delta);
-	/* Repaint the two-offset read-out under the framing pad. */
-	void updatePadReadOut();
+	/* The second half of the profile export, run from a queued zero-timer
+	   (never inside the HTTP completion callback — see the export button's
+	   comment): opens the save dialog and writes pendingExportProfile_. */
+	void finishProfileExport();
 	/* Open a projector window on this camera's own source. That window is one
 	   of the few views that renders the source by itself, so it is where a
 	   monitor-only detection overlay can be watched without any of it reaching
 	   the recording — the standard preview pane blits the program mix instead
 	   and therefore cannot show it. Falls back to a window on the current
-	   scene when this camera has no source in OBS yet. */
+	   scene when this camera has no source in OBS yet.
+
+	   There is exactly one such window: OBS's projector API unconditionally
+	   constructs a new one, so a second click re-raises the window already
+	   open (see monitorWnd_) instead of stacking another. The window is also
+	   put above the OBS main window, because it is useless if working in the
+	   dock hides the very boxes it exists to show. */
 	void openMonitorWindow();
+	/* Close that window again (the status row's button is a toggle). */
+	void closeMonitorWindow();
+	/* The window if one is up for this camera, else null. Also refreshes
+	   monitorWnd_/monitorWndName_. */
+	QWidget *monitorWindow();
+	/* Title suffix for this camera's monitor window; `isSource` reports
+	   whether it is the camera's own source rather than the current scene.
+	   Empty name means there is nothing to show. */
+	QString monitorWindowName(bool &isSource);
+	/* Point the status row's button at the truth: checked iff a window is up.
+	   Runs on a 1 s poll because the window can be closed from its own title
+	   bar and opened from OBS's View menu, neither of which passes through
+	   the button. */
+	void syncMonitorButton();
 
 	/* The camera's page is three live buttons, not a row of checkboxes:
 	   Enable/Disable toggles `detect`, Start/Stop toggles `trace`, and Restart
@@ -487,8 +570,20 @@ private:
 	QPushButton *enableBtn_ = nullptr;
 	QPushButton *startBtn_ = nullptr;
 	QPushButton *restartBtn_ = nullptr;
-	/* Opens the projector window described on openMonitorWindow(). */
+	/* Opens the projector window described on openMonitorWindow(). Checked
+	   means that window is up; a second press closes it. */
 	QPushButton *monitorBtn_ = nullptr;
+	/* Keeps monitorBtn_ in step with a window opened or closed outside the
+	   button. */
+	QTimer *monitorPoll_ = nullptr;
+	/* The monitor window this panel opened, and the source/scene it shows.
+	   OBS has no "is this source already projected?" query, so the handle is
+	   kept here and re-raised rather than re-opened; it clears itself when
+	   the operator closes the window (OBS's projector windows are built with
+	   WA_DeleteOnClose). The name guards a camera switch, which changes the
+	   source and so must not reuse the previous camera's window. */
+	QPointer<QWidget> monitorWnd_;
+	QString monitorWndName_;
 	/* What the camera last reported, so the button faces can follow it. */
 	bool detectOn_ = false;
 	bool traceOn_ = false;
@@ -509,6 +604,17 @@ private:
 	ZcSegmentedControl *zoomLockSeg_ = nullptr;       /* Settings: Lock Zoom */
 	ZcSegmentedControl *tiltLockSeg_ = nullptr;       /* Live: Lock Tilt */
 	ZcSegmentedControl *maskSeg_ = nullptr;           /* Live: Mask */
+	/* "Edit detection area": arms the drag-to-define rectangle on the
+	   source's own Interact window (see ZcOverlayLink). */
+	QPushButton *maskEditBtn_ = nullptr;
+	/* "Register faces…": opens the camera's face database editor
+	   (ZcFaceRegDialog). One dialog per camera, kept so a second click
+	   raises it instead of opening a duplicate. */
+	QPushButton *faceRegBtn_ = nullptr;
+	QDialog *faceRegDlg_ = nullptr;
+	/* The mask rectangle as last read from /mask_area, for the source. */
+	bool maskOn_ = false;
+	float maskL_ = 0.0f, maskT_ = 0.0f, maskR_ = 1.0f, maskB_ = 1.0f;
 	ZcSegmentedControl *indicatorSeg_ = nullptr;      /* Live: Detected Indicator */
 	ZcSegmentedControl *faceTrackSeg_ = nullptr;      /* Live: Face Tracking */
 	ZcSegmentedControl *autoStartSeg_ = nullptr;      /* Settings: Start On Power Up */
@@ -524,6 +630,36 @@ private:
 
 	/* The page's dropdowns. */
 	QComboBox *viewAngleCombo_ = nullptr; /* Live: View Angle (fov_type) */
+	/* The field containers of the rows the firmware decides on (bug list
+	   #10/#11/#14): hidden, not dead, per the tester's removal ask. */
+	QWidget *viewAngleField_ = nullptr;
+	QWidget *bodySizeField_ = nullptr;
+	/* The framing pad's whole row: greyed with the view angle while
+	   detection is off (bug list 22). */
+	QWidget *padField_ = nullptr;
+	/* The Composition Presets button-state updater: selection changes and
+	   table rebuilds both run it (bug lists 9/44). */
+	std::function<void()> presetButtons_;
+	QWidget *indicatorField_ = nullptr;
+	QWidget *zoomLockRow_ = nullptr;
+	QWidget *sensitivityRow_ = nullptr;
+	QWidget *accelerationRow_ = nullptr;
+	QWidget *trackingRecordRow_ = nullptr;
+	/* The >=1.0.5 firmware's "Size" row (fov_size 0..100), shown only when
+	   all_status carries the key (bug list #10). */
+	QWidget *fovSizeField_ = nullptr;
+	ZcSliderSpin *fovSizeSp_ = nullptr;
+	QPushButton *fovFullBodyBtn_ = nullptr;
+	QPushButton *fovWaistBtn_ = nullptr;
+	QPushButton *fovCloseupBtn_ = nullptr;
+	int fovPresetFullBody_ = 100, fovPresetWaist_ = 70,
+	    fovPresetCloseup_ = 40;
+	/* Firmware generation: >= 1.0.5 (see setFirmwareNew). */
+	bool fw15_ = false;
+	/* View Angle == Keep (fov_type == 3): the camera keeps its current
+	   framing, so the Size stepper has nothing to size — the page greys it
+	   (bug list #25). */
+	bool fovKeep_ = false;
 	QComboBox *sceneCombo_ = nullptr;
 	QComboBox *startPosCombo_ = nullptr;
 	QComboBox *targetNumCombo_ = nullptr;
@@ -539,9 +675,8 @@ private:
 	ZcSliderSpin *waitTimeSp_ = nullptr;
 	ZcSliderSpin *detectRestartSp_ = nullptr;
 
-	/* The framing pad and the read-out of the two offsets it changes. */
+	/* The framing pad that moves the subject in frame. */
 	ZcFramingPad *pad_ = nullptr;
-	QLabel *padReadOut_ = nullptr;
 
 	/* Everything the camera's page greys out while detection is off. */
 	QList<QWidget *> gatedGroups_;
@@ -553,6 +688,19 @@ private:
 	QList<QWidget *> optionalRows_;
 	QWidget *boxGroup_ = nullptr;
 	QWidget *profileGroup_ = nullptr;
+	/* The downloaded framing profile waiting for finishProfileExport()'s
+	   save dialog (empty + non-empty error text = show the error). */
+	QByteArray pendingExportProfile_;
+	QString pendingExportError_;
+	/* Runs from the last framing-pad nudge. Every write fires a camera
+	   notification whose all_status/fov read-back can still carry the value
+	   from BEFORE that nudge (the reads queue behind it on the camera's
+	   single-threaded httpd), so repainting the two offsets from a read
+	   while the operator holds an arrow bounces the numbers back and forth
+	   (bug list "held arrow values jump"). While this guard is fresh — a
+	   nudge within the last ~0.8 s — the read-backs leave the two offsets
+	   alone; the pad's own optimistic value is what the operator sent. */
+	QElapsedTimer padNudgeGuard_;
 	/* Set once the optional-feature probe has run for the current camera, so a
 	   refresh does not re-ask on every tick. */
 	bool optionalProbed_ = false;
@@ -589,6 +737,10 @@ private:
 	bool haveSnapshot_ = false;
 
 	ZcCameraClient *client_ = nullptr;
+	/* The interaction link, shared with the dock (detection-area editing).
+	   owning_ is dropped while the panel paints a pushed snapshot, so the
+	   push does not arm a mode by itself. */
+	ZcOverlayLink *link_ = nullptr;
 };
 
 /* PTZ slot list, covering both slot families the camera exposes: presets
@@ -607,6 +759,9 @@ public slots:
 	void refresh();
 	/* Switch the list between presets and traces. */
 	void setTraceMode(bool trace);
+	/* The camera's auto framing owns the PTZ, so trace actions are refused
+	   (code -2); the preset family keeps working (bug list 55). */
+	void setFramingOwned(bool owned);
 
 private:
 	/* One slot: thumbnail + name field, click to select. */
@@ -629,6 +784,11 @@ private:
 	/* Re-read the /ctrl/ptrace transport state, then re-enable the buttons. */
 	void refreshTraceState();
 	void onTraceState(int stCode);
+	/* A trace action's reply arrived with the camera's `code`: 0 is quiet,
+	   anything else shows why nothing happened in the hint line and re-reads
+	   the transport state (bug list #137 — a rejected re-record/playback used
+	   to fall back to the idle face as if it had succeeded). */
+	void reportTraceAction(int code);
 	/* Whether the selected slot holds a stored entry (a name). */
 	bool selectedIsNamed() const;
 
@@ -661,6 +821,8 @@ private:
 	QHash<int, QPixmap> thumbs_;
 
 	bool traceMode_ = false;
+	/* Auto framing currently drives the head: only the trace actions grey. */
+	bool framingOwned_ = false;
 	/* Last /ctrl/ptrace st_code; only meaningful in trace mode. */
 	int traceState_ = 0;
 
@@ -706,6 +868,10 @@ public:
 private slots:
 	void onCameraClicked(const QString &host);
 	void refreshCameras();
+	/* The rail header's rescan button: force an mDNS query now, re-read the
+	   records at once (so the operator sees the current list immediately) and
+	   once more after the forced query's replies have had time to land. */
+	void onCameraRefreshRequested();
 	/* The in-page login form was submitted: store the credentials for the host
 	   and reconnect (bug 4). */
 	void onLoginSubmitted(const QString &user, const QString &password);
@@ -720,6 +886,13 @@ private:
 	   down again. Split out so openCamera() can hold the re-entrancy guard around
 	   it (see opening_ below). */
 	bool openCameraNow(const QString &host, const ZcCredentials &creds);
+	/* Opens the camera source's Interact window — the only pane libobs
+	   forwards mouse events to, so the only surface a click-to-move or a
+	   detection-area drag can happen on (see zc_source_bridge.h). */
+	void openSourceInteraction();
+	/* Closes it again. There is no frontend call for this, so the window is
+	   found through the widget tree; see the comment on the definition. */
+	void closeSourceInteraction();
 	/* Create/reuse an obs-zcamera source pointing at `host` and add it to the
 	   current scene. Runs on the OBS frontend (Qt main) thread. */
 	void addCameraToSource(const QString &host);
@@ -754,6 +927,10 @@ private:
 	QWidget *framingTab_ = nullptr;
 	QTabWidget *tabs_ = nullptr;
 	ZcCameraClient *client_ = nullptr;
+	/* The source <-> dock interaction link (click-to-move, detection-area
+	   editing). Owned here, shared with the PTZ pad and the framing panel;
+	   registered as the global pointer sink for its lifetime. */
+	ZcOverlayLink *overlay_ = nullptr;
 	QLabel *statusBarLabel_ = nullptr;
 	/* "● REC" while the camera records -- including the recording the camera
 	   starts itself when tracking triggers it (bug list #20). */
@@ -778,6 +955,16 @@ private:
 	   discovered camera that does not answer, instead of clearing it at the next
 	   scan (spec §1, L11). */
 	QSet<QString> unreachableHosts_;
+	/* Every camera discovery has seen this session, address -> the name it
+	   advertised under. A camera that stops advertising keeps its row, marked
+	   offline, instead of vanishing from the rail; that is what makes a
+	   powered-off camera clickable again once it comes back. Session-scoped, so
+	   it is rebuilt from the network at the next launch. */
+	QHash<QString, QString> knownCameras_;
+	/* The cameras the previous scan saw advertised. A camera that re-appears
+	   after being away has its stale "does not answer" mark dropped, so a
+	   power cycle does not leave a reachable camera greyed out. */
+	QSet<QString> advertised_;
 	/* How many consecutive scans have come back with no camera at all. The rail
 	   shows its busy spin for the first few (discovery needs a moment to be
 	   answered) and the plain "no camera" line after that, so a permanently
@@ -799,6 +986,11 @@ private:
 	QString pendingClickHost_;
 	/* mDNS discovery refresh. */
 	QTimer *scanTimer_ = nullptr;
+	/* The manual-rescan window opened by the rail header's button: re-reads the
+	   discovery records and re-asks while it runs, then clears the rail's spin
+	   (see onCameraRefreshRequested). */
+	QTimer *rescanTimer_ = nullptr;
+	int rescanTicks_ = 0;
 	/* Polls for a camera that a setting write made restart (bug 8). */
 	QTimer *restartTimer_ = nullptr;
 	int restartAttempts_ = 0;

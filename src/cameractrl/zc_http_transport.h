@@ -143,6 +143,12 @@ public:
 		      ZcHttpCallback cb, int timeoutMs = 20000);
 	void post(const QString &path, const QByteArray &body,
 		  ZcHttpCallback cb, int timeoutMs = 20000);
+	/* POST with an explicit Content-Type (multipart uploads — e.g. the
+	   framing-profile import — need "multipart/form-data; boundary=..."
+	   instead of the urlencoded default post() writes). */
+	void postBody(const QString &path, const QByteArray &body,
+		      const QByteArray &contentType, ZcHttpCallback cb,
+		      int timeoutMs = 20000);
 
 signals:
 	void requestLogged(const QString &line); /* for the debug panel */
@@ -175,18 +181,20 @@ private:
 	/* Start one request on a fresh connection and report it through `done`.
 	   `cancel`, when supplied, receives a handle that aborts the exchange. */
 	void dispatch(const char *method, const QString &pathWithQuery,
-		      const QByteArray &body, int timeoutMs, ExchangeDone done,
-		      ExchangeCancel *cancel = nullptr);
+		      const QByteArray &body,
+		      const QByteArray &contentType, int timeoutMs,
+		      ExchangeDone done, ExchangeCancel *cancel = nullptr);
 	/* Event-loop-driven "synchronous" request for the probes, which the callers
 	   already treat as blocking. */
 	bool requestSync(const char *method, const QString &pathWithQuery,
 			 const QByteArray &body, RawHttp &out, int timeoutMs);
 	void doRequest(const char *method, const QString &pathWithQuery,
 		       const QByteArray &body, ZcHttpCallback cb, int timeoutMs,
-		       int retries);
+		       int retries, const QByteArray &contentType = {});
 	QByteArray buildRequest(const char *method,
 				const QString &pathWithQuery,
-				const QByteArray &body) const;
+				const QByteArray &body,
+				const QByteArray &contentType = {}) const;
 	/* One leg of the login handshake: GET /login/, optionally with the cached
 	   Digest Authorization, over a keep-alive connection. */
 	QByteArray buildLoginRequest(bool withAuth) const;

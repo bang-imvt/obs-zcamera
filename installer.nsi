@@ -19,10 +19,12 @@
 Unicode true
 
 !define PLUGIN_NAME "obs-zcamera"
-!define VERSION "0.14.0"
+!define VERSION "0.15.0"
+; Build date stamp appended to the installer name, e.g. obs-zcamera-0.15.0-setup_1016.exe
+!define /date BUILD_DATE "%m%d"
 
 Name "ZCamera (${PLUGIN_NAME}) for OBS Studio"
-OutFile "dist\${PLUGIN_NAME}-${VERSION}-setup.exe"
+OutFile "dist\${PLUGIN_NAME}-${VERSION}-setup_${BUILD_DATE}.exe"
 ; OBS's own installer defaults here; the directory page lets the operator point
 ; at a custom OBS location.
 InstallDir "$PROGRAMFILES64\obs-studio"

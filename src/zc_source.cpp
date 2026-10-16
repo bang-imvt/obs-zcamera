@@ -57,6 +57,9 @@ extern "C" {
 
 #include "ssp-client-iso.h"
 #include "hwdecode/hw_decode.h"
+/* Pointer interaction with the Interact window: the source forwards clicks
+   and the dock answers with the camera writes (see the header). */
+#include "zc_source_bridge.h"
 #ifdef ENABLE_SW_DECODE
 /* The audio path decodes AAC with the same helper the software video fallback
    uses; it is only compiled into a build that has FFmpeg (bugs 10/11). */
@@ -75,6 +78,7 @@ extern "C" {
 #include "cameractrl/zc_ai_detect.h"
 #include <QThread>
 #include <QSet>
+#include <QRegularExpression>
 #endif
 
 /* libavcodec is needed for the AVFrame handed out by the zero-copy backends
@@ -184,7 +188,7 @@ struct GraphicsScope {
 	GraphicsScope &operator=(const GraphicsScope &) = delete;
 };
 
-class ZcSspSource {
+class ZcSspSource : public zc::OverlayTarget {
 public:
 	/* `async` selects the output mode. Render mode (default) is the existing
 	   GPU source: video_render imports hardware surfaces. Async mode is the
@@ -193,6 +197,19 @@ public:
 	   OBS applies its P010 + HDR (PQ/HLG) GPU conversion. */
 	explicit ZcSspSource(obs_source_t *source, bool async = false);
 	~ZcSspSource();
+
+	/* zc::OverlayTarget — what the dock pushes down so the Interact window
+	   can paint the detection rectangle and the click crosshair. */
+	void setOverlayInteraction(zc::OverlayInteraction mode) override;
+	void setOverlayMask(bool enabled, float left, float top, float right,
+			    float bottom) override;
+	void setOverlayMarker(bool on, float nx, float ny) override;
+	void setOverlayTrackBox(bool enabled, float left, float top,
+				float width, float height) override;
+
+	/* Delivered from the Interact window's mouse callbacks (zc_source.cpp's
+	   zc_source_mouse_click/mouse_move). Runs on the OBS UI thread. */
+	void onPointerEvent(int phase, int button, int px, int py);
 
 	void update(obs_data_t *settings);
 	void activate();
@@ -231,6 +248,11 @@ private:
 	void startAiFeed();
 	void stopAiFeed();
 	void drawAiOverlay(gs_effect_t *effect);
+	/* The detection rectangle and the click crosshair, painted while the dock
+	   has an interaction mode armed. Separate from drawAiOverlay(): this is an
+	   editing aid the operator needs whether or not boxes are being drawn,
+	   and it carries its own master switch (the mode). */
+	void drawInteractionOverlay(gs_effect_t *effect);
 #endif
 
 	/* Decoder swap helpers. createDecoder() touches the OBS graphics device,
@@ -409,6 +431,40 @@ private:
 	/* One log line for the first detection the feed delivers, so a "no boxes
 	   on screen" report can be told apart from "no detection arriving". */
 	std::atomic<bool> aiFirstEventLogged_{false};
+
+	/* --- Interact-window pointer interaction -------------------------------
+	   The dock arms one mode at a time; None leaves the overlay read-only.
+	   The mode is atomic because the dock writes it from the UI thread while
+	   the graphics thread reads it in drawInteractionOverlay(). */
+	std::atomic<int> overlayMode_{
+		(int)zc::OverlayInteraction::None};
+	/* The rectangle and crosshair the dock pushes down, plus the drag the
+	   source is running. Both sides live on the OBS UI thread, so the mutex
+	   is only there for the graphics thread's reads. */
+	std::mutex overlayMutex_;
+	bool overlayMaskOn_ = false;
+	float overlayMaskL_ = 0.0f, overlayMaskT_ = 0.0f;
+	float overlayMaskR_ = 1.0f, overlayMaskB_ = 1.0f;
+	bool overlayMarkerOn_ = false;
+	float overlayMarkerX_ = 0.5f, overlayMarkerY_ = 0.5f;
+	/* The tracking-box ("range") frame the dock mirrors from the camera
+	   (bug list 17): amber outline, drawn while the box is enabled. */
+	bool overlayTrackOn_ = false;
+	float overlayTrackL_ = 0.0f, overlayTrackT_ = 0.0f;
+	float overlayTrackW_ = 0.0f, overlayTrackH_ = 0.0f;
+	/* The left-button drag in progress, if any: press records the anchor,
+	   move follows, release ends it. */
+	bool overlayDragging_ = false;
+	float overlayDragAnchorX_ = 0.0f, overlayDragAnchorY_ = 0.0f;
+	/* 1x1 solid texture the rectangle and crosshair are stretched from, in
+	   the interaction colour (the box texture is red). Graphics thread only. */
+	gs_texture_t *overlaySolid_ = nullptr;
+	/* Same for the tracking-box frame, in amber. Graphics thread only. */
+	gs_texture_t *trackSolid_ = nullptr;
+	/* The camera address the source is registered under, so a re-registration
+	   after an address change can drop the old key. */
+	QString overlayRegisteredIp_;
+
 	/* The most recent detection, written by the notifier (UI thread) and read
 	   by the graphics thread. aiStampNs_ is when it arrived: a camera that
 	   stops sending stops being drawn, instead of freezing its last box on
@@ -462,6 +518,12 @@ ZcSspSource::ZcSspSource(obs_source_t *source, bool async)
 
 ZcSspSource::~ZcSspSource()
 {
+	/* Drop the dock's handle on this object before anything is torn down: a
+	   click arriving between here and the end of the destructor would
+	   otherwise reach a half-destroyed source. */
+	zc::overlayUnregisterTarget(overlayRegisteredIp_, this);
+	overlayRegisteredIp_.clear();
+
 	stop();
 	/* The CPU texture is only ever touched on the graphics thread; the source
 	   destructor runs after OBS has stopped rendering it, so this is the one
@@ -477,6 +539,14 @@ ZcSspSource::~ZcSspSource()
 	if (aiSolid_) {
 		gs_texture_destroy(aiSolid_);
 		aiSolid_ = nullptr;
+	}
+	if (overlaySolid_) {
+		gs_texture_destroy(overlaySolid_);
+		overlaySolid_ = nullptr;
+	}
+	if (trackSolid_) {
+		gs_texture_destroy(trackSolid_);
+		trackSolid_ = nullptr;
 	}
 #endif
 	obs_leave_graphics();
@@ -582,9 +652,21 @@ static void syncSourceNameToIp(obs_source_t *source, const std::string &ip)
 	if (!source || ip.empty())
 		return;
 	const char *cur = obs_source_get_name(source);
-	if (!cur || std::string(cur) != "ZCamera")
+	if (!cur)
+		return;
+	const std::string name(cur);
+	/* The bare default ("ZCamera"), OBS's deduplicated form ("ZCamera 2")
+	   and a name the convention wrote earlier ("ZCamera <ip/host>", which
+	   always carries a dot) all follow the address; anything else is an
+	   operator's own name and is never touched (bug list 75). */
+	static const QRegularExpression convention(
+		QStringLiteral("^ZCamera(?: \\d+"
+			       "| [A-Za-z0-9.-]*\\.[A-Za-z0-9.-]+)?$"));
+	if (!convention.match(QString::fromStdString(name)).hasMatch())
 		return;
 	const std::string want = "ZCamera " + ip;
+	if (name == want)
+		return;
 	obs_source_set_name(source, want.c_str());
 }
 
@@ -627,6 +709,16 @@ void ZcSspSource::update(obs_data_t *settings)
 	if (changed) {
 		stop();
 		ip_ = ip;
+		/* Re-register the interaction target under the new address: the dock
+		   reaches this object by the camera it is driving. A source whose
+		   address is cleared is dropped from the map. */
+		const QString newIp = QString::fromStdString(ip);
+		if (overlayRegisteredIp_ != newIp) {
+			zc::overlayUnregisterTarget(overlayRegisteredIp_, this);
+			overlayRegisteredIp_ = newIp;
+			if (!overlayRegisteredIp_.isEmpty())
+				zc::overlayRegisterTarget(overlayRegisteredIp_, this);
+		}
 		{
 			std::lock_guard<std::mutex> lock(decoderMutex_);
 			requestedBackend_ = backend;
@@ -1111,6 +1203,241 @@ void ZcSspSource::drawAiOverlay(gs_effect_t *effect)
 				 : " (monitor-only mode, so this pass is not the program)");
 		}
 	}
+}
+#endif /* ENABLE_CAMERA_CONTROL */
+
+#ifdef ENABLE_CAMERA_CONTROL
+/* ------------------------------------------------------------------ */
+/* Interact-window pointer interaction                                 */
+/* ------------------------------------------------------------------ */
+
+void ZcSspSource::setOverlayInteraction(zc::OverlayInteraction mode)
+{
+	overlayMode_.store((int)mode, std::memory_order_relaxed);
+	if (mode != zc::OverlayInteraction::MaskEdit) {
+		/* Leaving mask-edit ends a drag that was in progress, so a mode
+		   switch cannot leave the rectangle half-defined. */
+		std::lock_guard<std::mutex> lock(overlayMutex_);
+		overlayDragging_ = false;
+	}
+}
+
+void ZcSspSource::setOverlayMask(bool enabled, float left, float top,
+				 float right, float bottom)
+{
+	std::lock_guard<std::mutex> lock(overlayMutex_);
+	overlayMaskOn_ = enabled;
+	overlayMaskL_ = left;
+	overlayMaskT_ = top;
+	overlayMaskR_ = right;
+	overlayMaskB_ = bottom;
+}
+
+void ZcSspSource::setOverlayMarker(bool on, float nx, float ny)
+{
+	std::lock_guard<std::mutex> lock(overlayMutex_);
+	overlayMarkerOn_ = on;
+	overlayMarkerX_ = nx;
+	overlayMarkerY_ = ny;
+}
+
+void ZcSspSource::setOverlayTrackBox(bool enabled, float left, float top,
+				     float width, float height)
+{
+	std::lock_guard<std::mutex> lock(overlayMutex_);
+	overlayTrackOn_ = enabled;
+	overlayTrackL_ = left;
+	overlayTrackT_ = top;
+	overlayTrackW_ = width;
+	overlayTrackH_ = height;
+}
+
+/* From the Interact window's mouse callbacks. `px`/`py` are in the source's
+   own pixel space (libobs maps them for us), which is the same space the
+   overlay draws in, so normalising by getWidth()/getHeight() lines the two
+   up exactly. */
+void ZcSspSource::onPointerEvent(int phase, int button, int px, int py)
+{
+	const auto mode = (zc::OverlayInteraction)overlayMode_.load(
+		std::memory_order_relaxed);
+	if (mode == zc::OverlayInteraction::None)
+		return;
+
+	const uint32_t w = getWidth();
+	const uint32_t h = getHeight();
+	if (!w || !h)
+		return;
+	float nx = (float)px / (float)w;
+	float ny = (float)py / (float)h;
+	nx = nx < 0.0f ? 0.0f : (nx > 1.0f ? 1.0f : nx);
+	ny = ny < 0.0f ? 0.0f : (ny > 1.0f ? 1.0f : ny);
+
+	/* Mask editing is tracked here as well, so the rectangle follows the
+	   pointer on the next frame instead of after a camera round-trip. Only
+	   the left button draws; the dock is told about every phase regardless,
+	   because it is the side that writes the camera. */
+	if (mode == zc::OverlayInteraction::MaskEdit &&
+	    (phase == zc::OverlayPointerDrag || button == MOUSE_LEFT)) {
+		std::lock_guard<std::mutex> lock(overlayMutex_);
+		if (phase == zc::OverlayPointerPress) {
+			overlayDragging_ = true;
+			overlayDragAnchorX_ = nx;
+			overlayDragAnchorY_ = ny;
+			overlayMaskOn_ = true;
+			overlayMaskL_ = nx;
+			overlayMaskT_ = ny;
+			overlayMaskR_ = nx;
+			overlayMaskB_ = ny;
+		} else if (phase == zc::OverlayPointerDrag && overlayDragging_) {
+			overlayMaskL_ = qMin(overlayDragAnchorX_, nx);
+			overlayMaskR_ = qMax(overlayDragAnchorX_, nx);
+			overlayMaskT_ = qMin(overlayDragAnchorY_, ny);
+			overlayMaskB_ = qMax(overlayDragAnchorY_, ny);
+		} else if (phase == zc::OverlayPointerRelease) {
+			overlayDragging_ = false;
+		}
+	}
+
+	zc::overlayDispatchPointer(phase, button, nx, ny);
+}
+
+void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
+{
+	const auto mode = (zc::OverlayInteraction)overlayMode_.load(
+		std::memory_order_relaxed);
+	if (mode == zc::OverlayInteraction::None)
+		return;
+
+	/* The editing aid never goes into the program: it is drawn into a preview
+	   pass or not at all. Unlike the boxes it has no in-program mode -- it is
+	   a cursor, not content. */
+	if (zc_render_target_is_canvas_mix())
+		return;
+
+	const uint32_t fw = lastWidth_.load(std::memory_order_relaxed);
+	const uint32_t fh = lastHeight_.load(std::memory_order_relaxed);
+	if (!fw || !fh)
+		return;
+
+	gs_effect_t *e = effect ? effect : gs_get_effect();
+	if (!e)
+		return;
+	gs_eparam_t *img = gs_effect_get_param_by_name(e, "image");
+	if (!img)
+		return;
+
+	if (!overlaySolid_) {
+		/* Cyan: distinct from the red detection boxes, so a mask edge is
+		   never read as a detection. Created on the graphics thread and
+		   released in ~ZcSspSource, exactly like aiSolid_. */
+		uint8_t cyan[4] = {0, 229, 255, 255};
+		const uint8_t *data = cyan;
+		overlaySolid_ = gs_texture_create(1, 1, GS_RGBA, 1, &data, 0);
+		if (!overlaySolid_)
+			return;
+	}
+
+	uint32_t thick_px = (fw < fh ? fw : fh) / 360;
+	if (thick_px < 1)
+		thick_px = 1;
+	{
+		gs_rect vp;
+		gs_get_viewport(&vp);
+		if (vp.cx > 0 && (uint32_t)vp.cx < fw) {
+			const float scale = (float)vp.cx / (float)fw;
+			if (scale > 0.0f) {
+				const float want = 2.0f / scale;
+				if ((float)thick_px < want)
+					thick_px = (uint32_t)(want + 0.999f);
+			}
+		}
+		if (thick_px > 24)
+			thick_px = 24;
+	}
+	const float thick = (float)thick_px;
+
+	bool maskOn = false, markerOn = false, trackOn = false;
+	float ml = 0.0f, mt = 0.0f, mr = 1.0f, mb = 1.0f, mx = 0.5f, my = 0.5f;
+	float tl = 0.0f, tt = 0.0f, tw = 0.0f, th = 0.0f;
+	{
+		std::lock_guard<std::mutex> lock(overlayMutex_);
+		maskOn = overlayMaskOn_;
+		ml = overlayMaskL_;
+		mt = overlayMaskT_;
+		mr = overlayMaskR_;
+		mb = overlayMaskB_;
+		markerOn = overlayMarkerOn_;
+		mx = overlayMarkerX_;
+		my = overlayMarkerY_;
+		trackOn = overlayTrackOn_;
+		tl = overlayTrackL_;
+		tt = overlayTrackT_;
+		tw = overlayTrackW_;
+		th = overlayTrackH_;
+	}
+
+	gs_blend_state_push();
+	gs_enable_blending(true);
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
+	gs_effect_set_texture(img, overlaySolid_);
+
+	const auto fill = [&](float x, float y, float w, float h) {
+		if (w <= 0.0f || h <= 0.0f)
+			return;
+		gs_matrix_push();
+		gs_matrix_translate3f(x, y, 0.0f);
+		gs_draw_sprite(overlaySolid_, 0, (uint32_t)w, (uint32_t)h);
+		gs_matrix_pop();
+	};
+
+	if (maskOn && mr > ml && mb > mt) {
+		const float x = ml * (float)fw, y = mt * (float)fh;
+		const float w = (mr - ml) * (float)fw, h = (mb - mt) * (float)fh;
+		fill(x, y, w, thick);
+		fill(x, y + h - thick, w, thick);
+		fill(x, y, thick, h);
+		fill(x + w - thick, y, thick, h);
+		/* Corner handles only while editing, so a read-only view stays
+		   clean. */
+		if (mode == zc::OverlayInteraction::MaskEdit) {
+			const float s = thick * 4.0f;
+			if (w > s * 2.0f && h > s * 2.0f) {
+				fill(x, y, s, s);
+				fill(x + w - s, y, s, s);
+				fill(x, y + h - s, s, s);
+				fill(x + w - s, y + h - s, s, s);
+			}
+		}
+	}
+
+	if (markerOn) {
+		const float cx = mx * (float)fw, cy = my * (float)fh;
+		const float arm = thick * 6.0f;
+		fill(cx - arm, cy - thick / 2.0f, arm * 2.0f, thick);
+		fill(cx - thick / 2.0f, cy - arm, thick, arm * 2.0f);
+	}
+
+	/* The tracking box's own texture, created lazily like the mask's: amber,
+	   so the range frame never reads as a red detection box or the cyan
+	   detection-area rectangle (bug list 17). */
+	if (trackOn && tw > 0.0f && th > 0.0f) {
+		if (!trackSolid_) {
+			uint8_t amber[4] = {255, 176, 32, 255};
+			const uint8_t *data = amber;
+			trackSolid_ = gs_texture_create(1, 1, GS_RGBA, 1, &data, 0);
+		}
+		if (trackSolid_) {
+			gs_effect_set_texture(img, trackSolid_);
+			const float x = tl * (float)fw, y = tt * (float)fh;
+			fill(x, y, tw * (float)fw, thick);
+			fill(x, y + th * (float)fh - thick, tw * (float)fw, thick);
+			fill(x, y, thick, th * (float)fh);
+			fill(x + tw * (float)fw - thick, y, thick, th * (float)fh);
+			gs_effect_set_texture(img, overlaySolid_);
+		}
+	}
+
+	gs_blend_state_pop();
 }
 #endif /* ENABLE_CAMERA_CONTROL */
 
@@ -2156,6 +2483,9 @@ void ZcSspSource::videoRender(gs_effect_t *effect)
 		/* The AI overlay goes on top of the picture, in this source's own
 		   pixel space, and only into a preview display — see the helper. */
 		drawAiOverlay(draw_effect);
+		/* Then the interaction aid (detection rectangle, click crosshair),
+		   which is drawn whenever a mode is armed, boxes or not. */
+		drawInteractionOverlay(draw_effect);
 #endif
 	}
 }
@@ -2208,10 +2538,38 @@ static obs_properties_t *zc_source_getproperties(void *data)
 	auto *s = static_cast<zc::ZcSspSource *>(data);
 	zc_show_control_dock(s ? s->ip() : QString());
 
+	/* The IP box gets live validation (bug list "source IP input has no
+	   validation"): update() refuses an invalid address, but silently, so the
+	   operator saw OK applied and a black source. The modified callback fires
+	   on each edit of the field and paints the verdict into the info row below
+	   it; the pinned OBS 31.0 headers have no per-keystroke text-changed
+	   callback, so this is the closest live hook. */
 	obs_properties_t *props = obs_properties_create();
-	obs_properties_add_text(props, PROP_SOURCE_IP,
+	auto *ip = obs_properties_add_text(props, PROP_SOURCE_IP,
 				obs_module_text("SSPPlugin.SourceProps.SourceIp"),
 				OBS_TEXT_DEFAULT);
+	auto *ipCheck = obs_properties_add_text(
+	    props, "zc_source_ip_check", "", OBS_TEXT_INFO);
+	obs_property_set_long_description(
+	    ip, obs_module_text("SSPPlugin.SourceProps.SourceIpTip"));
+	const auto validateIp = [](obs_properties_t *props,
+				   obs_property_t *, obs_data_t *settings) {
+		auto *check = obs_properties_get(props, "zc_source_ip_check");
+		if (!check || !settings)
+			return true;
+		const char *value =
+		    obs_data_get_string(settings, PROP_SOURCE_IP);
+		const bool bad = *value && !isValidHostAddress(value);
+		obs_property_set_description(
+		    check, bad ? obs_module_text(
+					 "SSPPlugin.SourceProps.SourceIpInvalid")
+			       : "");
+		obs_property_text_set_info_type(
+		    check, bad ? OBS_TEXT_INFO_WARNING : OBS_TEXT_INFO_NORMAL);
+		return true;
+	};
+	obs_property_set_modified_callback(ip, validateIp);
+	validateIp(props, ip, nullptr);
 #ifdef ENABLE_CAMERA_CONTROL
 	/* Draw what the camera's AI sees over its own picture. Unticking this
 	   stops every box on the next frame (drawAiOverlay returns at once).
@@ -2333,6 +2691,37 @@ static void zc_source_video_tick(void *data, float seconds)
 	static_cast<ZcSspSource *>(data)->videoTick(seconds);
 }
 
+/* The Interact window's plumbing. libobs only calls these when the source is
+   shown in the Interaction dialog (UI/window-basic-interaction.cpp is the one
+   caller of obs_source_send_mouse_*) and it has already mapped the pointer to
+   the source's pixel space, so the coordinates need no scaling of our own. */
+static void zc_source_mouse_click(void *data,
+				  const struct obs_mouse_event *event,
+				  int32_t type, bool mouse_up, uint32_t click_count)
+{
+	(void)click_count;
+	auto *self = static_cast<ZcSspSource *>(data);
+	if (!self)
+		return;
+	/* The button constants are libobs' (MOUSE_LEFT/…); anything else is not
+	   a button this overlay acts on, but it is still passed up so the dock
+	   can decide. */
+	self->onPointerEvent(mouse_up ? zc::OverlayPointerRelease
+				      : zc::OverlayPointerPress,
+			     (int)type, event ? event->x : 0, event ? event->y : 0);
+}
+
+static void zc_source_mouse_move(void *data,
+				 const struct obs_mouse_event *event,
+				 bool mouse_leave)
+{
+	auto *self = static_cast<ZcSspSource *>(data);
+	if (!self || mouse_leave)
+		return;
+	self->onPointerEvent(zc::OverlayPointerDrag, -1, event ? event->x : 0,
+			     event ? event->y : 0);
+}
+
 static uint32_t zc_source_get_width(void *data)
 {
 	return static_cast<ZcSspSource *>(data)->getWidth();
@@ -2400,17 +2789,20 @@ struct obs_source_info create_ssp_source_info()
 #ifdef ZC_MAC_ZERO_COPY
 	/* Zero-copy on macOS: decode into a BGRA IOSurface and draw it here, so
 	   the source owns its rendering like it does on Windows. */
-	info.output_flags =
-		OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE;
+	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO |
+			    OBS_SOURCE_DO_NOT_DUPLICATE |
+			    OBS_SOURCE_INTERACTION;
 #elif defined(__APPLE__)
 	/* No zero-copy build: the OpenGL backend cannot import the camera's 420v
 	   IOSurface, so decode in software and let OBS upload/convert the frame
 	   asynchronously. This is also the path that keeps 10-bit / HDR. */
-	info.output_flags =
-		OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE;
+	info.output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_AUDIO |
+			    OBS_SOURCE_DO_NOT_DUPLICATE |
+			    OBS_SOURCE_INTERACTION;
 #else
-	info.output_flags =
-		OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE;
+	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO |
+			    OBS_SOURCE_DO_NOT_DUPLICATE |
+			    OBS_SOURCE_INTERACTION;
 #endif
 	info.get_name = zc::zc_source_getname;
 	info.get_properties = zc::zc_source_getproperties;
@@ -2434,6 +2826,10 @@ struct obs_source_info create_ssp_source_info()
 	   is what stops the AI overlay from telling a monitor pane from the pass
 	   the recording encodes - see zc_source_get_color_space(). */
 	info.video_get_color_space = zc::zc_source_get_color_space;
+	/* Interact-window pointer input. The dock arms a mode and answers the
+	   events with camera writes; with no mode armed these do nothing. */
+	info.mouse_click = zc::zc_source_mouse_click;
+	info.mouse_move = zc::zc_source_mouse_move;
 	info.enum_active_sources = zc::zc_source_enum_active_sources;
 	return info;
 }

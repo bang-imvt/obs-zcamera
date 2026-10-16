@@ -52,6 +52,10 @@ struct mdns_args {
 	/* Written by the plugin thread (create/stop_mdns_loop) and read by the
 	   mdns worker thread; must be atomic or pthread_join can miss the stop. */
 	std::atomic<bool> running{false};
+	/* Set by ssp_mdns_request_refresh() (frontend thread) to cut the inter-query
+	   wait short, so a manual rescan is answered now instead of up to a second
+	   later. Cleared by the worker before each query, so it never spins. */
+	std::atomic<bool> request_now{false};
 	const char *service_str;
 	size_t service_str_size;
 } g_mdns_args;
@@ -513,12 +517,18 @@ static void *mdns_loop(void *ptr)
 	void *buffer = bzalloc(MDNS_BUFFER_SIZE);
 	int sock = mdns_socket_open_ipv4(0);
 	while (arg->running.load()) {
+		/* Consume a pending manual request before querying: the flag stays
+		   clear while the wait below runs, so the loop cannot spin. */
+		arg->request_now.store(false);
 		send_mdns_query(arg->service_str, arg->service_str_size);
 		/* One query per second. Without this wait the loop floods the
 		   LAN with PTR queries and pins a core; the 100 ms slices keep
 		   Stop() responsive (join returns within ~100 ms). */
-		for (int i = 0; i < 10 && arg->running.load(); ++i)
+		for (int i = 0; i < 10 && arg->running.load(); ++i) {
+			if (arg->request_now.load())
+				break; /* rescan requested: query again now */
 			os_sleep_ms(100);
+		}
 	}
 	mdns_socket_close(sock);
 	bfree(buffer);
@@ -546,6 +556,11 @@ void stop_mdns_loop()
 	g_mdns_args.running = false;
 	pthread_join(mdns_thread, nullptr);
 	ssp_blog(LOG_INFO, "mdns query thread stopped.");
+}
+
+void ssp_mdns_request_refresh()
+{
+	g_mdns_args.request_now.store(true);
 }
 
 SspMDnsIterator::SspMDnsIterator()

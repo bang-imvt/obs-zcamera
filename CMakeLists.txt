@@ -69,6 +69,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake/Modules")
 set(obs-zcamera_SOURCES
     src/obs-ssp.cpp
     src/zc_source.cpp
+    src/zc_source_bridge.cpp
     src/ssp-mdns.cpp
     src/VFrameQueue.cpp
     src/ssp-client-iso.cpp

@@ -55,4 +55,10 @@ private:
 
 void create_mdns_loop();
 void stop_mdns_loop();
+
+/* Ask the discovery thread to send its next PTR query at once instead of
+   waiting out the 1 s interval. The dock's manual "rescan" uses this so a
+   freshly powered-on camera is queried immediately rather than on the next
+   scheduled tick. Safe to call from the OBS frontend thread at any time. */
+void ssp_mdns_request_refresh();
 #endif //OBS_SSP_SSP_MDNS_H

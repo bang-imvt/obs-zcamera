@@ -220,6 +220,9 @@ TraceActions traceActions(TraceState state);
 constexpr const char *kAppStreamIndex = "app_stream1";
 constexpr const char *kLegacyStreamIndex = "stream1";
 constexpr int kBitrateWriteScale = 1000;
+/* The camera refuses a target below this, and the web UI's own spinner floors
+   at 0.2 Mbps; in document units (kbps) that is 200. */
+constexpr int kStreamBitrateMin = 200;
 
 /* Query for one stream document. `params` are the fields to apply, so an empty
    list is a pure read. */

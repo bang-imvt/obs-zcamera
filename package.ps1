@@ -30,7 +30,7 @@ $Root  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Build  = Join-Path $Root "build_x64"
 $DepsBin = Join-Path $Root ".deps\obs-deps-2024-09-12-x64\bin"
 $LibSsp = Join-Path $Build "_deps\libssp-src\lib\win_x64_vs2017\libssp.dll"
-$Version = "0.14.0"
+$Version = "0.15.0"
 
 function Assert-Path($p, $what) {
     if (-not (Test-Path -LiteralPath $p)) { throw "$what not found: $p" }
