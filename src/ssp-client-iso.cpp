@@ -236,11 +236,13 @@ void SSPClientIso::doStart()
 	this->pipe = tpipe;
 
 	this->worker = std::thread(SSPClientIso::ReceiveThread, this);
-	/* Owned and joined by Stop() (not detached): see stderrWorker's comment.
-	   Started on every platform: os_process_pipe_read_err works on POSIX too,
-	   and an undrained stderr pipe can block the connector once its 4 KiB
-	   pipe fills. */
+#ifdef _WIN32
+	/* Keep the connector's stderr drained on Windows, where the child handle
+	   can be terminated before Stop() joins this reader. On POSIX the pipe is
+	   popen()-backed and exposes no child handle; closing it only after the
+	   join would deadlock OBS whenever the connector is still alive. */
 	this->stderrWorker = std::thread(dump_stderr, tpipe);
+#endif
 	this->statusLock.unlock();
 }
 

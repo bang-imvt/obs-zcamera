@@ -2473,10 +2473,33 @@ void ZcSspSource::videoRender(gs_effect_t *effect)
 		return;
 
 	/* Draw the texture. */
-	gs_effect_t *draw_effect = (effect) ? effect : gs_get_effect();
-	if (draw_effect) {
+	const bool rect = gs_texture_is_rect(tex);
+	if (effect && !rect) {
+		/* libobs already entered the default effect's Draw pass for a normal
+		   (non-rectangle) source. */
 		gs_effect_set_texture(
-			gs_effect_get_param_by_name(draw_effect, "image"), tex);
+			gs_effect_get_param_by_name(effect, "image"), tex);
+		gs_draw_sprite(tex, 0, 0, 0);
+
+#ifdef ENABLE_CAMERA_CONTROL
+		drawAiOverlay(effect);
+#endif
+		return;
+	}
+
+	/* A GL_TEXTURE_RECTANGLE cannot be sampled by the normal default
+	   effect's sampler2D. macOS zero-copy therefore registers this source as
+	   OBS_SOURCE_CUSTOM_DRAW and draws its own pass, selecting the
+	   texture_rect variant of the same base effect. */
+	gs_effect_t *draw_effect =
+		rect ? obs_get_base_effect(OBS_EFFECT_DEFAULT_RECT)
+		     : (effect ? effect : obs_get_base_effect(OBS_EFFECT_DEFAULT));
+	if (!draw_effect)
+		return;
+
+	gs_effect_set_texture(gs_effect_get_param_by_name(draw_effect, "image"),
+			      tex);
+	while (gs_effect_loop(draw_effect, "Draw")) {
 		gs_draw_sprite(tex, 0, 0, 0);
 
 #ifdef ENABLE_CAMERA_CONTROL
@@ -2789,9 +2812,9 @@ struct obs_source_info create_ssp_source_info()
 #ifdef ZC_MAC_ZERO_COPY
 	/* Zero-copy on macOS: decode into a BGRA IOSurface and draw it here, so
 	   the source owns its rendering like it does on Windows. */
-	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO |
-			    OBS_SOURCE_DO_NOT_DUPLICATE |
-			    OBS_SOURCE_INTERACTION;
+	info.output_flags =
+		OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_CUSTOM_DRAW |
+		OBS_SOURCE_DO_NOT_DUPLICATE | OBS_SOURCE_INTERACTION;
 #elif defined(__APPLE__)
 	/* No zero-copy build: the OpenGL backend cannot import the camera's 420v
 	   IOSurface, so decode in software and let OBS upload/convert the frame

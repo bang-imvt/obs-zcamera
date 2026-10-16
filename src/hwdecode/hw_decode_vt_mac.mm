@@ -235,7 +235,7 @@ bool vt_build_session(zc_hw_vt_mac *v)
 	if (v->codec == ZC_CODEC_HEVC)
 		st = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
 			kCFAllocatorDefault, addrs.size(), addrs.data(),
-			lens.data(), 4, false, &v->fmt);
+			lens.data(), 4, nullptr, &v->fmt);
 	else
 		st = CMVideoFormatDescriptionCreateFromH264ParameterSets(
 			kCFAllocatorDefault, addrs.size(), addrs.data(),
@@ -414,15 +414,15 @@ bool vt_decode(struct zc_hw_decoder *dec, const uint8_t *data, size_t size,
 
 	CMBlockBufferRef bb = nullptr;
 	OSStatus st = CMBlockBufferCreateWithMemoryBlock(
-		kCFAllocatorDefault, nullptr, (CMSize)avcc.size(),
-		kCFAllocatorDefault, nullptr, 0, (CMSize)avcc.size(),
+		kCFAllocatorDefault, nullptr, (size_t)avcc.size(),
+		kCFAllocatorDefault, nullptr, 0, (size_t)avcc.size(),
 		kCMBlockBufferAssureMemoryNowFlag, &bb);
 	if (st != kCMBlockBufferNoErr || !bb) {
 		blog(LOG_WARNING, "[obs-zcamera] videotoolbox: block buffer failed (%d)",
 		     (int)st);
 		return false;
 	}
-	if (CMBlockBufferReplaceDataBytes(bb, avcc.data(), 0, (CMSize)avcc.size()) !=
+	if (CMBlockBufferReplaceDataBytes(avcc.data(), bb, 0, (size_t)avcc.size()) !=
 	    kCMBlockBufferNoErr) {
 		CFRelease(bb);
 		return false;
