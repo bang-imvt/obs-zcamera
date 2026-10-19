@@ -5266,6 +5266,16 @@ void ZcFramingPanel::setClient(ZcCameraClient *client)
 			if (sp)
 				sp->setValue(0);
 		}
+		/* The area editor is a latched button: it stays pressed while the
+		   operator drags the rectangle, which is a mode on THIS camera's
+		   source. Left pressed across a switch it would read as "still
+		   editing" on a camera that never armed it (the link itself is
+		   disarmed by ZcOverlayLink::setClient, a moment later), so drop the
+		   latch here without firing its handler. */
+		if (maskEditBtn_) {
+			QSignalBlocker b(maskEditBtn_);
+			maskEditBtn_->setChecked(false);
+		}
 		viewAngleCombo_->setCurrentIndex(0);
 		bodySizeSp_->setValue(kFramingBodySizeMin);
 		placement_ = 0;
