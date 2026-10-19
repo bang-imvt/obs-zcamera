@@ -627,6 +627,12 @@ private:
 	   {"code":-1} has neither. */
 	ZcSegmentedControl *boxModeSeg_ = nullptr;
 	ZcSegmentedControl *boxEnableSeg_ = nullptr;
+	/* The two boxes keep one enable flag each on the camera: all_status
+	   reports fix_angle_box.enable and tracking_box.enable separately, so the
+	   status switch has to display the flag of the mode that is selected
+	   rather than one shared state (bug lists 23/24/25/26/27). */
+	bool fixAngleBoxOn_ = false;
+	bool trackingBoxOn_ = false;
 
 	/* The page's dropdowns. */
 	QComboBox *viewAngleCombo_ = nullptr; /* Live: View Angle (fov_type) */
@@ -652,6 +658,9 @@ private:
 	QPushButton *fovFullBodyBtn_ = nullptr;
 	QPushButton *fovWaistBtn_ = nullptr;
 	QPushButton *fovCloseupBtn_ = nullptr;
+	/* Repaint the three size presets so exactly the one matching the current
+	   Size carries the tick (bug lists 16/17/20). */
+	std::function<void()> fovPresetButtons_;
 	int fovPresetFullBody_ = 100, fovPresetWaist_ = 70,
 	    fovPresetCloseup_ = 40;
 	/* Firmware generation: >= 1.0.5 (see setFirmwareNew). */

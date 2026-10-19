@@ -1993,6 +1993,10 @@ public:
 	/* The camera's rectangle, from a snapshot (all_status or /mask_area). */
 	void setMask(bool enabled, float left, float top, float right,
 		     float bottom);
+	/* Take the rectangle off (or back onto) the picture without waiting for
+	   the camera's read-back — used the moment the detection-area switch is
+	   turned off (bug list 28). */
+	void setMaskVisible(bool visible);
 	/* The camera's tracking-box ("range") frame, mirrored into the source so
 	   its overlay draws the region line the web preview shows (bug 17). */
 	void setTrackBox(bool enabled, float left, float top, float width,
@@ -2155,6 +2159,15 @@ void ZcOverlayLink::setMask(bool enabled, float left, float top, float right,
 	mt_ = top;
 	mr_ = right;
 	mb_ = bottom;
+	pushMask();
+}
+
+void ZcOverlayLink::setMaskVisible(bool visible)
+{
+	maskOn_ = visible;
+	/* A local decision, so a following read-back that still says "on" must
+	   not undo it before the camera has accepted the write. */
+	maskLocalOverride_ = true;
 	pushMask();
 }
 
@@ -3579,8 +3592,14 @@ protected:
 		const double fx = double(placement_ - kFramingOffsetMin) / span;
 		const double fy = double(faceHeight_ - kFramingOffsetMin) / span;
 
-		const int fw = qMax(12, int(tile.width() * 0.22));
-		const int fh = qMax(24, int(tile.height() * 0.55));
+		/* The figure's size follows Face Height: the tile is a picture of
+		   the frame, so a subject the camera has been told to make larger
+		   has to be drawn larger. It used to be a fixed fraction of the
+		   tile, which made Size / Full-body / Waist / Close-up look like
+		   they did nothing on the pad (bug lists 18/19). */
+		const double sizeT = qBound(0.0, fy, 1.0);
+		const int fw = qMax(10, int(tile.width() * (0.14 + 0.22 * sizeT)));
+		const int fh = qMax(18, int(tile.height() * (0.34 + 0.52 * sizeT)));
 		const int margin = 3;
 		const double left =
 		    tile.left() + margin +
@@ -4204,13 +4223,14 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 
 	/* The page's "Size" stepper walks /fov?body_size= 0..4 but prints the
 	   percentage its option list names (index * 10 + 80), so the spinner shows
-	   the percentage and the write sends the index back. */
+	   the percentage and the write sends the index back. Built once and added
+	   once: an earlier double addField() reparented the spinner into a second
+	   field and left the first one as a caption with no control, which is the
+	   duplicated "Size" line the testers reported (bug list 36). */
 	bodySizeSp_ = new ZcSliderSpin(colView->parentWidget());
 	bodySizeSp_->setRange(kFramingBodySizeMin, kFramingBodySizeMax,
 			      kFramingBodySizeStep);
 	bodySizeSp_->setSuffix(QStringLiteral("%"));
-	addField(colView, ztr("ZCameraPlugin.Framing.FovScale"), bodySizeSp_,
-		 false);
 	bodySizeSp_->onCommitted = [this](int v) {
 		if (painting_ || !client_)
 			return;
@@ -4244,11 +4264,25 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 							int *preset) {
 			auto *btn = new QPushButton(ztr(key), sizeCol);
 			btn->setToolTip(ztr(key));
-			connect(btn, &QPushButton::clicked, this, [this, preset]() {
-				if (painting_ || !client_)
-					return;
-				client_->setFramingFovSize(*preset);
-			});
+			/* Checkable, because the page marks the preset the current
+			   Size corresponds to; the tick is painted in
+			   updateFovPresetButtons() (bug lists 16/17/20). */
+			btn->setCheckable(true);
+			connect(btn, &QPushButton::clicked, this,
+				[this, preset]() {
+					if (painting_ || !client_)
+						return;
+					/* The page moves its Size control as soon as a
+					   preset is picked. Waiting for the camera's
+					   read-back left the slider showing the old value
+					   and no button ticked, which read as "the
+					   button did nothing" (bug lists 16/17). */
+					if (fovSizeSp_)
+						fovSizeSp_->setValue(*preset);
+					client_->setFramingFovSize(*preset);
+					if (fovPresetButtons_)
+						fovPresetButtons_();
+				});
 			presetRow->addWidget(btn);
 			*slot = btn;
 			return btn;
@@ -4259,6 +4293,22 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 			  &fovPresetWaist_);
 		presetBtn("ZCameraPlugin.Framing.FovCloseUp", &fovCloseupBtn_,
 			  &fovPresetCloseup_);
+		/* Exactly one of the three carries the tick: the one whose stored
+		   size equals the current Size. The sizes come from all_status
+		   (fullbody / waist / closeup), so this follows the camera rather
+		   than a hard-coded 20/80/90 triple. */
+		fovPresetButtons_ = [this]() {
+			const int size = fovSizeSp_ ? fovSizeSp_->value() : -1;
+			const auto tick = [size](QPushButton *btn, int preset) {
+				if (!btn)
+					return;
+				QSignalBlocker block(btn);
+				btn->setChecked(size >= 0 && size == preset);
+			};
+			tick(fovFullBodyBtn_, fovPresetFullBody_);
+			tick(fovWaistBtn_, fovPresetWaist_);
+			tick(fovCloseupBtn_, fovPresetCloseup_);
+		};
 		sizeLay->addLayout(presetRow);
 		fovSizeField_ = addField(
 			colView, ztr("ZCameraPlugin.Framing.FovScale"),
@@ -4424,6 +4474,14 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		if (painting_ || !client_)
 			return;
 		client_->setFramingMaskEnable(index == 1);
+		/* Bug list 28: switching the area off must take its rectangle off
+		   the picture at once. The next snapshot carries the flag too, but
+		   it is a second away and a frame left behind reads as a switch
+		   that did nothing. */
+		if (link_ && index == 0)
+			link_->setMaskVisible(false);
+		/* The "edit" button belongs to this switch (bug list 31). */
+		updateGating();
 	};
 
 	/* "Edit detection area": the camera's own page lets the operator drag the
@@ -4914,6 +4972,8 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 			if (painting_ || !client_)
 				return;
 			client_->setFramingWaving(index == 1);
+			/* View Angle Adjustment hangs off Follow Me (bug list 15). */
+			updateGating();
 		};
 
 		gestureFovSeg_ = offSegment(box);
@@ -4955,6 +5015,21 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		lay->addWidget(setRow(fields, ztr("ZCameraPlugin.Framing.BoxStatus"),
 				      boxEnableSeg_));
 
+		/* The two boxes are two independent flags on the camera. Switching
+		   the mode therefore has to show that mode's own state again, which
+		   is what makes the single status switch behave like the page's per
+		   mode switch (bug lists 25/26: a range-on state used to be carried
+		   over to the fix-angle mode and vice versa). */
+		boxModeSeg_->onActivated = [this](int index) {
+			if (painting_)
+				return;
+			if (boxEnableSeg_)
+				boxEnableSeg_->setCurrentIndex(
+				    index == 0 ? (fixAngleBoxOn_ ? 1 : 0)
+					       : (trackingBoxOn_ ? 1 : 0));
+			updateGating();
+		};
+
 		/* The note is a full-width line of text, not a field, so it goes under
 		   the wrapped row of fields rather than into it. */
 		auto *note = new QLabel(ztr("ZCameraPlugin.Framing.BoxNote"), box);
@@ -4965,10 +5040,16 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		boxEnableSeg_->onActivated = [this](int index) {
 			if (painting_ || !client_)
 				return;
-			if (boxModeSeg_->currentIndex() == 0)
+			/* Remember which box the operator just switched: the flag is
+			   per mode on the camera and read back from all_status, but the
+			   switch has to show the new state before that reply lands. */
+			if (boxModeSeg_->currentIndex() == 0) {
 				client_->setFramingFixAngleBoxEnabled(index == 1);
-			else
+				fixAngleBoxOn_ = index == 1;
+			} else {
 				client_->setFramingTrackingBoxEnabled(index == 1);
+				trackingBoxOn_ = index == 1;
+			}
 			/* Bug list #49: the box state drives the Lock Zoom /
 			   Lock Tilt interlock, which lives in updateGating(). */
 			updateGating();
@@ -5592,7 +5673,42 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 		if (idx >= 0)
 			startPosCombo_->setCurrentIndex(idx);
 	}
+	/* The framing box keeps one enable flag per mode on the camera, and
+	   all_status reports both (fix_angle_box.enable / tracking_box.enable).
+	   Reading them back is what lets the panel follow a switch flipped on the
+	   camera's own page, and what keeps the one status segment honest about
+	   the mode it is currently showing (bug lists 23/24/25/26/27). */
+	const auto boxFlag = [&doc](const char *key, bool fallback) {
+		const QJsonValue v = doc.value(QLatin1String(key));
+		if (v.isObject()) {
+			const QJsonValue e =
+			    v.toObject().value(QLatin1String("enable"));
+			if (e.isBool())
+				return e.toBool();
+			if (e.isDouble())
+				return e.toInt() != 0;
+			return fallback;
+		}
+		if (v.isBool())
+			return v.toBool();
+		if (v.isDouble())
+			return v.toInt() != 0;
+		return fallback;
+	};
+	if (doc.contains(QLatin1String("fix_angle_box")))
+		fixAngleBoxOn_ = boxFlag("fix_angle_box", fixAngleBoxOn_);
+	if (doc.contains(QLatin1String("tracking_box")))
+		trackingBoxOn_ = boxFlag("tracking_box", trackingBoxOn_);
+	if (boxEnableSeg_ && boxModeSeg_)
+		boxEnableSeg_->setCurrentIndex(
+		    boxModeSeg_->currentIndex() == 0 ? (fixAngleBoxOn_ ? 1 : 0)
+						     : (trackingBoxOn_ ? 1 : 0));
 	painting_ = false;
+
+	/* The Full-body / Waist / Close-up buttons follow the Size the snapshot
+	   just painted (bug lists 16/17/20). */
+	if (fovPresetButtons_)
+		fovPresetButtons_();
 
 	/* /ctrl/framing/all_status is the camera's complete framing snapshot, so a
 	   key that never shows up is a feature the firmware does not have: its
@@ -5802,8 +5918,11 @@ void ZcFramingPanel::updateGating()
 	/* Bug list #49: the fix-angle box on forces Lock Zoom / Lock Tilt off
 	   and greys them (the page's _updateLockZoomTiltReadonlyStatus). A 1.0.3
 	   camera has neither the box nor the locks, so this only ever fires on
-	   the new generation. */
-	const bool fixAngleOn = fw15_ && boxEnableSeg_ &&
+	   the new generation. Only the FIX-ANGLE box does this: the tracking box
+	   ("range") leaves both locks usable, which is why the mode is part of
+	   the condition (bug list 27 — a range-on state used to grey them). */
+	const bool fixAngleOn = fw15_ && boxModeSeg_ &&
+				boxModeSeg_->currentIndex() == 0 && boxEnableSeg_ &&
 				boxEnableSeg_->isEnabled() &&
 				boxEnableSeg_->currentIndex() == 1;
 	if (fixAngleOn) {
@@ -5822,11 +5941,34 @@ void ZcFramingPanel::updateGating()
 
 	/* Bug list #48: on a >=1.0.5 firmware the detection-area button greys
 	   while Auto Target is off (the page's _updateMaskEditBtnStatus); the
-	   1.0.3 page keeps it live, so this is version-gated. */
-	if (fw15_ && maskEditBtn_)
-		maskEditBtn_->setEnabled(haveSnapshot_ && detectOn_ &&
-					 autoTargetSeg_ &&
-					 autoTargetSeg_->currentIndex() == 1);
+	   1.0.3 page keeps it live, so this is version-gated.
+
+	   Bug list 31: the editor belongs to the detection-area switch, so with
+	   that switch off there is nothing to draw and the button greys on every
+	   firmware. */
+	if (maskEditBtn_) {
+		const bool maskOn = maskSeg_ && maskSeg_->currentIndex() == 1;
+		const bool autoTargetOk =
+		    !fw15_ || (autoTargetSeg_ &&
+			       autoTargetSeg_->currentIndex() == 1);
+		maskEditBtn_->setEnabled(haveSnapshot_ && detectOn_ && maskOn &&
+					 autoTargetOk);
+	}
+
+	/* Bug list 15: the page only lets "View Angle Adjustment" be switched
+	   while Follow Me (the hand-gesture follow) is on — a gesture that
+	   changes the view angle needs the camera already following the
+	   operator. The row is on the Settings page, which is otherwise live. */
+	if (gestureFovSeg_)
+		gestureFovSeg_->setEnabled(
+		    haveSnapshot_ && wavingSeg_ &&
+		    wavingSeg_->currentIndex() == 1);
+
+	/* Bug lists 11/12: registering a face writes the camera's face store,
+	   which the camera only accepts while detection runs, and not while it
+	   is tracking. The page greys the button in both cases. */
+	if (faceRegBtn_)
+		faceRegBtn_->setEnabled(haveSnapshot_ && detectOn_ && !traceOn_);
 }
 
 /* A projector window on this camera's source.
