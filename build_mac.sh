@@ -12,8 +12,8 @@
 # Notes:
 #   * The plugin links OBS's patched Qt6 (the -qt6- deps) so it ABI-matches the
 #     OBS it runs in.
-#   * On Apple Silicon the ssp-connector target is pinned to x86_64 by CMake, so
-#     the bundled connector needs Rosetta 2 installed to run.
+#   * ssp-connector is built universal alongside the plugin and runs natively;
+#     no Rosetta 2 installation is required.
 #   * Requires cmake and a full Xcode installation selected by xcode-select.
 
 set -euo pipefail
