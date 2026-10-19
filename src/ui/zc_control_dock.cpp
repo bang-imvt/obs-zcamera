@@ -5210,10 +5210,12 @@ void ZcFramingPanel::setClient(ZcCameraClient *client)
 		if (presetGroup_)
 			presetGroup_->setVisible(false);
 		/* A new camera may or may not have the optional features; leave that
-		   to its first snapshot. */
+		   to its first snapshot. They are shown again here so a camera that
+		   has them gets them back after one that did not (bug list 14). */
 		optionalProbed_ = false;
 		for (QWidget *w : optionalRows_) {
 			if (w) {
+				w->setVisible(true);
 				w->setEnabled(true);
 				w->setToolTip(QString());
 			}
@@ -5251,8 +5253,9 @@ void ZcFramingPanel::refresh()
 /* The framing-box control and the profile export exist only on some firmwares
    (/ctrl/framing/fix_angle_box and /export answer {"code":-1} on a camera
    without them). One probe each, on the first refresh after a camera is
-   picked: a control that can only fail is better shown disabled with the
-   reason than left to swallow a click. */
+   picked. A control the firmware does not have is *hidden*, not shown dead:
+   the camera's own page does not render it either, and the testers asked for
+   removal rather than a permanently greyed block (bug list 14). */
 void ZcFramingPanel::probeOptionalFeatures()
 {
 	if (!client_ || !client_->isConnected())
@@ -5261,6 +5264,7 @@ void ZcFramingPanel::probeOptionalFeatures()
 	const auto gate = [this](QWidget *w, bool supported) {
 		if (!w)
 			return;
+		w->setVisible(supported);
 		w->setEnabled(supported);
 		w->setToolTip(supported ? QString()
 					: ztr("ZCameraPlugin.Framing.Unsupported"));
