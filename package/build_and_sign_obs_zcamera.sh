@@ -158,6 +158,40 @@ exit 0
 EOF
 chmod 755 "$SCRIPTS_DIR/preinstall"
 
+cat > "$SCRIPTS_DIR/postinstall" <<'EOF'
+#!/bin/sh
+set -e
+
+# OBS on Apple Silicon does not scan /Library/Application Support; it only
+# scans the current user's ~/Library/Application Support path. Intel OBS still
+# uses the legacy system path, so keep the pkg payload there and mirror it into
+# the console user's plugin directory for modern arm64 builds.
+SYSTEM_BUNDLE="/Library/Application Support/obs-studio/plugins/obs-zcamera.plugin"
+CONSOLE_USER="$(stat -f %Su /dev/console 2>/dev/null || true)"
+
+case "$CONSOLE_USER" in
+    ""|root|loginwindow)
+        exit 0
+        ;;
+esac
+
+USER_HOME="$(dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
+    exit 0
+fi
+
+USER_PLUGIN_DIR="$USER_HOME/Library/Application Support/obs-studio/plugins"
+USER_BUNDLE="$USER_PLUGIN_DIR/obs-zcamera.plugin"
+
+mkdir -p "$USER_PLUGIN_DIR"
+rm -rf "$USER_BUNDLE"
+ditto --norsrc --noextattr --noacl --noqtn "$SYSTEM_BUNDLE" "$USER_BUNDLE"
+chown -R "$CONSOLE_USER" "$USER_BUNDLE"
+
+exit 0
+EOF
+chmod 755 "$SCRIPTS_DIR/postinstall"
+
 # packagebuild records extended attributes as AppleDouble `._*` entries in the
 # pkg payload. Strip them from the staging tree before the binaries are signed.
 xattr -cr "$STAGE_ROOT"
