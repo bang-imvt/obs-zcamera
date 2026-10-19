@@ -105,7 +105,7 @@ static signal_handler_t *zc_obs_signals = nullptr;
 /* Tools-menu action. OBS owns the QAction (there is no remove API), but its
    `triggered` slot lives in this DLL, so it MUST be disconnected on unload or a
    click after unload jumps into unmapped code. */
-static QAction *zc_tools_action = nullptr;
+static QPointer<QAction> zc_tools_action;
 
 static void on_frontend_event(enum obs_frontend_event event, void *)
 {

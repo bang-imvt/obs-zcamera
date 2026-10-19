@@ -29,6 +29,13 @@ extern "C" {
 }
 #include <ssp_connector_proto.h>
 
+#if defined(__APPLE__)
+#include "zc_process_pipe_mac.h"
+using zc_process_pipe_t = zc_mac_process_pipe;
+#else
+using zc_process_pipe_t = os_process_pipe_t;
+#endif
+
 #ifdef _WIN64
 #define SSP_CONNECTOR "../../obs-plugins/" OBS_SSP_BITSTR "/ssp-connector.exe"
 #else
@@ -75,7 +82,7 @@ private:
 	std::string ip;
 	QString ssp_connector_path;
 
-	os_process_pipe_t *pipe;
+	zc_process_pipe_t *pipe;
 
 	std::thread worker;
 	/* Drains the connector's stderr. Kept joinable (never detached) so Stop()

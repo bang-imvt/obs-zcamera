@@ -78,6 +78,14 @@ set(obs-zcamera_SOURCES
 set(obs-zcamera_HEADERS src/obs-ssp.h src/ssp-mdns.h src/VFrameQueue.h
                         src/ssp-client-iso.h src/hwdecode/hw_decode.h)
 
+if(APPLE)
+  # libobs' os_process_pipe_create() emits a duplicate close() file action
+  # that macOS 26 rejects with EBADF. The connector needs a working pipe and
+  # its child pid, so macOS uses this helper instead.
+  list(APPEND obs-zcamera_SOURCES src/zc_process_pipe_mac.cpp)
+  list(APPEND obs-zcamera_HEADERS src/zc_process_pipe_mac.h)
+endif()
+
 if(ENABLE_ZERO_COPY)
   # FFmpeg-hwaccel engine: decodes on any GPU the OS recognizes (CUDA/D3D11VA
   # on Windows, VideoToolbox on macOS) and imports the GPU surface into OBS

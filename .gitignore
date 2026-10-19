@@ -15,6 +15,10 @@
 /out/
 /dist/
 /dist-mac/
+/dist-local/
+/dist-*/
+/build-local/
+/.build-overrides/
 /CMakeCache.txt
 /CMakeFiles/
 /cmake/.CMakeBuildNumber

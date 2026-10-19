@@ -37,12 +37,55 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include "obs-ssp.h"
 #include "ssp-client-iso.h"
 
-static size_t os_process_pipe_read_retry(os_process_pipe *pipe, uint8_t *dst,
+static size_t zc_process_pipe_read(zc_process_pipe_t *pipe, uint8_t *dst,
+				   size_t size)
+{
+#if defined(__APPLE__)
+	return zc_mac_process_pipe_read(pipe, dst, size);
+#else
+	return os_process_pipe_read(pipe, dst, size);
+#endif
+}
+
+static size_t zc_process_pipe_read_err(zc_process_pipe_t *pipe, uint8_t *dst,
+				       size_t size)
+{
+#if defined(__APPLE__)
+	return zc_mac_process_pipe_read_err(pipe, dst, size);
+#else
+	return os_process_pipe_read_err(pipe, dst, size);
+#endif
+}
+
+static zc_process_pipe_t *zc_process_pipe_create(const char *command,
+						 const char *mode,
+						 char *error,
+						 size_t error_size)
+{
+#if defined(__APPLE__)
+	return zc_mac_process_pipe_create(command, mode, error, error_size);
+#else
+	(void)error;
+	(void)error_size;
+	return os_process_pipe_create(command, mode);
+#endif
+}
+
+static int zc_process_pipe_destroy(zc_process_pipe_t *pipe)
+{
+#if defined(__APPLE__)
+	return zc_mac_process_pipe_destroy(pipe);
+#else
+	return os_process_pipe_destroy(pipe);
+#endif
+}
+
+static size_t zc_process_pipe_read_retry(zc_process_pipe_t *pipe, uint8_t *dst,
 					 size_t size)
 {
 	size_t pos = 0, cur = 0;
 	while (pos < size) {
-		cur = os_process_pipe_read(pipe, dst + pos, size - pos);
+		cur = zc_process_pipe_read(pipe, dst + pos, size - pos);
 		if (!cur) {
 			break;
 		}
@@ -57,14 +100,15 @@ static size_t os_process_pipe_read_retry(os_process_pipe *pipe, uint8_t *dst,
    fails) memcpy into a NULL pointer. */
 #define ZC_MAX_MSG_BODY (64u * 1024u * 1024u)
 
-static Message *msg_recv(os_process_pipe *pipe)
+static Message *msg_recv(zc_process_pipe_t *pipe)
 {
 	size_t sz = 0;
 	Message *msg = (Message *)bmalloc(sizeof(Message));
 	if (!msg) {
 		return nullptr;
 	}
-	sz = os_process_pipe_read_retry(pipe, (uint8_t *)msg, sizeof(Message));
+	sz = zc_process_pipe_read_retry(pipe, (uint8_t *)msg,
+					sizeof(Message));
 	if (sz != sizeof(Message)) {
 		ssp_blog(LOG_WARNING, "pipe protocol header error, recv: %zu!",
 			 sz);
@@ -90,7 +134,7 @@ static Message *msg_recv(os_process_pipe *pipe)
 	memcpy(msg_all, msg, sizeof(Message));
 	bfree(msg);
 	//ssp_blog(LOG_INFO, "receive msg type: %d, size: %d", msg_all->type, msg_all->length);
-	sz = os_process_pipe_read_retry(pipe, msg_all->value, msg_all->length);
+	sz = zc_process_pipe_read_retry(pipe, msg_all->value, msg_all->length);
 	if (sz != msg_all->length) {
 		ssp_blog(LOG_WARNING, "pipe protocol body error, recv: %zu!",
 			 sz);
@@ -107,12 +151,12 @@ static void msg_free(Message *msg)
 	}
 }
 
-static void *dump_stderr(os_process_pipe *pipe)
+static void *dump_stderr(zc_process_pipe_t *pipe)
 {
 	size_t sz;
 	char buf[1024];
 	while (true) {
-		sz = os_process_pipe_read_err(pipe, (uint8_t *)buf,
+		sz = zc_process_pipe_read_err(pipe, (uint8_t *)buf,
 					      sizeof(buf) - 1);
 		if (sz == 0) {
 			break;
@@ -210,25 +254,27 @@ void SSPClientIso::doStart()
 	dstr_init_copy(&cmd, ssp_connector_path.toStdString().c_str());
 	dstr_insert_ch(&cmd, 0, '\"');
 	dstr_cat(&cmd, "\" ");
-#if defined(__APPLE__) && defined(__arm64__)
-	dstr_insert(&cmd, 0, "arch -x86_64 ");
-#endif
 	dstr_cat(&cmd, "--host ");
-	/* Quote the host: on macOS os_process_pipe_create() is a popen(), so an
-	   unquoted, attacker-controlled zc_source_ip from a shared scene collection
-	   would inject shell. Harmless but harmless-to-fix on Windows too. */
+	/* Quote the host: the command is passed to a shell (libobs' pipe API on
+	   Windows, /bin/sh in the macOS helper), so an unquoted, attacker-
+	   controlled zc_source_ip from a shared scene collection would inject
+	   shell. */
 	dstr_cat_ch(&cmd, '"');
 	dstr_cat(&cmd, this->ip.c_str());
 	dstr_cat_ch(&cmd, '"');
 	dstr_cat(&cmd, " --port ");
 	dstr_cat(&cmd, "9999");
 
-	auto tpipe = os_process_pipe_create(cmd.array, "r");
+	char spawn_error[256] = {};
+	auto tpipe = zc_process_pipe_create(cmd.array, "r", spawn_error,
+					    sizeof(spawn_error));
 	blog(LOG_INFO, "Start ssp-connector at: %s", cmd.array);
 	dstr_free(&cmd);
 
 	if (!tpipe) {
-		blog(LOG_WARNING, "Start ssp-connector failed.");
+		blog(LOG_WARNING, "Start ssp-connector failed%s%s",
+		     spawn_error[0] ? ": " : "",
+		     spawn_error[0] ? spawn_error : "");
 		return;
 	}
 	this->statusLock.lock();
@@ -236,11 +282,12 @@ void SSPClientIso::doStart()
 	this->pipe = tpipe;
 
 	this->worker = std::thread(SSPClientIso::ReceiveThread, this);
-	/* Owned and joined by Stop() (not detached): see stderrWorker's comment.
-	   Started on every platform: os_process_pipe_read_err works on POSIX too,
-	   and an undrained stderr pipe can block the connector once its 4 KiB
-	   pipe fills. */
+#if defined(_WIN32) || defined(__APPLE__)
+	/* Keep the connector's stderr drained. Both Windows and macOS stop the
+	   child before joining this reader, so it cannot block forever on a
+	   connector that is alive but silent. */
 	this->stderrWorker = std::thread(dump_stderr, tpipe);
+#endif
 	this->statusLock.unlock();
 }
 
@@ -315,7 +362,7 @@ void SSPClientIso::Stop()
 	this->statusLock.lock();
 	const bool wasRunning = this->running;
 	this->running = false;
-	os_process_pipe *pp = this->pipe;
+	zc_process_pipe_t *pp = this->pipe;
 	this->statusLock.unlock();
 
 	if (!wasRunning && !pp) {
@@ -341,6 +388,12 @@ void SSPClientIso::Stop()
 			WaitForSingleObject(child, 5000);
 		}
 	}
+#elif defined(__APPLE__)
+	/* The connector may be alive but silent; without a child handle the
+	   reader would stay blocked in fread() and join forever. Terminate the
+	   process group first so both readers see EOF. */
+	if (pp)
+		zc_mac_process_pipe_terminate(pp);
 #endif
 
 	/* Join both readers before the pipe is destroyed: they read from it and
@@ -351,7 +404,7 @@ void SSPClientIso::Stop()
 		this->stderrWorker.join();
 
 	if (pp) {
-		os_process_pipe_destroy(pp);
+		zc_process_pipe_destroy(pp);
 		this->pipe = nullptr;
 	}
 }
