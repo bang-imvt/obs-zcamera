@@ -1494,13 +1494,18 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		   Range Limit status, which the PTZ tab's own Range Limit group owns
 		   (checkbox + the four edge sliders); rendering it here as a second,
 		   independent combo duplicated the control and let the two disagree
-		   (bug list "the range limit status appears twice"). */
+		   (bug list "the range limit status appears twice"). The PTZ group
+		   still reports `preset_adjust_speed_with_zoom` ("Adjust speed with
+		   zoom"), but the camera's own page never renders that row on the PTZ
+		   models we ship for, so the plugin drops it too instead of showing a
+		   setting the operator cannot find on the camera (bug 63). */
 		if (key == QLatin1String("compose_mode") ||
 		    key == QLatin1String("ev") ||
 		    key == QLatin1String("ois_mode") ||
 		    key == QLatin1String("vignette") ||
 		    key == QLatin1String("raw_over_hdmi") ||
 		    key == QLatin1String("ptz_limit") ||
+		    key == QLatin1String("preset_adjust_speed_with_zoom") ||
 		    /* The 1.0.6 firmware lists these four PTZ keys in getbatch
 		       but silently ignores writes to them (bug list #84: the PTZ
 		       tab's flip-auto and rise/fall/s-curve rows accept input
