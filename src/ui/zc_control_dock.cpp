@@ -1839,12 +1839,21 @@ void ZcSettingsPanel::updateStreamBar()
 	   floor, 0.2 Mbps: the camera refuses anything lower, and with a smaller
 	   minimum the bar snapped back from the far left, which read as "the
 	   slider cannot reach its left end" (bug list "bitrate slider bounces at
-	   the far left"). */
+	   the far left").
+
+	   The minimum must NOT follow the current value. Using `bitrate` as the
+	   lower bound made the thumb sit at the far-left end after every write
+	   (the left end *was* the value just stored): a rightward drag then wrote
+	   the minimum, and a drag to the maximum left a degenerate min == max
+	   range that read as a permanently greyed bar (bug lists "the slider
+	   jumps to its left end on every rightward drag" and "it greys at the
+	   maximum"). */
 	const int bitrate = streamDoc_.value("bitrate").toInt();
-	streamBitrate_->setRange(qMax(kStreamBitrateMin, bitrate),
-				 qMax(streamDoc_.value("maxBitrate").toInt(),
-				      qMax(kStreamBitrateMin, bitrate)));
-	streamBitrate_->setValue(bitrate);
+	const int bitrateMax = qMax(qMax(streamDoc_.value("maxBitrate").toInt(),
+					 bitrate),
+				    kStreamBitrateMin);
+	streamBitrate_->setRange(kStreamBitrateMin, bitrateMax);
+	streamBitrate_->setValue(qBound(kStreamBitrateMin, bitrate, bitrateMax));
 	streamBitrate_->setEnabled(!streamDoc_.value("bitrateRo").toBool());
 	streamBitrateValue_->setText(ztr("ZCameraPlugin.Dock.Kbps").arg(bitrate));
 
