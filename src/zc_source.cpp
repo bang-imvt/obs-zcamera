@@ -675,11 +675,16 @@ void ZcSspSource::update(obs_data_t *settings)
 	std::string ip = obs_data_get_string(settings, PROP_SOURCE_IP);
 	/* Refuse a syntactically invalid address outright: the source-IP box has no
 	   validation of its own, and an accepted typo would otherwise be applied and
-	   surface as a black source (bug list "source IP input has no validation"). */
+	   surface as a black source (bug list "source IP input has no validation").
+	   The address the source already had is kept, not cleared: clearing it let
+	   the source fall back to the name and left a row behind in the dock, so a
+	   typo could both break a working source and add a phantom camera (bug
+	   173). A brand-new source with a typo simply keeps no address, which is
+	   what leaves it out of the dock's list. */
 	if (!ip.empty() && !isValidHostAddress(ip)) {
 		blog(LOG_WARNING,
 		     "[obs-zcamera] ignoring invalid source IP '%s'", ip.c_str());
-		ip.clear();
+		ip = ip_;
 	}
 	/* A source saved with an empty address recovers it from its own name, so a
 	   scene collection from before the get_defaults fix still renders. Applied
@@ -2559,7 +2564,27 @@ static obs_properties_t *zc_source_getproperties(void *data)
 	   operator lands on the surface that controls the camera. The camera that
 	   this source represents is passed along so the dock selects it (bug 27). */
 	auto *s = static_cast<zc::ZcSspSource *>(data);
-	zc_show_control_dock(s ? s->ip() : QString());
+	/* Read the address from the SOURCE's settings, not from the live pipeline:
+	   a source that has not started (or has just been loaded with a scene
+	   collection) has no live address yet, and handing an empty host to the
+	   dock left it on whatever camera was selected last — the Properties dialog
+	   then showed the wrong camera, and after a restart the control page came up
+	   empty until another source was clicked (bugs 149/169). */
+	QString host;
+	if (s) {
+		/* `data` is the source itself; the settings object is the only place
+		   the address survives while the pipeline is stopped. */
+		obs_data_t *saved = obs_source_get_settings(
+		    static_cast<obs_source_t *>(data));
+		if (saved) {
+			host = QString::fromUtf8(
+			    obs_data_get_string(saved, PROP_SOURCE_IP));
+			obs_data_release(saved);
+		}
+		if (host.isEmpty())
+			host = s->ip();
+	}
+	zc_show_control_dock(host);
 
 	/* The IP box gets live validation (bug list "source IP input has no
 	   validation"): update() refuses an invalid address, but silently, so the

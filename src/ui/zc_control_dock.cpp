@@ -1900,13 +1900,31 @@ void ZcSettingsPanel::updateStreamBar()
 				    kStreamBitrateMin);
 	streamBitrate_->setRange(kStreamBitrateMin, bitrateMax);
 	streamBitrate_->setValue(qBound(kStreamBitrateMin, bitrate, bitrateMax));
-	streamBitrate_->setEnabled(!streamDoc_.value("bitrateRo").toBool());
+	/* The encoder's bitrate and GOP cannot be changed while the stream is
+	   running: the camera refuses the write and only reports the field
+	   read-only afterwards, so on a freshly opened camera the two sliders used
+	   to look writable and greyed themselves only after the first drag (bug
+	   102, E2_F6_Pro). The running state is in the same document, so it is
+	   what greys them from the start. */
+	const bool streamRunning =
+	    streamDoc_.value(QLatin1String("streaming")).toBool() ||
+	    streamDoc_.value(QLatin1String("status"))
+		.toString()
+		.contains(QLatin1String("streaming"), Qt::CaseInsensitive);
+	const QString lockedTip =
+	    streamRunning ? ztr("ZCameraPlugin.Dock.StreamRunningTip")
+			  : QString();
+	streamBitrate_->setEnabled(!streamDoc_.value("bitrateRo").toBool() &&
+				   !streamRunning);
+	streamBitrate_->setToolTip(lockedTip);
 	streamBitrateValue_->setText(ztr("ZCameraPlugin.Dock.Kbps").arg(bitrate));
 
 	const int gop = streamDoc_.value("gop_n").toInt();
 	streamGop_->setRange(1, qMax(streamDoc_.value("maxGop").toInt(), gop));
 	streamGop_->setValue(gop);
-	streamGop_->setEnabled(!streamDoc_.value("gopRo").toBool());
+	streamGop_->setEnabled(!streamDoc_.value("gopRo").toBool() &&
+			       !streamRunning);
+	streamGop_->setToolTip(lockedTip);
 	streamGopValue_->setText(QString::number(gop));
 
 	const QString resolution =
@@ -4112,6 +4130,24 @@ private:
 		});
 	}
 
+	/* The limits this firmware actually has, set by the caller before show():
+	   1.0.5 registers and tracks 20 faces, the 1.0.3 generation's UI says 10
+	   and 8 (bug 13). A face-database reply that carries max / max_active
+	   still overrides these. */
+public:
+	void setDefaults(int max, int maxActive)
+	{
+		if (max > 0)
+			max_ = max;
+		if (maxActive > 0)
+			maxActive_ = maxActive;
+		if (info_)
+			info_->setText(ztr("ZCameraPlugin.Framing.FaceRegInfo")
+					   .arg(uids_.size())
+					   .arg(max_)
+					   .arg(maxActive_));
+	}
+
 	void fillFromRow(int row)
 	{
 		if (row < 0 || row >= names_.size())
@@ -4238,6 +4274,47 @@ private:
 	int maxActive_ = 8;
 	bool supported_ = true;
 };
+
+/* The camera's page explains a field with a "?" beside it and shows the text
+   when it is clicked, not on a hover. Used by the rows whose explanation the
+   tester asked to be clickable (bug 43). */
+static void zcShowHelpText(QWidget *parent, const QString &title,
+			   const QString &text)
+{
+	QDialog dlg(parent);
+	dlg.setWindowTitle(title);
+	auto *lay = new QVBoxLayout(&dlg);
+	auto *body = new QLabel(text, &dlg);
+	body->setWordWrap(true);
+	body->setMaximumWidth(420);
+	lay->addWidget(body);
+	auto *box = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
+	QObject::connect(box, &QDialogButtonBox::rejected, &dlg,
+			 &QDialog::reject);
+	lay->addWidget(box);
+	dlg.exec();
+}
+
+/* A control with its "?" beside it; the wrapper is what the row shows. */
+static QWidget *zcWithHelp(QWidget *parent, QWidget *control,
+			   const QString &title, const QString &text)
+{
+	auto *wrap = new QWidget(parent);
+	auto *row = new QHBoxLayout(wrap);
+	row->setContentsMargins(0, 0, 0, 0);
+	row->setSpacing(4);
+	row->addWidget(control);
+	auto *btn = new QToolButton(wrap);
+	btn->setText(QStringLiteral("?"));
+	btn->setAutoRaise(true);
+	btn->setToolTip(title);
+	QObject::connect(btn, &QToolButton::clicked, wrap,
+			 [wrap, title, text]() {
+				 zcShowHelpText(wrap, title, text);
+			 });
+	row->addWidget(btn);
+	return wrap;
+}
 
 ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 {
@@ -4604,6 +4681,22 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		client_->setFramingTiltLock(index == 1);
 	};
 
+	/* Bug 68: the page keeps Lock Zoom and Lock Tilt side by side in its live
+	   block (its aframe_lock_zoom and aframe_lock_tilt), so this row belongs
+	   here rather than on the Settings page. A firmware without the key hides
+	   it on the first snapshot (applyStatus → hideRow). */
+	zoomLockSeg_ = offSegment(colStart->parentWidget());
+	zoomLockRow_ = addField(colStart,
+				ztr("ZCameraPlugin.Framing.ZoomLock"), zoomLockSeg_,
+				false);
+	zoomLockSeg_->onActivated = [this](int index) {
+		if (painting_ || !client_)
+			return;
+		client_->setFramingZoomLock(index == 1);
+		/* Bug list #13: Lock Zoom greys the Size row. */
+		updateGating();
+	};
+
 	/* --- Column 2: the pad that moves the subject in frame. The page puts it
 	   between the two control blocks and leaves it live, and so does this: it
 	   writes a camera offset, not anything the detector owns. --- */
@@ -4800,6 +4893,12 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		   operator closes it or the camera is switched. Created fresh so
 		   it always holds the current client. */
 		auto *dlg = new ZcFaceRegDialog(client_, this);
+		/* Bug 13: the limits belong to the firmware. 1.0.5 registers and
+		   tracks 20; the 1.0.3 generation is the one that says 10 / 8. */
+		dlg->setDefaults(client_ && client_->firmwareAtLeast("1.0.5") ? 20
+									     : 10,
+				 client_ && client_->firmwareAtLeast("1.0.5") ? 20
+									     : 8);
 		dlg->setAttribute(Qt::WA_DeleteOnClose);
 		faceRegDlg_ = dlg;
 		connect(dlg, &QObject::destroyed, this,
@@ -5062,6 +5161,39 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		presetGroup_ = presetBox;
 	}
 
+	/* ---- Speed response: Sensitivity and Acceleration. The page keeps both
+	   in its live block, in the speedDiv under the lock switches, so they are
+	   on this page rather than on Settings (bug 67). A firmware without
+	   /ctrl/framing/speed answers {"code":-1} and the key is absent from
+	   all_status; the rows hide then, so nothing here takes a click it cannot
+	   honour. ---- */
+	{
+		auto *speedBox = new QGroupBox(
+		    ztr("ZCameraPlugin.Framing.GroupSpeed"), live);
+		auto *speedLay = new ZcFlowLayout(speedBox, 0, 8, 6);
+		sensitivityRow_ = makeRow(
+		    speedBox, ztr("ZCameraPlugin.Framing.Sensitivity"),
+		    sensitivitySp_ = new ZcSliderSpin(speedBox), 150);
+		speedLay->addWidget(sensitivityRow_);
+		sensitivitySp_->setRange(kFramingSpeedMin, kFramingSpeedMax, 10);
+		sensitivitySp_->onCommitted = [this](int v) {
+			if (painting_ || !client_)
+				return;
+			client_->setFramingSensitivity(v);
+		};
+		accelerationRow_ = makeRow(
+		    speedBox, ztr("ZCameraPlugin.Framing.Acceleration"),
+		    accelerationSp_ = new ZcSliderSpin(speedBox), 150);
+		speedLay->addWidget(accelerationRow_);
+		accelerationSp_->setRange(kFramingSpeedMin, kFramingSpeedMax, 10);
+		accelerationSp_->onCommitted = [this](int v) {
+			if (painting_ || !client_)
+				return;
+			client_->setFramingAcceleration(v);
+		};
+		liveLay->addWidget(speedBox);
+	}
+
 	{
 		auto *refreshRow = new QHBoxLayout;
 		auto *refreshBtn =
@@ -5122,48 +5254,6 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 			client_->setFramingTrackingRecord(index == 1);
 		};
 
-		/* Lock Zoom / Sensitivity / Acceleration belong to the page's own
-		   settings, not its live controls, so they sit here rather than in the
-		   live grid -- which is what keeps the Live tab's order the page's.
-		   A firmware without /ctrl/framing/{zoom_lock,speed} answers {"code":-1}
-		   and the key is absent from all_status; applyStatus() greys the row out
-		   then, so nothing here accepts a click it cannot honour. */
-		zoomLockSeg_ = offSegment(box);
-		zoomLockRow_ = setRow(box, ztr("ZCameraPlugin.Framing.ZoomLock"),
-				      zoomLockSeg_);
-		lay->addWidget(zoomLockRow_);
-		zoomLockSeg_->onActivated = [this](int index) {
-			if (painting_ || !client_)
-				return;
-			client_->setFramingZoomLock(index == 1);
-			/* Bug list #13: Lock Zoom greys the Size row. */
-			updateGating();
-		};
-
-		sensitivitySp_ = new ZcSliderSpin(box);
-		sensitivitySp_->setRange(kFramingSpeedMin, kFramingSpeedMax, 10);
-		sensitivityRow_ = setRow(
-			box, ztr("ZCameraPlugin.Framing.Sensitivity"),
-			sensitivitySp_);
-		lay->addWidget(sensitivityRow_);
-		sensitivitySp_->onCommitted = [this](int v) {
-			if (painting_ || !client_)
-				return;
-			client_->setFramingSensitivity(v);
-		};
-
-		accelerationSp_ = new ZcSliderSpin(box);
-		accelerationSp_->setRange(kFramingSpeedMin, kFramingSpeedMax, 10);
-		accelerationRow_ = setRow(
-			box, ztr("ZCameraPlugin.Framing.Acceleration"),
-			accelerationSp_);
-		lay->addWidget(accelerationRow_);
-		accelerationSp_->onCommitted = [this](int v) {
-			if (painting_ || !client_)
-				return;
-			client_->setFramingAcceleration(v);
-		};
-
 		setLay->addWidget(box);
 	}
 
@@ -5179,8 +5269,13 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		waitTimeSp_ = new ZcSliderSpin(box);
 		waitTimeSp_->setRange(0, 60);
 		waitTimeSp_->setSuffix(ztr("ZCameraPlugin.Framing.SecondsSuffix"));
-		lay->addWidget(setRow(box, ztr("ZCameraPlugin.Framing.WaitTime"),
-				      waitTimeSp_));
+		/* The page puts a "?" next to the box and opens the explanation on a
+		   click; a hover tooltip is not how it does it (bug 43). */
+		lay->addWidget(setRow(
+		    box, ztr("ZCameraPlugin.Framing.WaitTime"),
+		    zcWithHelp(box, waitTimeSp_,
+			       ztr("ZCameraPlugin.Framing.WaitTime"),
+			       ztr("ZCameraPlugin.Framing.WaitTimeTip"))));
 		waitTimeSp_->setToolTip(
 		    ztr("ZCameraPlugin.Framing.WaitTimeTip"));
 		waitTimeSp_->onCommitted = [this](int v) {
@@ -5193,9 +5288,11 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		detectRestartSp_->setRange(0, 600);
 		detectRestartSp_->setSuffix(
 		    ztr("ZCameraPlugin.Framing.SecondsSuffix"));
-		lay->addWidget(setRow(box,
-				      ztr("ZCameraPlugin.Framing.DetectRestart"),
-				      detectRestartSp_));
+		lay->addWidget(setRow(
+		    box, ztr("ZCameraPlugin.Framing.DetectRestart"),
+		    zcWithHelp(box, detectRestartSp_,
+			       ztr("ZCameraPlugin.Framing.DetectRestart"),
+			       ztr("ZCameraPlugin.Framing.DetectRestartTip"))));
 		detectRestartSp_->setToolTip(
 		    ztr("ZCameraPlugin.Framing.DetectRestartTip"));
 		detectRestartSp_->onCommitted = [this](int v) {
@@ -6446,22 +6543,24 @@ void ZcFramingPanel::updateGating()
 	   Bug list 31: the editor belongs to the detection-area switch, so with
 	   that switch off there is nothing to draw and the button greys on every
 	   firmware. */
-	if (maskEditBtn_) {
-		const bool maskOn = maskSeg_ && maskSeg_->currentIndex() == 1;
-		/* Read the camera's own last word on Auto Target when it has given
-		   one; the segment is only the fallback for a firmware whose status
-		   does not carry the key. Reading the segment first was the same
-		   latch as #30/#74/#182: the widget keeps whatever was last written
-		   into it, so a value changed elsewhere (the camera's own page) never
-		   reached this test (bug 88). */
-		const bool autoTargetOk =
-		    !fw15_ || (autoTargetKnown_ ? autoTargetOn_
-						: (autoTargetSeg_ &&
-						   autoTargetSeg_->currentIndex() ==
-						       1));
-		maskEditBtn_->setEnabled(haveSnapshot_ && detectOn_ && maskOn &&
-					 autoTargetOk);
-	}
+	/* Read the camera's own last word on Auto Target when it has given one; the
+	   segment is only the fallback for a firmware whose status does not carry
+	   the key. Reading the segment first was the same latch as #30/#74/#182:
+	   the widget keeps whatever was last written into it, so a value changed
+	   elsewhere (the camera's own page) never reached this test (bug 88). */
+	const bool autoTargetOk =
+	    !fw15_ || (autoTargetKnown_ ? autoTargetOn_
+					: (autoTargetSeg_ &&
+					   autoTargetSeg_->currentIndex() == 1));
+	/* Bug 31: on a >=1.0.5 firmware Auto Target gates the detection area
+	   itself — with it off there is no target area, so both the area switch
+	   and its editor grey out. A 1.0.3 camera has no Auto Target and keeps the
+	   switch live. */
+	if (maskSeg_ && fw15_)
+		maskSeg_->setEnabled(liveBase && autoTargetOk);
+	const bool maskOn = maskSeg_ && maskSeg_->currentIndex() == 1;
+	if (maskEditBtn_)
+		maskEditBtn_->setEnabled(liveBase && maskOn && autoTargetOk);
 
 	/* Bug list 15: the page only lets "View Angle Adjustment" be switched
 	   while Follow Me (the hand-gesture follow) is on — a gesture that
