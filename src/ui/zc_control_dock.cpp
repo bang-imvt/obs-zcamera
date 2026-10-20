@@ -6041,21 +6041,39 @@ void ZcFramingPanel::updateGating()
    foreign widget can be: by class name. A windowed projector's title is
    "<localized prefix> - <source name>" (window-projector.cpp
    UpdateProjectorTitle), so matching the *suffix* keeps working whatever
-   language OBS runs in — the prefix is the part that gets translated. */
+   language OBS runs in — the prefix is the part that gets translated.
+
+   The window this panel opens is also *tagged* with the name it was opened
+   for. The title alone is not a reliable handle: OBS retitles a projector
+   when its source is renamed, and two sources sharing a name get " (2)"
+   appended, which breaks the suffix match — and a broken match means the next
+   click opens ANOTHER projector (obs_frontend_open_projector never checks),
+   which is what "repeatedly adding windows" was (bug list #6). */
+static const char *kMonitorNameProp = "zcMonitorName";
+
+static QList<QWidget *> zcProjectorWindows()
+{
+	QList<QWidget *> out;
+	for (QWidget *w : zcAllWindows()) {
+		if (w && w->inherits("OBSProjector"))
+			out << w;
+	}
+	return out;
+}
+
 static QWidget *zcFindMonitorWindow(const QString &name)
 {
 	if (name.isEmpty())
 		return nullptr;
 
 	const QString suffix = QStringLiteral(" - ") + name;
-	const QList<QWidget *> tops = zcAllWindows();
 	QWidget *fullScreen = nullptr;
-	for (QWidget *w : tops) {
+	for (QWidget *w : zcProjectorWindows()) {
 		if (!w || !w->isVisible())
 			continue;
-		if (!w->inherits("OBSProjector"))
-			continue;
-		if (!w->windowTitle().endsWith(suffix))
+		const bool tagged =
+		    w->property(kMonitorNameProp).toString() == name;
+		if (!tagged && !w->windowTitle().endsWith(suffix))
 			continue;
 		/* The operator may also have promoted this source to a fullscreen
 		   projector from the window's own menu. Prefer the windowed one —
@@ -6212,14 +6230,27 @@ void ZcFramingPanel::openMonitorWindow()
 		return;
 	}
 
+	const QList<QWidget *> before = zcProjectorWindows();
 	obs_frontend_open_projector(isSource ? "Source" : "Scene", -1, nullptr,
 				    name.toUtf8().constData());
 
 	/* The projector constructs itself and calls show() inside its own
 	   constructor, so it is already in the widget tree by the time this
-	   returns — no need to wait for an event-loop turn. */
-	QWidget *created = zcFindMonitorWindow(name);
+	   returns — no need to wait for an event-loop turn. The window this call
+	   built is the one that was not there before it: identifying it that way
+	   beats matching the title, which OBS rewrites when the source is renamed
+	   and disambiguates when two sources share a name. */
+	QWidget *created = nullptr;
+	for (QWidget *w : zcProjectorWindows()) {
+		if (!before.contains(w)) {
+			created = w;
+			break;
+		}
+	}
+	if (!created)
+		created = zcFindMonitorWindow(name);
 	if (created) {
+		created->setProperty(kMonitorNameProp, name);
 		monitorWnd_ = created;
 		monitorWndName_ = name;
 		zcRaiseMonitorWindow(created);
