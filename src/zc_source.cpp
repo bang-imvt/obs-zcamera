@@ -1315,7 +1315,19 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 {
 	const auto mode = (zc::OverlayInteraction)overlayMode_.load(
 		std::memory_order_relaxed);
-	if (mode == zc::OverlayInteraction::None)
+	/* The rectangle, the click crosshair and the range frame are operator
+	   overlays, not detections: with the detection area switched on the
+	   rectangle has to stay on the picture whether or not the editor is armed
+	   (bug 28 — it used to be drawn only while an interaction mode was up, so
+	   the window looked empty and the editor had nothing to grab). Only the
+	   corner handles belong to the editor, and they still test `mode` below. */
+	bool anyOperatorOverlay = false;
+	{
+		std::lock_guard<std::mutex> lock(overlayMutex_);
+		anyOperatorOverlay = overlayMaskOn_ || overlayMarkerOn_ ||
+				     overlayTrackOn_;
+	}
+	if (mode == zc::OverlayInteraction::None && !anyOperatorOverlay)
 		return;
 
 	/* The editing aid never goes into the program: it is drawn into a preview

@@ -4163,20 +4163,59 @@ private:
 				   1/0 on others; a record that carries neither is
 				   taken as active, which is what the camera does
 				   with a stored face. */
-				const QJsonValue act =
-				    f.value(QLatin1String("activate"));
+				/* The flag is `activate` on the firmware whose page
+				   was read, but a differently-worded reply would have
+				   fallen through to "always active" — which is
+				   exactly what "the activate switch does nothing"
+				   looked like (bug 191). Accept the spellings. */
+				QJsonValue act = f.value(QLatin1String("activate"));
+				if (act.isUndefined())
+					act = f.value(QLatin1String("active"));
+				if (act.isUndefined())
+					act = f.value(QLatin1String("act"));
 				if (act.isBool())
 					actives_ << act.toBool();
 				else if (act.isDouble())
 					actives_ << (act.toInt() != 0);
+				else if (act.isString())
+					actives_ << (act.toString() !=
+						     QLatin1String("0"));
 				else
 					actives_ << true;
 				list_->addItem(names_.last());
 			}
-			info_->setText(ztr("ZCameraPlugin.Framing.FaceRegInfo")
-					   .arg(uids_.size())
-					   .arg(max_)
-					   .arg(maxActive_));
+			/* Bug 191: the camera is the truth. If the entry it just sent
+			   back is not what was written, say so instead of leaving the
+			   operator to wonder whether the switch worked. */
+			if (pendingUid_ >= 0) {
+				const int at = uids_.indexOf(pendingUid_);
+				const bool held =
+				    at >= 0 && names_.at(at) == pendingName_ &&
+				    priorities_.at(at) == pendingPriority_ &&
+				    actives_.at(at) == pendingActive_;
+				if (!held)
+					info_->setText(ztr(
+					    "ZCameraPlugin.Framing.FaceRegRejected"));
+				pendingUid_ = -1;
+			}
+			if (pendingUid_ < 0 &&
+			    info_->text().isEmpty())
+				info_->setText(
+				    ztr("ZCameraPlugin.Framing.FaceRegInfo")
+					.arg(uids_.size())
+					.arg(max_)
+					.arg(maxActive_));
+			/* Bug 190: a new entry gets the next free priority instead of
+			   repeating 1. Priority is what decides between two faces in
+			   frame, so two entries sharing one leaves that choice to the
+			   camera. */
+			if (list_->currentRow() < 0) {
+				int next = 1;
+				for (int p : priorities_)
+					next = qMax(next, p + 1);
+				priority_->setValue(
+				    qBound(1, next, priority_->maximum()));
+			}
 			/* Bug 192: opening the dialog must not land on the first entry
 			   with its name and priority filled in — that reads as "these are
 			   the values for the face I am about to add". Start unselected
@@ -4197,10 +4236,38 @@ public:
 		if (maxActive > 0)
 			maxActive_ = maxActive;
 		if (info_)
-			info_->setText(ztr("ZCameraPlugin.Framing.FaceRegInfo")
-					   .arg(uids_.size())
-					   .arg(max_)
-					   .arg(maxActive_));
+			/* Bug 191: the camera is the truth. If the entry it just sent
+			   back is not what was written, say so instead of leaving the
+			   operator to wonder whether the switch worked. */
+			if (pendingUid_ >= 0) {
+				const int at = uids_.indexOf(pendingUid_);
+				const bool held =
+				    at >= 0 && names_.at(at) == pendingName_ &&
+				    priorities_.at(at) == pendingPriority_ &&
+				    actives_.at(at) == pendingActive_;
+				if (!held)
+					info_->setText(ztr(
+					    "ZCameraPlugin.Framing.FaceRegRejected"));
+				pendingUid_ = -1;
+			}
+			if (pendingUid_ < 0 &&
+			    info_->text().isEmpty())
+				info_->setText(
+				    ztr("ZCameraPlugin.Framing.FaceRegInfo")
+					.arg(uids_.size())
+					.arg(max_)
+					.arg(maxActive_));
+			/* Bug 190: a new entry gets the next free priority instead of
+			   repeating 1. Priority is what decides between two faces in
+			   frame, so two entries sharing one leaves that choice to the
+			   camera. */
+			if (list_->currentRow() < 0) {
+				int next = 1;
+				for (int p : priorities_)
+					next = qMax(next, p + 1);
+				priority_->setValue(
+				    qBound(1, next, priority_->maximum()));
+			}
 	}
 
 	void fillFromRow(int row)
@@ -4281,6 +4348,13 @@ public:
 			    ztr("ZCameraPlugin.Framing.FaceRegNoSelection"));
 			return;
 		}
+		/* Remember what was asked for: the refresh that follows compares the
+		   camera's own values against it, so a refused update shows as a
+		   refusal instead of silently looking applied (bug 191). */
+		pendingUid_ = uids_.at(row);
+		pendingName_ = name_->text().trimmed();
+		pendingPriority_ = priority_->value();
+		pendingActive_ = active_->isChecked();
 		client_->framingFaceUpdate(uids_.at(row), name_->text().trimmed(),
 					   priority_->value(),
 					   active_->isChecked());
@@ -4303,6 +4377,11 @@ public:
 
 	ZcCameraClient *client_ = nullptr;
 	QLabel *info_ = nullptr;
+	/* The entry an applyEdit() asked for, -1 when nothing is pending. */
+	int pendingUid_ = -1;
+	QString pendingName_;
+	int pendingPriority_ = 0;
+	bool pendingActive_ = false;
 	QListWidget *list_ = nullptr;
 	QLineEdit *name_ = nullptr;
 	QSpinBox *priority_ = nullptr;
@@ -4767,6 +4846,13 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		   what the arrows write; they are just not restated here. */
 		pad_ = new ZcFramingPad(padBody);
 		padLay->addWidget(pad_);
+		/* The live numbers: Face Height and Size are what the arrows move and
+		   what the operator is aiming at, so they are restated under the tile
+		   and repaint with every nudge (bug 185). */
+		padReadout_ = new QLabel(padBody);
+		padReadout_->setWordWrap(true);
+		padReadout_->setStyleSheet("color:#8a9bb2;font-size:11px;");
+		padLay->addWidget(padReadout_);
 
 		QWidget *padField =
 		    addFieldBody(colPad, ztr("ZCameraPlugin.Framing.PositionPad"),
@@ -5830,6 +5916,14 @@ void ZcFramingPanel::paintPad()
 	if (pad_) {
 		pad_->setOffsets(placement_, faceHeight_);
 		pad_->setSubjectSize(subjectSizePct());
+	}
+	if (padReadout_) {
+		/* Bug 185: the value follows the arrows at once, from the same numbers
+		   the tile is drawn from, so the read-out and the picture can never
+		   disagree. */
+		padReadout_->setText(ztr("ZCameraPlugin.Framing.PadReadout")
+					 .arg(faceHeight_)
+					 .arg(subjectSizePct()));
 	}
 }
 
@@ -8428,6 +8522,14 @@ void ZcControlDock::openSourceInteraction()
 			    ztr("ZCameraPlugin.Dock.InteractNoSource").arg(host));
 		return;
 	}
+	/* One window per camera. The interaction window is the one that can be
+	   dragged in, so it replaces the monitor projector instead of opening
+	   beside it — OBS happily builds a second window and the operator ends up
+	   with two views of the same camera and no idea which one to drag in
+	   (bug 28 follow-up). Keys, position and the overlay all survive: the
+	   rectangle is source state, not window state. */
+	if (framing_)
+		framing_->dropMonitorForInteraction();
 	obs_frontend_open_source_interaction(lookup.found);
 	/* The window is built and shown inside that call, so it is already in the
 	   widget tree here — no need to wait for an event-loop turn to tag it. */
