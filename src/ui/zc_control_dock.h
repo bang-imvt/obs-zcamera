@@ -703,6 +703,8 @@ private:
 	QWidget *zoomLockRow_ = nullptr;
 	QWidget *sensitivityRow_ = nullptr;
 	QWidget *accelerationRow_ = nullptr;
+	/* Their group box, hidden when the firmware has neither row (bug 186). */
+	QWidget *speedGroup_ = nullptr;
 	QWidget *trackingRecordRow_ = nullptr;
 	/* The >=1.0.5 firmware's "Size" row (fov_size 0..100), shown only when
 	   all_status carries the key (bug list #10). */

@@ -2081,6 +2081,11 @@ public:
 	   the camera's read-back — used the moment the detection-area switch is
 	   turned off (bug list 28). */
 	void setMaskVisible(bool visible);
+	/* Whether a rectangle is known at all. */
+	bool hasMask() const { return hasMask_; }
+	/* Put a rectangle on the picture without writing it to the camera, for an
+	   editor that would otherwise open with nothing to grab (bug 29). */
+	void seedMask(float left, float top, float right, float bottom);
 	/* The camera's tracking-box ("range") frame, mirrored into the source so
 	   its overlay draws the region line the web preview shows (bug 17). */
 	void setTrackBox(bool enabled, float left, float top, float width,
@@ -2252,6 +2257,20 @@ void ZcOverlayLink::setMask(bool enabled, float left, float top, float right,
 	mt_ = top;
 	mr_ = right;
 	mb_ = bottom;
+	pushMask();
+}
+
+void ZcOverlayLink::seedMask(float left, float top, float right, float bottom)
+{
+	hasMask_ = true;
+	maskOn_ = true;
+	ml_ = left;
+	mt_ = top;
+	mr_ = right;
+	mb_ = bottom;
+	/* Local until the first drag writes it, so a read-back cannot take the
+	   seed away before the operator has touched anything. */
+	maskLocalOverride_ = true;
 	pushMask();
 }
 
@@ -4158,8 +4177,11 @@ private:
 					   .arg(uids_.size())
 					   .arg(max_)
 					   .arg(maxActive_));
-			if (!uids_.isEmpty())
-				list_->setCurrentRow(0);
+			/* Bug 192: opening the dialog must not land on the first entry
+			   with its name and priority filled in — that reads as "these are
+			   the values for the face I am about to add". Start unselected
+			   (the fields belong to an explicit selection or to a new
+			   capture). */
 		});
 	}
 
@@ -4881,7 +4903,15 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 			return;
 		link_->armMode(on ? zc::OverlayInteraction::MaskEdit
 				  : zc::OverlayInteraction::None);
-		if (on && link_->openInteract)
+		if (!on)
+			return;
+		/* Bug 29: the editor opened with nothing on the picture — no
+		   rectangle had ever been written, so there was nothing to grab and
+		   nothing to drag. Seed a centred box for the operator to work from;
+		   the first drag is what reaches the camera. */
+		if (!link_->hasMask())
+			link_->seedMask(0.2f, 0.2f, 0.8f, 0.8f);
+		if (link_->openInteract)
 			link_->openInteract();
 	});
 
@@ -5230,6 +5260,7 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 			client_->setFramingAcceleration(v);
 		};
 		liveLay->addWidget(speedBox);
+		speedGroup_ = speedBox;
 	}
 
 	{
@@ -5315,8 +5346,6 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		    zcWithHelp(box, waitTimeSp_,
 			       ztr("ZCameraPlugin.Framing.WaitTime"),
 			       ztr("ZCameraPlugin.Framing.WaitTimeTip"))));
-		waitTimeSp_->setToolTip(
-		    ztr("ZCameraPlugin.Framing.WaitTimeTip"));
 		waitTimeSp_->onCommitted = [this](int v) {
 			if (painting_ || !client_)
 				return;
@@ -5332,8 +5361,6 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		    zcWithHelp(box, detectRestartSp_,
 			       ztr("ZCameraPlugin.Framing.DetectRestart"),
 			       ztr("ZCameraPlugin.Framing.DetectRestartTip"))));
-		detectRestartSp_->setToolTip(
-		    ztr("ZCameraPlugin.Framing.DetectRestartTip"));
 		detectRestartSp_->onCommitted = [this](int v) {
 			if (painting_ || !client_)
 				return;
@@ -5352,10 +5379,6 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		wavingSeg_ = offSegment(box);
 		lay->addWidget(setRow(box, ztr("ZCameraPlugin.Framing.Waving"),
 				      wavingSeg_));
-		/* These two only make sense with the camera's hand gestures, so the
-		   settings page carries the same explanation the web UI shows
-		   (bug list "gesture settings lack help text"). */
-		wavingSeg_->setToolTip(ztr("ZCameraPlugin.Framing.WavingTip"));
 		wavingSeg_->onActivated = [this](int index) {
 			if (painting_ || !client_)
 				return;
@@ -5367,8 +5390,6 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		gestureFovSeg_ = offSegment(box);
 		lay->addWidget(setRow(box, ztr("ZCameraPlugin.Framing.GestureFov"),
 				      gestureFovSeg_));
-		gestureFovSeg_->setToolTip(
-		    ztr("ZCameraPlugin.Framing.GestureFovTip"));
 		gestureFovSeg_->onActivated = [this](int index) {
 			if (painting_ || !client_)
 				return;
@@ -6358,6 +6379,13 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 			zoomLockOn_ = false;
 		hideRow(sensitivityRow_, doc.contains("sensitivity"));
 		hideRow(accelerationRow_, doc.contains("acceleration"));
+		/* Bug 186: the group holds only those two rows, so a firmware without
+		   /ctrl/framing/speed would show an empty titled box. Hide the box
+		   with them. */
+		if (speedGroup_)
+			speedGroup_->setVisible(
+			    !(sensitivityRow_ && !sensitivityRow_->isVisible() &&
+			      accelerationRow_ && !accelerationRow_->isVisible()));
 		hideRow(trackingRecordRow_, doc.contains("tracking_record"));
 		/* Bug lists #10/#11: the >=1.0.5 firmware removes View Angle,
 		   Size and the Detected Indicator (its Size row replaces them;
@@ -6597,8 +6625,14 @@ void ZcFramingPanel::updateGating()
 		QSignalBlocker block(tiltLockSeg_);
 		tiltLockSeg_->setCurrentIndex(0);
 	}
+	/* Bugs 184/189: these live on the Live page and belong to the framing
+	   engine, so with detection off they grey with the rest of the block. */
 	if (zoomLockRow_ && zoomLockRow_->isVisible() && zoomLockSeg_)
-		zoomLockSeg_->setEnabled(!fixAngleOn);
+		zoomLockSeg_->setEnabled(liveBase && !fixAngleOn);
+	if (sensitivitySp_)
+		sensitivitySp_->setEnabled(liveBase);
+	if (accelerationSp_)
+		accelerationSp_->setEnabled(liveBase);
 	if (tiltLockSeg_)
 		tiltLockSeg_->setEnabled(haveSnapshot_ && detectOn_ &&
 					 !fixAngleOn);
@@ -6626,8 +6660,18 @@ void ZcFramingPanel::updateGating()
 	if (maskSeg_ && fw15_)
 		maskSeg_->setEnabled(liveBase && autoTargetOk);
 	const bool maskOn = maskSeg_ && maskSeg_->currentIndex() == 1;
-	if (maskEditBtn_)
+	if (maskEditBtn_) {
 		maskEditBtn_->setEnabled(liveBase && maskOn && autoTargetOk);
+		/* Bug 189: with the area switched off the editor cannot stay armed —
+		   it would keep painting handles on a rectangle that no longer
+		   exists. Drop the tick and the mode with the switch. */
+		if (!maskOn && maskEditBtn_->isChecked()) {
+			QSignalBlocker block(maskEditBtn_);
+			maskEditBtn_->setChecked(false);
+			if (link_)
+				link_->armMode(zc::OverlayInteraction::None);
+		}
+	}
 
 	/* Bug list 15: the page only lets "View Angle Adjustment" be switched
 	   while Follow Me (the hand-gesture follow) is on — a gesture that
@@ -6641,8 +6685,17 @@ void ZcFramingPanel::updateGating()
 	/* Bug lists 11/12: registering a face writes the camera's face store,
 	   which the camera only accepts while detection runs, and not while it
 	   is tracking. The page greys the button in both cases. */
-	if (faceRegBtn_)
-		faceRegBtn_->setEnabled(haveSnapshot_ && detectOn_ && !traceOn_);
+	/* Bug 193: on the 1.0.3 generation the camera only registers faces while it
+	   has a target and the detected indicator is on; the page greys the button
+	   otherwise. The >=1.0.5 generation keeps its own rule (detection on, not
+	   tracking). */
+	if (faceRegBtn_) {
+		const bool indicatorOn =
+		    indicatorSeg_ && indicatorSeg_->currentIndex() == 1;
+		faceRegBtn_->setEnabled(haveSnapshot_ && detectOn_ && !traceOn_ &&
+					autoTargetOk &&
+					(fw15_ || indicatorOn));
+	}
 
 	/* Whether framing currently drives the head, which is what the PTZ tab's
 	   trace face has to know: the camera answers every trace command with

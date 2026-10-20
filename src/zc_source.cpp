@@ -223,6 +223,11 @@ public:
 	/* The camera address this source targets, as a Qt string. Read-only: the
 	   dock's Properties path uses it to select the same camera (bug 27). */
 	QString ip() const { return QString::fromStdString(ip_); }
+	/* The obs_source_t this object is the private data of. Needed by the
+	   Properties callback, which is handed THIS object, not the source: reading
+	   the settings object means going through the handle (bugs 183/196 — those
+	   calls used to cast this pointer to obs_source_t and crashed). */
+	obs_source_t *handle() const { return source_; }
 
 private:
 	/* Pipeline lifecycle. */
@@ -2572,10 +2577,12 @@ static obs_properties_t *zc_source_getproperties(void *data)
 	   empty until another source was clicked (bugs 149/169). */
 	QString host;
 	if (s) {
-		/* `data` is the source itself; the settings object is the only place
-		   the address survives while the pipeline is stopped. */
-		obs_data_t *saved = obs_source_get_settings(
-		    static_cast<obs_source_t *>(data));
+		/* `data` is this plugin's ZcSspSource object (what create() returned),
+		   NOT an obs_source_t: the handle has to be taken from it before the
+		   settings object can be read. Casting the object to obs_source_t
+		   crashed on every double-click of a source (bugs 183/196). */
+		obs_data_t *saved = s->handle() ? obs_source_get_settings(s->handle())
+						: nullptr;
 		if (saved) {
 			host = QString::fromUtf8(
 			    obs_data_get_string(saved, PROP_SOURCE_IP));
