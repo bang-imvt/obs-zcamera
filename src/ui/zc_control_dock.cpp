@@ -3806,6 +3806,17 @@ public:
 		priority_->setRange(1, 99);
 		priority_->setValue(1);
 		form->addWidget(priority_, 1, 1);
+		/* Bug list #8: the page's entry form carries the "activate" flag
+		   (it is the `activate=` parameter of add/update), and this dialog
+		   had no way to set it — every edit silently re-activated the face.
+		   Filled from the camera's own per-face record, sent back on both
+		   capture-and-add and apply. */
+		active_ = new QCheckBox(
+		    ztr("ZCameraPlugin.Framing.FaceRegActive"), this);
+		active_->setChecked(true);
+		active_->setToolTip(
+		    ztr("ZCameraPlugin.Framing.FaceRegActiveTip"));
+		form->addWidget(active_, 2, 0, 1, 2);
 		lay->addLayout(form);
 
 		auto *row = new QHBoxLayout;
@@ -3847,6 +3858,7 @@ private:
 		list_->setEnabled(on);
 		name_->setEnabled(on);
 		priority_->setEnabled(on);
+		active_->setEnabled(on);
 		capture_->setEnabled(on);
 		apply_->setEnabled(on);
 		del_->setEnabled(on);
@@ -3876,6 +3888,7 @@ private:
 			uids_.clear();
 			names_.clear();
 			priorities_.clear();
+			actives_.clear();
 			const QJsonArray faces =
 			    doc.value(QLatin1String("faces")).toArray();
 			list_->clear();
@@ -3886,6 +3899,18 @@ private:
 					      .toString();
 				priorities_ << f.value(QLatin1String("priority"))
 						   .toInt();
+				/* The flag arrives as a bool on some builds and as
+				   1/0 on others; a record that carries neither is
+				   taken as active, which is what the camera does
+				   with a stored face. */
+				const QJsonValue act =
+				    f.value(QLatin1String("activate"));
+				if (act.isBool())
+					actives_ << act.toBool();
+				else if (act.isDouble())
+					actives_ << (act.toInt() != 0);
+				else
+					actives_ << true;
 				list_->addItem(names_.last());
 			}
 			info_->setText(ztr("ZCameraPlugin.Framing.FaceRegInfo")
@@ -3903,6 +3928,8 @@ private:
 			return;
 		name_->setText(names_.at(row));
 		priority_->setValue(qMax(1, priorities_.at(row)));
+		active_->setChecked(row < actives_.size() ? actives_.at(row)
+							  : true);
 	}
 
 	void captureAndAdd()
@@ -3916,10 +3943,20 @@ private:
 			return;
 		}
 		const int priority = priority_->value();
+		/* The first slot the list does not already hold; the camera
+		   captures INTO a slot, so add() and prepare() have to agree on
+		   one (bug list #3: without a slot the camera said "face not
+		   found" for every capture). All slots taken falls back to 0 —
+		   the camera rejects the store itself if it is really full. */
+		int slot = 0;
+		while (slot < max_ && uids_.contains(slot))
+			++slot;
+		if (slot >= max_)
+			slot = 0;
 		info_->setText(ztr("ZCameraPlugin.Framing.FaceRegCapturing"));
 		QPointer<QObject> alive(alive_);
-		client_->framingFacePrepare([this, alive, name, priority](
-						    const QJsonObject &doc) {
+		client_->framingFacePrepare(slot, [this, alive, name, priority](
+							const QJsonObject &doc) {
 			if (!alive)
 				return;
 			const int status =
@@ -3944,7 +3981,7 @@ private:
 				   the reply is the camera's own preview and is
 				   not needed again by `add`. */
 				client_->framingFaceAdd(uid, name, priority,
-							/*activate=*/true);
+							active_->isChecked());
 				/* The store is asynchronous; give the camera a
 				   beat before reading the list back. */
 				QTimer::singleShot(400, this,
@@ -3964,7 +4001,8 @@ private:
 			return;
 		}
 		client_->framingFaceUpdate(uids_.at(row), name_->text().trimmed(),
-					   priority_->value());
+					   priority_->value(),
+					   active_->isChecked());
 		QTimer::singleShot(400, this, [this]() { refresh(); });
 	}
 
@@ -3987,6 +4025,7 @@ private:
 	QListWidget *list_ = nullptr;
 	QLineEdit *name_ = nullptr;
 	QSpinBox *priority_ = nullptr;
+	QCheckBox *active_ = nullptr;
 	QPushButton *capture_ = nullptr;
 	QPushButton *apply_ = nullptr;
 	QPushButton *del_ = nullptr;
@@ -4003,6 +4042,8 @@ private:
 	QVector<int> uids_;
 	QStringList names_;
 	QVector<int> priorities_;
+	/* Per-face `activate` flag, in the same order as uids_. */
+	QVector<bool> actives_;
 	int max_ = 10;
 	int maxActive_ = 8;
 	bool supported_ = true;

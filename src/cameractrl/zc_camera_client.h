@@ -171,10 +171,16 @@ public:
 	void framingMaskQuery(std::function<void(const QJsonObject &)> cb);
 
 	/* Registered-face database (bug list: face registration was missing).
-	   The family is /ctrl/facedb/*, NOT the older /ctrl/face (which this
-	   firmware answers "Face detection is not supported" for). The exact
-	   request shapes below are taken from the camera's own web client
-	   (controller.min.js, the static `facedb` object):
+	   The family is facedb/*, NOT the older /ctrl/face (which the 1.0.3
+	   firmware answers "Face detection is not supported" for).
+
+	   The prefix moved between generations: 1.0.3 and older serve it under
+	   /ctrl/facedb/*, while 1.0.5 dropped the /ctrl (bug list: "1.0.5 版本人脸
+	   注册界面的所有接口都需要去 ctrl，以 /facedb/ 开头"). faceDbBase() picks
+	   by firmware and the first /query flips it once if that guess is wrong,
+	   so one client can talk to either generation. The exact request shapes
+	   below are taken from the camera's own web client (controller.min.js,
+	   the static `facedb` object):
 	     query   -> GET /ctrl/facedb/query
 	                {status, max, max_active, next_priority,
 	                 faces:[{uid,name,priority,...}]}
@@ -194,7 +200,12 @@ public:
 	/* Turn the face database on/off. The camera's page does this before it
 	   captures; harmless where the firmware ignores it. */
 	void setFramingFaceEnable(bool enabled); /* /facedb/set?enable= */
-	void framingFacePrepare(std::function<void(const QJsonObject &)> cb);
+	/* Capture a face from the live view into slot `faceId` (0 .. max-1). The
+	   slot is not optional: the page always sends it as `face_id`, and
+	   without it the camera answers "face not found" no matter who is in
+	   frame (bug list #3, "capture and add never captures"). */
+	void framingFacePrepare(int faceId,
+				std::function<void(const QJsonObject &)> cb);
 	/* `which` is the uid a successful prepare returned. */
 	void framingFaceAdd(int which, const QString &name, int priority,
 			    bool activate = true);
@@ -418,6 +429,12 @@ private:
 
 	void setRecording(bool rec);
 
+	/* The face-database request prefix for this camera: /ctrl/facedb before
+	   1.0.5, /facedb from 1.0.5 on. Decided from /info when it is known, then
+	   by the first /query (which retries the other prefix once and remembers
+	   the answer). */
+	QString faceDbBase();
+
 	ZcHttpTransport transport_;
 	ZcWsNotifier notifier_;
 	ZcSettingsEngine settings_;
@@ -434,6 +451,12 @@ private:
 	QString firmwareVersion_;
 	bool supportsPtz_ = false;
 	bool supportsAutoFraming_ = false;
+	/* Empty until the first face-database reply: see faceDbBase(). */
+	QString faceDbBase_;
+	/* Set once that reply has decided the prefix, so the probe never runs
+	   twice (a camera without a face database would otherwise be asked twice
+	   on every refresh). */
+	bool faceDbProbed_ = false;
 
 	/* Cached values for HUD display. */
 	QJsonObject hudValues_;

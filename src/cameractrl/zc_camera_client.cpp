@@ -552,26 +552,55 @@ void ZcCameraClient::framingMaskQuery(std::function<void(const QJsonObject &)> c
 			    jsonObjectCb(cb), 20000);
 }
 
-/* The face database lives on its own prefix, /ctrl/facedb/<sub>, which is
-   what the camera's own registration client drives (the static `facedb`
-   object in controller.min.js). `prepare` captures a face from the live view
+/* The face database lives on a prefix of its own, which moved between
+   generations: 1.0.3 and older answer /ctrl/facedb/<sub> (what the camera's
+   own registration client drives — the static `facedb` object in
+   controller.min.js), while 1.0.5 dropped the /ctrl and answers
+   /facedb/<sub> (bug list: "1.0.5 版本人脸注册界面的所有接口都需要去 ctrl").
+   Picking the wrong one looks exactly like "this camera has no face
+   database", which is why the first /query retries the other prefix once and
+   remembers which one answered. `prepare` captures a face from the live view
    and hands back a uid + thumbnail; `add` then stores it under the operator's
    name. The camera rejects `add` with "prepare not ready" until a prepare has
    succeeded, so the two calls are always a pair. */
-namespace {
-constexpr const char *kFaceDb = "/ctrl/facedb";
+QString ZcCameraClient::faceDbBase()
+{
+	if (!faceDbBase_.isEmpty())
+		return faceDbBase_;
+	/* Unknown /info keeps the older prefix; the probe corrects it. */
+	return firmwareAtLeast("1.0.5") ? QStringLiteral("/facedb")
+					: QStringLiteral("/ctrl/facedb");
 }
 
 void ZcCameraClient::framingFaceQuery(std::function<void(const QJsonObject &)> cb)
 {
-	transport_.getQuery(QString(kFaceDb) + "/query", QUrlQuery(),
-			    jsonObjectCb(cb), 20000);
+	const QString base = faceDbBase();
+	transport_.getQuery(
+	    base + QStringLiteral("/query"), QUrlQuery(),
+	    jsonObjectCb([this, cb, base](const QJsonObject &doc) {
+		    const bool refused =
+			doc.contains(QLatin1String("code")) &&
+			doc.value(QLatin1String("code")).toInt() < 0;
+		    if (refused && !faceDbProbed_ && base == faceDbBase()) {
+			    /* A refusal on the guessed prefix: ask the other
+			       generation's one before reporting "not supported". */
+			    faceDbBase_ = base == QLatin1String("/facedb")
+					      ? QStringLiteral("/ctrl/facedb")
+					      : QStringLiteral("/facedb");
+			    faceDbProbed_ = true;
+			    framingFaceQuery(cb);
+			    return;
+		    }
+		    faceDbProbed_ = true;
+		    cb(doc);
+	    }),
+	    20000);
 }
 
 void ZcCameraClient::framingFaceStatus(std::function<void(const QJsonObject &)> cb)
 {
-	transport_.getQuery(QString(kFaceDb) + "/status", QUrlQuery(),
-			    jsonObjectCb(cb), 20000);
+	transport_.getQuery(faceDbBase() + QStringLiteral("/status"),
+			    QUrlQuery(), jsonObjectCb(cb), 20000);
 }
 
 void ZcCameraClient::setFramingFaceEnable(bool enabled)
@@ -581,16 +610,22 @@ void ZcCameraClient::setFramingFaceEnable(bool enabled)
 	   live state, but sending it keeps parity with the page. */
 	QUrlQuery q;
 	q.addQueryItem("enable", enabled ? "1" : "0");
-	sendQuery(transport_, kFaceDb, "/set", q);
+	transport_.getQuery(faceDbBase() + QStringLiteral("/set"), q, nullptr,
+			    20000);
 }
 
-void ZcCameraClient::framingFacePrepare(std::function<void(const QJsonObject &)> cb)
+void ZcCameraClient::framingFacePrepare(
+    int faceId, std::function<void(const QJsonObject &)> cb)
 {
 	/* Capturing takes a moment and fails while nobody is in frame, so it gets
-	   the longer timeout and its own reply. face_id (the target slot) is left
-	   to the camera's default: it answers the same "face not found" either
-	   way, and the uid it returns is what add() needs. */
-	transport_.getQuery(QString(kFaceDb) + "/prepare", QUrlQuery(),
+	   the longer timeout and its own reply. `face_id` is the target slot and
+	   is NOT optional — the page always sends it, and with the parameter
+	   missing the camera answers "face not found" whatever the picture holds
+	   (bug list #3). The uid the reply carries is what add() needs, and it is
+	   this same slot. */
+	QUrlQuery q;
+	q.addQueryItem(QStringLiteral("face_id"), QString::number(faceId));
+	transport_.getQuery(faceDbBase() + QStringLiteral("/prepare"), q,
 			    jsonObjectCb(cb), 20000);
 }
 
@@ -602,7 +637,8 @@ void ZcCameraClient::framingFaceAdd(int which, const QString &name, int priority
 	q.addQueryItem("name", name);
 	q.addQueryItem("priority", QString::number(priority));
 	q.addQueryItem("activate", activate ? "1" : "0");
-	sendQuery(transport_, kFaceDb, "/add", q);
+	transport_.getQuery(faceDbBase() + QStringLiteral("/add"), q, nullptr,
+			    20000);
 }
 
 void ZcCameraClient::framingFaceUpdate(int uid, const QString &name, int priority,
@@ -613,14 +649,16 @@ void ZcCameraClient::framingFaceUpdate(int uid, const QString &name, int priorit
 	q.addQueryItem("name", name);
 	q.addQueryItem("priority", QString::number(priority));
 	q.addQueryItem("activate", activate ? "1" : "0");
-	sendQuery(transport_, kFaceDb, "/update", q);
+	transport_.getQuery(faceDbBase() + QStringLiteral("/update"), q, nullptr,
+			    20000);
 }
 
 void ZcCameraClient::framingFaceDelete(int uid)
 {
 	QUrlQuery q;
 	q.addQueryItem("uid", QString::number(uid));
-	sendQuery(transport_, kFaceDb, "/delete", q);
+	transport_.getQuery(faceDbBase() + QStringLiteral("/delete"), q, nullptr,
+			    20000);
 }
 
 void ZcCameraClient::setFramingWaitTime(int seconds)
