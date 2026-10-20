@@ -460,10 +460,15 @@ private:
 	/* The left-button drag in progress, if any: press records the anchor,
 	   move follows, release ends it. */
 	bool overlayDragging_ = false;
+	/* Rate limit for the "nothing to draw" line above. */
+	uint64_t overlayDiagNextNs_ = 0;
 	float overlayDragAnchorX_ = 0.0f, overlayDragAnchorY_ = 0.0f;
 	/* 1x1 solid texture the rectangle and crosshair are stretched from, in
 	   the interaction colour (the box texture is red). Graphics thread only. */
 	gs_texture_t *overlaySolid_ = nullptr;
+	/* 1x1 50% black, for the band the editor dims everything outside the
+	   rectangle with (the page does the same). Graphics thread only. */
+	gs_texture_t *overlayDim_ = nullptr;
 	/* Same for the tracking-box frame, in amber. Graphics thread only. */
 	gs_texture_t *trackSolid_ = nullptr;
 	/* The camera address the source is registered under, so a re-registration
@@ -548,6 +553,10 @@ ZcSspSource::~ZcSspSource()
 	if (overlaySolid_) {
 		gs_texture_destroy(overlaySolid_);
 		overlaySolid_ = nullptr;
+	}
+	if (overlayDim_) {
+		gs_texture_destroy(overlayDim_);
+		overlayDim_ = nullptr;
 	}
 	if (trackSolid_) {
 		gs_texture_destroy(trackSolid_);
@@ -1327,8 +1336,20 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 		anyOperatorOverlay = overlayMaskOn_ || overlayMarkerOn_ ||
 				     overlayTrackOn_;
 	}
-	if (mode == zc::OverlayInteraction::None && !anyOperatorOverlay)
+	if (mode == zc::OverlayInteraction::None && !anyOperatorOverlay) {
+		/* One line every five seconds: a "the frame is not there" report can
+		   then be answered from the log, because this says the source had
+		   nothing to draw — a state problem, not a drawing one. */
+		const uint64_t now = os_gettime_ns();
+		if (now >= overlayDiagNextNs_) {
+			overlayDiagNextNs_ = now + 5000000000ULL;
+			blog(LOG_INFO,
+			     "[obs-zcamera] overlay: no rectangle, marker or box is "
+			     "set on this source (mode %d), nothing drawn",
+			     (int)mode);
+		}
 		return;
+	}
 
 	/* The editing aid never goes into the program: it is drawn into a preview
 	   pass or not at all. Unlike the boxes it has no in-program mode -- it is
@@ -1357,6 +1378,11 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 		overlaySolid_ = gs_texture_create(1, 1, GS_RGBA, 1, &data, 0);
 		if (!overlaySolid_)
 			return;
+		/* The editor's dimming band (the page's 50% black outside the
+		   rectangle). */
+		uint8_t dim[4] = {0, 0, 0, 128};
+		const uint8_t *dimData = dim;
+		overlayDim_ = gs_texture_create(1, 1, GS_RGBA, 1, &dimData, 0);
 	}
 
 	uint32_t thick_px = (fw < fh ? fw : fh) / 360;
@@ -1415,6 +1441,19 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 	if (maskOn && mr > ml && mb > mt) {
 		const float x = ml * (float)fw, y = mt * (float)fh;
 		const float w = (mr - ml) * (float)fw, h = (mb - mt) * (float)fh;
+		/* Editing dims everything outside the rectangle, exactly as the page
+		   does (`_framingDrawMaskArea` fills the canvas with 50% black and
+		   clears the rectangle): the area that will be watched is the bright
+		   part, and there is no mistaking which rectangle is being dragged.
+		   Four bands, because the solid draw here has no "clear" op. */
+		if (mode == zc::OverlayInteraction::MaskEdit) {
+			gs_effect_set_texture(img, overlayDim_);
+			fill(0.0f, 0.0f, (float)fw, y);
+			fill(0.0f, y + h, (float)fw, (float)fh - y - h);
+			fill(0.0f, y, x, h);
+			fill(x + w, y, (float)fw - x - w, h);
+			gs_effect_set_texture(img, overlaySolid_);
+		}
 		fill(x, y, w, thick);
 		fill(x, y + h - thick, w, thick);
 		fill(x, y, thick, h);

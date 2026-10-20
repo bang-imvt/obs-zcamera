@@ -4966,8 +4966,15 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		   overlay at "hidden" for good: setMaskVisible() pins a local
 		   override that only a *different* rectangle from the camera could
 		   clear, and switching back on never touched it. */
-		if (link_)
+		if (link_) {
 			link_->setMaskVisible(index == 1);
+			/* The rectangle the camera holds is what has to appear; read it
+			   back after the write so a camera-side default (not the seed)
+			   is what the operator sees. */
+			QTimer::singleShot(300, this, [this]() {
+				refreshMaskRect();
+			});
+		}
 		/* The "edit" button belongs to this switch (bug list 31). */
 		updateGating();
 	};
@@ -5737,6 +5744,8 @@ void ZcFramingPanel::setMaskFromCamera(bool enabled, float l, float t, float r,
 
 void ZcFramingPanel::setClient(ZcCameraClient *client)
 {
+	/* A different camera: its rectangle has to be read again. */
+	maskRectRead_ = false;
 	client_ = client;
 	/* Firmware generation first: /info may already be cached from the
 	   previous connect, and the rows it decides must not flash the wrong
@@ -5856,6 +5865,12 @@ void ZcFramingPanel::refresh()
 		updateStatusLabel();
 	});
 	refreshFovOffsets();
+	/* Once per camera is enough: the camera is the only other writer, and the
+	   switch's own handler re-reads after it writes. */
+	if (!maskRectRead_) {
+		maskRectRead_ = true;
+		refreshMaskRect();
+	}
 	refreshPresets();
 	if (!fovConfigProbed_)
 		refreshFovPresets();
@@ -6109,6 +6124,28 @@ void ZcFramingPanel::showGestureHelp()
 	connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
 	outer->addWidget(buttons);
 	dlg.exec();
+}
+
+void ZcFramingPanel::refreshMaskRect()
+{
+	if (!client_ || !client_->isConnected() || !link_)
+		return;
+	client_->framingMaskQuery([this](const QJsonObject &doc) {
+		if (!client_ || !link_)
+			return;
+		if (doc.contains(QLatin1String("code")) &&
+		    doc.value(QLatin1String("code")).toInt() < 0)
+			return;
+		const auto num = [&doc](const char *key, float fallback) {
+			const QJsonValue v = doc.value(QLatin1String(key));
+			return v.isDouble() ? (float)v.toDouble() : fallback;
+		};
+		/* `enable` comes back as a bool on some builds and as 1/0 on others. */
+		const QJsonValue en = doc.value(QLatin1String("enable"));
+		const bool on = en.isBool() ? en.toBool() : en.toInt() != 0;
+		link_->setMask(on, num("left", 0.0f), num("top", 0.0f),
+			       num("right", 1.0f), num("bottom", 1.0f));
+	});
 }
 
 void ZcFramingPanel::refreshPresets()

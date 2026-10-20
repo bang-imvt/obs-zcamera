@@ -529,6 +529,12 @@ public slots:
 	void applyStatus(const QJsonObject &doc);
 
 private:
+	/* Read the detection-area rectangle from /ctrl/framing/mask_area and hand
+	   it to the source. all_status does not carry mask_left/... on every
+	   firmware, and nothing else ever pushed a rectangle — so the overlay had
+	   nothing to draw and the monitor window showed the picture with no frame
+	   on it at all (bug 28). */
+	void refreshMaskRect();
 	/* Re-read /ctrl/framing/preset and rebuild the tile list. */
 	void refreshPresets();
 	void rebuildPresets(const QJsonObject &doc);
@@ -727,6 +733,8 @@ private:
 	bool fw15_ = false;
 	/* The camera's recording flag, for the tracking-record row (bug 93). */
 	bool recording_ = false;
+	/* The detection-area rectangle has been read once for this camera. */
+	bool maskRectRead_ = false;
 	/* View Angle == Keep (fov_type == 3): the camera keeps its current
 	   framing, so the Size stepper has nothing to size — the page greys it
 	   (bug list #25). */
