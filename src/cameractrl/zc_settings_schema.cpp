@@ -131,6 +131,147 @@ bool cameraSupportsAutoFraming(const QJsonObject &info)
 	return feature.value("autoFraming").toBool(false);
 }
 
+/* One feature flag, whatever shape the firmware wrote it in. */
+bool featureFlag(const QJsonObject &feature, const char *name)
+{
+	const QJsonValue v = feature.value(QLatin1String(name));
+	if (v.isBool())
+		return v.toBool();
+	if (v.isDouble())
+		return v.toDouble() != 0.0;
+	if (v.isString()) {
+		const QString s = v.toString().trimmed().toLower();
+		return s == QLatin1String("1") || s == QLatin1String("true") ||
+		       s == QLatin1String("on") || s == QLatin1String("yes");
+	}
+	return false;
+}
+
+ZcFeatures::ZcFeatures(const QJsonObject &info)
+{
+	map_ = info.value(QLatin1String("feature")).toObject();
+	declared_ = !map_.isEmpty();
+}
+
+bool ZcFeatures::has(const char *name) const
+{
+	/* No map at all: the body never told us, so nothing is withdrawn. */
+	if (!declared_)
+		return true;
+	return featureFlag(map_, name);
+}
+
+/* Catalog -> the one option the group is useless without. */
+namespace {
+struct CatalogGate {
+	const char *id;
+	const char *flag;
+};
+
+const CatalogGate kCatalogGates[] = {
+	/* Pan/tilt configuration. The PTZ *pane* (presets, traces) is gated by
+	   the same capability in the dock. */
+	{"ptz", "lens_ctrl_ptz"},
+};
+
+/* Setting row -> the option behind it. Each entry mirrors the camera page's
+   own visibility rule, quoted above it. `hiddenWhenOn` covers the negative
+   capabilities: `noFocus` means the body has no focus motor, so it hides the
+   focus family instead of revealing it. A key may appear more than once; it
+   is shown only when every gate passes. */
+struct SettingGate {
+	const char *key;
+	const char *flag;
+	bool hiddenWhenOn;
+};
+
+const SettingGate kSettingGates[] = {
+	/* $("#bl_comp_info").show() */
+	{"bl_comp", "blComp", false},
+	/* $("#pre_roll").show() */
+	{"preroll", "preRoll", false},
+	/* $("#exp_iso_ctrl").show() */
+	{"iso_ctrl", "expIsoControl", false},
+	/* $("#settings-wifi").show() — a P2-R1-18x reports wifiSupport:false */
+	{"wifi", "wifiSupport", false},
+	/* $('#visca').show() */
+	{"visca_enable", "viscaSupport", false},
+	/* $('#zoom_mode_support').show(): the optical/digital zoom switch exists
+	   only on a body with digital zoom. */
+	{"zoom_mode", "dzoomDigital", false},
+	/* $('#audio_phantom_pow').show() */
+	{"audio_phantom_power", "audioCodecXLR", false},
+	/* $('#audio_line_in').show() */
+	{"ain_gain_type", "aLineIn", false},
+	{"audio_input_level", "aLineIn", false},
+	{"audio_input_gain", "aLineIn", false},
+	{"audio_in_l_gain", "aLineIn", false},
+	{"audio_in_r_gain", "aLineIn", false},
+	/* $('#eis').show() */
+	{"eis_on_off", "eisSupport", false},
+	/* $("#genlock_ctrl").show() */
+	{"genlock", "genlockSupport", false},
+	/* $('#adjust_with_ptz').show(), inside the lens_ctrl_ptz branch */
+	{"af_adjust_with_ptz", "lens_ctrl_ptz", false},
+	/* `mfOnly`: the body takes manual-focus lenses only, so the whole
+	   autofocus family is meaningless there (the Avatar reports it; its lens
+	   tab then has focus position but no AF rows). Manual focus itself stays.
+	   The MF-assist rows go with them: the bodies that report this flag are the
+	   cinema ones, whose firmware has no "MF assist while standby / while
+	   recording" setting at all (bug 115 — the plugin offered rows the body
+	   cannot set). */
+	{"af_mode", "mfOnly", false},
+	{"caf", "mfOnly", false},
+	{"caf_sens", "mfOnly", false},
+	{"af_area", "mfOnly", false},
+	{"live_caf", "mfOnly", false},
+	{"af_speed", "mfOnly", false},
+	{"mf_mag", "mfOnly", false},
+	{"mf_recording", "mfOnly", false},
+	/* The focus family rides the negative `noFocus` flag: a body without a
+	   focus motor reports it, and every focus row is meaningless there
+	   (bug 115 — MF-assist rows offered on a body that has no such setting). */
+	{"focus", "noFocus", true},
+	{"af_mode", "noFocus", true},
+	{"caf", "noFocus", true},
+	{"caf_sens", "noFocus", true},
+	{"af_area", "noFocus", true},
+	{"live_caf", "noFocus", true},
+	{"af_speed", "noFocus", true},
+	{"mf_mag", "noFocus", true},
+	{"mf_recording", "noFocus", true},
+	{"af_adjust_with_ptz", "noFocus", true},
+	{"lens_focus_pos", "noFocus", true},
+};
+} // namespace
+
+bool catalogSupportedByFeatures(const QString &catalogId, const ZcFeatures &f)
+{
+	for (const CatalogGate &gate : kCatalogGates) {
+		if (catalogId == QLatin1String(gate.id))
+			return f.has(gate.flag);
+	}
+	return true;
+}
+
+bool settingSupportedByFeatures(const QString &key, const ZcFeatures &f)
+{
+	for (const SettingGate &gate : kSettingGates) {
+		if (key != QLatin1String(gate.key))
+			continue;
+		const bool on = f.has(gate.flag);
+		if (gate.hiddenWhenOn ? on : !on)
+			return false;
+	}
+	return true;
+}
+
+bool cameraHasStreamEncoder(const ZcFeatures &f)
+{
+	return f.has("rtsp") || f.has("rtmp") || f.has("srt") ||
+	       f.has("webrtcStream");
+}
+
 QUrlQuery presetQuery(const QString &action, int index,
 		      const QList<QPair<QString, QString>> &extra)
 {

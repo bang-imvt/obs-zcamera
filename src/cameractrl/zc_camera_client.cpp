@@ -1013,6 +1013,12 @@ void ZcCameraClient::framingStatusQuery(std::function<void(const QJsonObject &)>
 			    jsonObjectCb(cb), 20000);
 }
 
+void ZcCameraClient::framingConfigQuery(std::function<void(const QJsonObject &)> cb)
+{
+	transport_.getQuery(QString(http::kFraming) + "/config", QUrlQuery(),
+			    jsonObjectCb(cb), 20000);
+}
+
 void ZcCameraClient::ptzPresetSet(int index)
 {
 	sendQuery(transport_, http::kPreset, "", presetQuery("set", index));
@@ -1329,6 +1335,8 @@ void ZcCameraClient::refreshCameraInfo()
 		/* Qualified: the class has a same-named accessor. */
 		supportsPtz_ = zc::cameraSupportsPtz(info);
 		supportsAutoFraming_ = zc::cameraSupportsAutoFraming(info);
+		/* The whole feature map, for the row/catalog gates. */
+		features_ = zc::ZcFeatures(info);
 		emit cameraInfoChanged();
 	});
 }

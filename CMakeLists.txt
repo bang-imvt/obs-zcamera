@@ -143,7 +143,10 @@ if(ENABLE_CAMERA_CONTROL AND ENABLE_QT AND ENABLE_FRONTEND_API)
        src/cameractrl/zc_camera_client.cpp
        src/cameractrl/zc_settings_schema.cpp
        src/ui/zc_control_dock.cpp
-       src/ui/zc_debug_panel.cpp)
+       src/ui/zc_debug_panel.cpp
+       # Framing artwork lifted from the camera's own page, compiled in so no
+       # install/deploy rule has to learn about it (AUTORCC is on).
+       src/ui/zc_resources.qrc)
   list(APPEND obs-zcamera_HEADERS
        src/cameractrl/zc_tls_socket.h
        src/cameractrl/zc_http_transport.h

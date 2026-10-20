@@ -1370,6 +1370,13 @@ void ZcSettingsPanel::populateGroups()
 	for (const auto &cat : zc::catalogs()) {
 		if (zc::catalogRequiresPtz(cat.id) && !ptz)
 			continue;
+		/* The camera's own `feature` map is the authority: a body that
+		   reports lens_ctrl_ptz off has no PTZ group at all, whatever its
+		   model name says. */
+		if (!zc::catalogSupportedByFeatures(
+			cat.id, client_ ? client_->cameraFeatures()
+					: zc::ZcFeatures()))
+			continue;
 		if (!zc::catalogSupportedByModel(cat.id, model))
 			continue;
 		auto *item = new QListWidgetItem(catalogLabel(cat.id), subtabList_);
@@ -1478,6 +1485,18 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		return;
 	}
 
+	/* The keys the camera only exposes when white balance is in its expert
+	   mode (see the read-only check in the loop below). */
+	auto isExpertWbKey = [](const QString &key) {
+		static const char *const kKeys[] = {"mwb", "tint", "mwb_r",
+						    "mwb_g", "mwb_b"};
+		for (const char *k : kKeys) {
+			if (key == QLatin1String(k))
+				return true;
+		}
+		return false;
+	};
+
 	for (const QString &key : keys) {
 		/* The WDR setting is not offered by the camera's web UI (it is reported
 		   under the raw id `compose_mode`); showing it here only confuses, so it
@@ -1516,6 +1535,15 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		    key == QLatin1String("pt_fall_curve") ||
 		    key == QLatin1String("pt_s_curve"))
 			continue;
+		/* A row the body has no option for is not offered: the camera's own
+		   `feature` map says which controls exist (Wi-Fi, pre-roll, EIS,
+		   genlock, line-in, VISCA, the focus family on a body with no focus
+		   motor, ...). The table is opt-in — a key it does not name is always
+		   shown — so nothing is withdrawn on a camera that does not report
+		   the flag at all. */
+		if (!zc::settingSupportedByFeatures(key,
+						   client_->cameraFeatures()))
+			continue;
 		ZcSettingValue def;
 		if (!client_->settingDefinition(key, &def))
 			continue;
@@ -1523,6 +1551,15 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		   but disabled (greyed) so the operator can see the value without being
 		   able to change it. */
 		if (!def.supported)
+			continue;
+		/* Expert white balance — `mwb` (manual Kelvin), `tint` and the three
+		   expert gains — exists only when the body's white-balance mode has
+		   that mode, and the camera says so itself: in a mode without them it
+		   answers these keys read-only. So a read-only answer hides the row
+		   instead of greying it (bug 40: the E2_F6_Pro has no expert mode,
+		   yet the R/G/B gains were drawn, greyed and useless). The rows come
+		   back on the next catalog read when the mode offers them again. */
+		if (def.readOnly && isExpertWbKey(key))
 			continue;
 		const bool readOnly = def.readOnly ||
 				      /* A time-lapse interval only matters when the camera
@@ -1809,6 +1846,15 @@ void ZcSettingsPanel::updateStreamBar()
 {
 	if (!streamBar_)
 		return;
+	/* A body with no network encoder (the Avatar, bug 107) has no stream to
+	   configure. Its /info names none of rtsp / rtmp / srt / webrtc, so the
+	   bar is hidden outright instead of sitting there inert and accepting
+	   writes that do nothing. */
+	if (client_ && !zc::cameraHasStreamEncoder(client_->cameraFeatures())) {
+		streamBar_->setVisible(false);
+		return;
+	}
+	streamBar_->setVisible(true);
 	QSignalBlocker blockCodec(streamCodec_);
 	QSignalBlocker blockRes(streamRes_);
 	QSignalBlocker blockFps(streamFps_);
@@ -2462,23 +2508,40 @@ ZcPtzPad::ZcPtzPad(QWidget *parent) : QWidget(parent)
 		auto *row = new QHBoxLayout;
 		row->setSpacing(4);
 		auto *lbl = new QLabel(ztr(kEdgeLabels[e]), this);
-		lbl->setFixedWidth(36);
+		/* One character ("上" / "Up") plus the two buttons leave the slider
+		   about 120 px of the pane's fixed 320 px column. */
+		lbl->setFixedWidth(28);
 		limitSlider_[e] = new QSlider(Qt::Horizontal, this);
 		limitSlider_[e]->setRange(0, 1);
 		/* Bug list 56: grey until the camera's Range Limit state arrives;
 		   applyLimitBox() then enables or keeps them disabled. */
 		limitSlider_[e]->setEnabled(false);
 		limitValue_[e] = new QLabel(QStringLiteral("0\u00b0"), this);
-		limitValue_[e]->setFixedWidth(36);
+		limitValue_[e]->setFixedWidth(30);
 		limitValue_[e]->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-		limitCurrent_[e] = new QPushButton(QStringLiteral("\u2316"), this);
-		limitCurrent_[e]->setFixedWidth(28);
+		/* Labelled buttons, exactly the pair the camera's page puts next to
+		   each edge ("Current" and "Reset"). A bare glyph read as a reset
+		   button, and there was no reset at all (bug 98). */
+		limitCurrent_[e] = new QPushButton(
+		    ztr("ZCameraPlugin.Dock.PtzEdgeCurrent"), this);
+		limitCurrent_[e]->setToolTip(
+		    ztr("ZCameraPlugin.Dock.PtzSetCurrent"));
 		limitCurrent_[e]->setEnabled(false);
-		limitCurrent_[e]->setToolTip(ztr("ZCameraPlugin.Dock.PtzSetCurrent"));
+		limitReset_[e] = new QPushButton(
+		    ztr("ZCameraPlugin.Dock.PtzEdgeReset"), this);
+		limitReset_[e]->setToolTip(ztr("ZCameraPlugin.Dock.PtzEdgeResetTip"));
+		limitReset_[e]->setEnabled(false);
+		for (QPushButton *b : {limitCurrent_[e], limitReset_[e]}) {
+			/* The pane is a fixed 320 px column: keep the pair compact so
+			   the slider still has room to be dragged. */
+			b->setFixedHeight(22);
+			b->setStyleSheet(QStringLiteral("padding:0 6px;"));
+		}
 		row->addWidget(lbl);
 		row->addWidget(limitSlider_[e], 1);
 		row->addWidget(limitValue_[e]);
 		row->addWidget(limitCurrent_[e]);
+		row->addWidget(limitReset_[e]);
 		layout->addLayout(row);
 
 		connect(limitSlider_[e], &QSlider::valueChanged, this,
@@ -2514,6 +2577,8 @@ ZcPtzPad::ZcPtzPad(QWidget *parent) : QWidget(parent)
 			});
 		connect(limitCurrent_[e], &QPushButton::clicked, this,
 			[this, e]() { setEdgeToCurrent((Edge)e); });
+		connect(limitReset_[e], &QPushButton::clicked, this,
+			[this, e]() { setEdgeToReset((Edge)e); });
 	}
 
 	connect(limitCheck_, &QCheckBox::toggled, this, [this](bool on) {
@@ -2587,6 +2652,8 @@ void ZcPtzPad::setClient(ZcCameraClient *client)
 		limitSlider_[e]->setEnabled(false);
 		if (limitCurrent_[e])
 			limitCurrent_[e]->setEnabled(false);
+		if (limitReset_[e])
+			limitReset_[e]->setEnabled(false);
 		updateLimitLabel((Edge)e);
 	}
 	if (positionLabel_)
@@ -2615,6 +2682,8 @@ void ZcPtzPad::applyLimitBox(bool enabled)
 			limitSlider_[e]->setEnabled(enabled);
 		if (limitCurrent_[e])
 			limitCurrent_[e]->setEnabled(enabled);
+		if (limitReset_[e])
+			limitReset_[e]->setEnabled(enabled);
 	}
 
 	/* Ranges and values mirror the web UI's updatePtzLimit(): with the limit on
@@ -2669,6 +2738,20 @@ void ZcPtzPad::updateLimitLabel(Edge edge)
 		    QStringLiteral("\u00b0"));
 }
 
+/* The two edge buttons, written to do exactly what the camera's page does with
+   the same click (its btn_*_current / btn_*_reset handlers). Both were wrong
+   before:
+
+    - "Current" pushed the raw position into the slider, which clamped it to
+      the slider's own range and then sent the CLAMPED value to the camera;
+      the page instead refuses the click when the position would cross the
+      opposite edge, and widens the opposite edge's bound first. That is why
+      the stored value and the page's value disagreed (bug 97).
+    - There was no "Reset" at all: the single glyph button only ever did
+      "current", so testers took it for reset (bug 98).
+
+   Both need a connected head: a stale 0/0 (the reply the camera sends while
+   the head is off-line) would otherwise be stored as a limit. */
 void ZcPtzPad::setEdgeToCurrent(Edge edge)
 {
 	if (!client_)
@@ -2676,18 +2759,88 @@ void ZcPtzPad::setEdgeToCurrent(Edge edge)
 	client_->ptzQuery(true, [this, edge](const QJsonObject &o) {
 		if (!client_ || !limitLoaded_ || !limitSlider_[edge])
 			return;
+		if (o.contains("connected") && !o.value("connected").toBool())
+			return;
 		const int pan = qRound(o.value("pan_pos").toDouble());
 		const int tilt = qRound(o.value("tilt_pos").toDouble());
+		QSlider *self = limitSlider_[edge];
+		/* Up/Right own the far corner's maximum, Down/Left its minimum, so
+		   the opposite edge is always the one that has to stay clear. */
+		QSlider *opp = (edge == EdgeUp)     ? limitSlider_[EdgeDown]
+			       : (edge == EdgeRight) ? limitSlider_[EdgeLeft]
+			       : (edge == EdgeDown)  ? limitSlider_[EdgeUp]
+						     : limitSlider_[EdgeRight];
+		const int pos = (edge == EdgeUp || edge == EdgeDown) ? tilt : pan;
+		const bool low = (edge == EdgeDown || edge == EdgeLeft);
+		if (!opp)
+			return;
+		/* Refuse instead of collapsing the box: the page checks the same
+		   two conditions and does nothing when they fail. */
+		if (low ? (opp->value() < pos + 1) : (opp->value() > pos - 1))
+			return;
 		{
-			QSignalBlocker b(limitSlider_[edge]);
-			limitSlider_[edge]->setValue(
-			    (edge == EdgeUp || edge == EdgeDown) ? tilt : pan);
+			QSignalBlocker b(opp);
+			/* Clicking a low edge moves the high edge's floor up; clicking
+			   a high edge moves the low edge's ceiling down. */
+			if (low)
+				opp->setMinimum(qMin(opp->maximum(), pos + 1));
+			else
+				opp->setMaximum(qMax(opp->minimum(), pos - 1));
+		}
+		{
+			QSignalBlocker b(self);
+			self->setValue(qBound(self->minimum(), pos,
+					      self->maximum()));
 		}
 		updateLimitLabel(edge);
-		if (limitCheck_ && !limitCheck_->isChecked()) {
-			QSignalBlocker b(limitCheck_);
-			limitCheck_->setChecked(true);
+		updateLimitLabel((Edge)((edge + 2) % EdgeCount));
+		pushLimit(edge);
+	});
+}
+
+/* Put one edge back on the head's own travel limit. The page re-reads the
+   unlimit box for this (its btn_*_reset handlers) rather than reusing a cached
+   one, so a box the head changed since the last status read cannot be stored
+   back by mistake. */
+void ZcPtzPad::setEdgeToReset(Edge edge)
+{
+	if (!client_)
+		return;
+	client_->ptzQuery(false, [this, edge](const QJsonObject &o) {
+		if (!client_ || !limitSlider_[edge])
+			return;
+		if (o.contains("connected") && !o.value("connected").toBool())
+			return;
+		const QJsonObject un = o.value("unlimit").toObject();
+		if (un.isEmpty())
+			return;
+		upanMin_ = qRound(un.value("pan_min").toDouble());
+		upanMax_ = qRound(un.value("pan_max").toDouble());
+		utiltMin_ = qRound(un.value("tilt_min").toDouble());
+		utiltMax_ = qRound(un.value("tilt_max").toDouble());
+		limitLoaded_ = true;
+
+		const int pos = (edge == EdgeUp)     ? utiltMax_
+				: (edge == EdgeDown) ? utiltMin_
+				: (edge == EdgeRight) ? upanMax_
+						      : upanMin_;
+		QSlider *opp = (edge == EdgeUp)     ? limitSlider_[EdgeDown]
+			       : (edge == EdgeRight) ? limitSlider_[EdgeLeft]
+			       : (edge == EdgeDown)  ? limitSlider_[EdgeUp]
+						     : limitSlider_[EdgeRight];
+		const bool low = (edge == EdgeDown || edge == EdgeLeft);
+		if (opp) {
+			QSignalBlocker b(opp);
+			if (low)
+				opp->setMinimum(qMin(opp->maximum(), pos + 1));
+			else
+				opp->setMaximum(qMax(opp->minimum(), pos - 1));
+		}		{
+			QSignalBlocker b(limitSlider_[edge]);
+			limitSlider_[edge]->setValue(pos);
 		}
+		updateLimitLabel(edge);
+		updateLimitLabel((Edge)((edge + 2) % EdgeCount));
 		pushLimit(edge);
 	});
 }
@@ -3137,6 +3290,28 @@ struct ZcCameraSourceLookup {
 	obs_source_t *found = nullptr;
 };
 
+/* Compare two camera addresses the way an operator writes them: the source
+   stores whatever was typed into its address field (`192.168.10.121`,
+   `http://192.168.10.121`, `192.168.10.121:80`, with or without a trailing
+   slash) while the dock knows the bare host. Matching the raw strings meant a
+   correctly added source could be reported as "not in OBS", which greys the
+   Detected Indicator for no visible reason (bug 21). */
+QString zcNormalizeHost(const QString &address)
+{
+	QString h = address.trimmed().toLower();
+	if (h.startsWith(QLatin1String("http://")))
+		h.remove(0, 7);
+	else if (h.startsWith(QLatin1String("https://")))
+		h.remove(0, 8);
+	while (h.endsWith(QLatin1Char('/')))
+		h.chop(1);
+	if (h.endsWith(QLatin1String(":80")))
+		h.chop(3);
+	else if (h.endsWith(QLatin1String(":443")))
+		h.chop(4);
+	return h;
+}
+
 bool zcFindCameraSourceProc(void *param, obs_source_t *source)
 {
 	auto *lookup = static_cast<ZcCameraSourceLookup *>(param);
@@ -3154,7 +3329,7 @@ bool zcFindCameraSourceProc(void *param, obs_source_t *source)
 	if (settings)
 		obs_data_release(settings);
 
-	if (ip.compare(lookup->want, Qt::CaseInsensitive) != 0)
+	if (zcNormalizeHost(ip) != zcNormalizeHost(lookup->want))
 		return true;
 	lookup->found = source;
 	return false; /* stop: the first match is the one to use */
@@ -3535,6 +3710,17 @@ public:
 		update();
 	}
 
+	/* How large the subject is drawn, from the composition Size (0..100).
+	   The two offsets only *move* the subject; Size is what makes it fill
+	   more of the frame, so this is the one input that may change its
+	   dimensions (bug lists 18/19/56 — the figure used to scale with Face
+	   Height, which is a position, so nudging the subject up also grew it). */
+	void setSubjectSize(int pct)
+	{
+		subjectSize_ = qBound(0, pct, 100);
+		update();
+	}
+
 	/* Bug list 13: with Tilt Lock on the camera refuses face-height (up/down)
 	   nudges, so those two arrows grey out; left/right keeps working. */
 	void setVerticalEnabled(bool on)
@@ -3592,12 +3778,13 @@ protected:
 		const double fx = double(placement_ - kFramingOffsetMin) / span;
 		const double fy = double(faceHeight_ - kFramingOffsetMin) / span;
 
-		/* The figure's size follows Face Height: the tile is a picture of
-		   the frame, so a subject the camera has been told to make larger
-		   has to be drawn larger. It used to be a fixed fraction of the
-		   tile, which made Size / Full-body / Waist / Close-up look like
-		   they did nothing on the pad (bug lists 18/19). */
-		const double sizeT = qBound(0.0, fy, 1.0);
+		/* The figure's size follows the composition Size, not an offset: the
+		   tile is a picture of the frame, so a subject the camera has been
+		   told to make larger has to be drawn larger (bug lists 18/19/56).
+		   Face Height and Placement only place it — reading the size off
+		   Face Height (what this did) made every up/down nudge resize the
+		   subject, which is not what that control does (bug list 181). */
+		const double sizeT = qBound(0.0, subjectSize_ / 100.0, 1.0);
 		const int fw = qMax(10, int(tile.width() * (0.14 + 0.22 * sizeT)));
 		const int fh = qMax(18, int(tile.height() * (0.34 + 0.52 * sizeT)));
 		const int margin = 3;
@@ -3670,6 +3857,9 @@ private:
 	QToolButton *right_ = nullptr;
 	int placement_ = 0;
 	int faceHeight_ = 0;
+	/* Composition Size, 0..100. Starts mid-range so a camera that has never
+	   reported one still draws a plausible subject. */
+	int subjectSize_ = 50;
 };
 
 const QString kFramingPanelStyle =
@@ -4340,15 +4530,34 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		   than a hard-coded 20/80/90 triple. */
 		fovPresetButtons_ = [this]() {
 			const int size = fovSizeSp_ ? fovSizeSp_->value() : -1;
-			const auto tick = [size](QPushButton *btn, int preset) {
+			/* Exactly one button carries the tick. The page marks the
+			   preset whose stored size equals the current Size; two
+			   presets may legitimately hold the same value, and then
+			   only the first of them lights — otherwise the row read as
+			   "all three selected" (bug list 180). */
+			int hit = -1;
+			if (size >= 0) {
+				const int sizes[3] = {fovPresetFullBody_,
+						      fovPresetWaist_,
+						      fovPresetCloseup_};
+				for (int i = 0; i < 3; i++) {
+					if (sizes[i] == size) {
+						hit = i;
+						break;
+					}
+				}
+			}
+			const auto tick = [hit](QPushButton *btn, int index) {
 				if (!btn)
 					return;
 				QSignalBlocker block(btn);
-				btn->setChecked(size >= 0 && size == preset);
+				btn->setChecked(hit == index);
 			};
-			tick(fovFullBodyBtn_, fovPresetFullBody_);
-			tick(fovWaistBtn_, fovPresetWaist_);
-			tick(fovCloseupBtn_, fovPresetCloseup_);
+			tick(fovFullBodyBtn_, 0);
+			tick(fovWaistBtn_, 1);
+			tick(fovCloseupBtn_, 2);
+			/* The figure follows the same Size these buttons mark. */
+			paintPad();
 		};
 		sizeLay->addLayout(presetRow);
 		fovSizeField_ = addField(
@@ -4685,6 +4894,8 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 
 		presetList_ = new QListWidget(presetBox);
 		presetList_->setFixedHeight(96);
+		/* Room for the thumbnail the page draws per preset (bug 44). */
+		presetList_->setIconSize(QSize(44, 36));
 		presetLay->addWidget(presetList_);
 
 		presetHint_ = new QLabel(presetBox);
@@ -5028,6 +5239,18 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 			client_->setFramingGestureFov(index == 1);
 		};
 
+		/* The page explains both switches with hand-gesture pictures. The
+		   dock carries those pictures in its resources and shows them in a
+		   help dialog, instead of leaving the two rows explaining themselves
+		   only through a tooltip (bug 42). */
+		auto *helpBtn = new QToolButton(box);
+		helpBtn->setText(QStringLiteral("?"));
+		helpBtn->setAutoRaise(true);
+		helpBtn->setToolTip(ztr("ZCameraPlugin.Framing.GestureHelp"));
+		connect(helpBtn, &QToolButton::clicked, this,
+			[this]() { showGestureHelp(); });
+		lay->addWidget(helpBtn);
+
 		setLay->addWidget(box);
 	}
 
@@ -5321,8 +5544,17 @@ void ZcFramingPanel::setClient(ZcCameraClient *client)
 		bodySizeSp_->setValue(kFramingBodySizeMin);
 		placement_ = 0;
 		faceHeight_ = 0;
-		if (pad_)
+		zoomLockOn_ = false;
+		hasFovSize_ = false;
+		/* The preset sizes and the config probe belong to one camera. */
+		fovConfigProbed_ = false;
+		fovPresetFullBody_ = 100;
+		fovPresetWaist_ = 70;
+		fovPresetCloseup_ = 40;
+		if (pad_) {
 			pad_->setOffsets(0, 0);
+			pad_->setSubjectSize(50);
+		}
 		painting_ = false;
 		/* Back to the resting state: detection off, so Start/Restart grey out
 		   and the word reads "Idle" again. */
@@ -5378,8 +5610,65 @@ void ZcFramingPanel::refresh()
 	});
 	refreshFovOffsets();
 	refreshPresets();
+	if (!fovConfigProbed_)
+		refreshFovPresets();
 	if (!optionalProbed_)
 		probeOptionalFeatures();
+}
+
+/* The three preset sizes, from the camera's own capability object.
+
+   They are NOT in all_status: the top-level fullbody / waist / closeup keys
+   there are the three gesture switches ("View Angle Adjustment"), booleans
+   written through /gesture, and the camera's page reads them as such
+   (`response.fullbody == true`). Reading them as percentages — which this did
+   — collapsed all three presets onto the same 0/1, so the tick comparison
+   matched all three at once and clicking a button wrote a Size of 0 or 1
+   (bug lists 16/17/180: "三个按钮同时选中，Size 也没有跟着变"). */
+void ZcFramingPanel::refreshFovPresets()
+{
+	if (!client_ || !client_->isConnected())
+		return;
+	fovConfigProbed_ = true;
+	client_->framingConfigQuery([this](const QJsonObject &doc) {
+		const QJsonObject fov = doc.value("fov_size").toObject();
+		const auto take = [&fov](const char *key, int fallback) {
+			const QJsonValue v = fov.value(QLatin1String(key));
+			return v.isDouble() ? qBound(0, v.toInt(), 100) : fallback;
+		};
+		fovPresetFullBody_ = take("fullbody", fovPresetFullBody_);
+		fovPresetWaist_ = take("waist", fovPresetWaist_);
+		fovPresetCloseup_ = take("closeup", fovPresetCloseup_);
+		if (fovPresetButtons_)
+			fovPresetButtons_();
+		paintPad();
+	});
+}
+
+/* The Size the subject figure should be drawn at. The >=1.0.5 camera keeps one
+   0..100 value; the 1.0.3 camera's body-size stepper walks four steps between
+   its own floor and ceiling, so its position is turned back into a percentage
+   to keep one scale for the drawing. */
+int ZcFramingPanel::subjectSizePct() const
+{
+	if (hasFovSize_ && fovSizeSp_)
+		return fovSizeSp_->value();
+	if (bodySizeSp_) {
+		const int span = kFramingBodySizeMax - kFramingBodySizeMin;
+		if (span > 0)
+			return qBound(0, (bodySizeSp_->value() - kFramingBodySizeMin) *
+					     100 / span,
+				      100);
+	}
+	return 50;
+}
+
+void ZcFramingPanel::paintPad()
+{
+	if (pad_) {
+		pad_->setOffsets(placement_, faceHeight_);
+		pad_->setSubjectSize(subjectSizePct());
+	}
 }
 
 /* The framing-box control and the profile export exist only on some firmwares
@@ -5430,8 +5719,7 @@ void ZcFramingPanel::refreshFovOffsets()
 			faceHeight_ = qBound(kFramingOffsetMin,
 					     doc.value("face_height").toInt(),
 					     kFramingOffsetMax);
-		if (pad_)
-			pad_->setOffsets(placement_, faceHeight_);
+		paintPad();
 		/* /fov restates the View Angle and the Size the dropdown and the
 		   stepper show, under a paint guard so filling them is not read back
 		   as an operator edit. */
@@ -5452,6 +5740,120 @@ void ZcFramingPanel::refreshFovOffsets()
 		}
 		painting_ = false;
 	});
+}
+
+/* The picture the camera's page puts next to each framing preset: a framed
+   tile, its 3x3 grid, and the person placed from the preset's own
+   info_face_placement / info_face_height / info_human_bottom. The page paints
+   it on a canvas (_drawPresetPreview); the dock draws the same thing into a
+   QPixmap so the preset list is a picture and not a bare "framing1" (bug 44).
+   The silhouette is the page's own fullBody SVG, rasterised into the
+   resources. A reply that does not carry the geometry falls back to the
+   page's defaults (centre, 0.3 from the top, nothing cropped at the
+   bottom). */
+static QPixmap zcFramingPresetThumb(const QJsonObject &preset, int w, int h)
+{
+	QPixmap pm(w, h);
+	pm.fill(Qt::transparent);
+	if (w <= 2 || h <= 2)
+		return pm;
+	QPainter p(&pm);
+	p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+
+	p.setPen(QColor("#3a3a3a"));
+	p.drawRect(0, 0, w - 1, h - 1);
+	p.setPen(QColor("#2a2a2a"));
+	for (int i = 1; i < 3; ++i) {
+		p.drawLine(w * i / 3, 0, w * i / 3, h);
+		p.drawLine(0, h * i / 3, w, h * i / 3);
+	}
+
+	const double x = preset.value(QLatin1String("info_face_placement"))
+			     .toDouble(0.5);
+	const double y =
+	    preset.value(QLatin1String("info_face_height")).toDouble(0.3);
+	const double bottom =
+	    preset.value(QLatin1String("info_human_bottom")).toDouble(0.0);
+	const double lw = 1.0;
+	const double iconY = (y - 0.05) * h + lw;
+	const double iconH = qMax(4.0, h - iconY - lw / 2.0 - bottom * h);
+	const double iconW = 98.0 * (iconH / 81.0) + 4.0;
+	const double iconX = x * w - iconW / 2.0 + lw / 2.0;
+
+	static const QPixmap body(QStringLiteral(":/zc/framing_full_body.png"));
+	if (!body.isNull())
+		p.drawPixmap(QRectF(iconX, iconY, iconW, iconH), body,
+			     QRectF(body.rect()));
+	return pm;
+}
+
+/* The framing page's gesture explanation, reproduced: one picture per gesture
+   with the sentence that goes with it. The artwork is the page's own
+   (zc_resources.qrc); QLabel draws it, so nothing here needs the QtSvg module
+   the Qt build OBS ships does not carry (bug 42). */
+void ZcFramingPanel::showGestureHelp()
+{
+	QDialog dlg(this);
+	dlg.setWindowTitle(ztr("ZCameraPlugin.Framing.GestureHelpTitle"));
+	auto *outer = new QVBoxLayout(&dlg);
+	outer->setSpacing(10);
+
+	const auto picture = [](const QString &file, const QString &caption,
+				QWidget *parent) {
+		auto *col = new QWidget(parent);
+		auto *v = new QVBoxLayout(col);
+		v->setContentsMargins(0, 0, 0, 0);
+		v->setSpacing(2);
+		auto *img = new QLabel(col);
+		const QPixmap pm(QStringLiteral(":/zc/") + file);
+		img->setPixmap(pm.scaledToWidth(120, Qt::SmoothTransformation));
+		img->setAlignment(Qt::AlignCenter);
+		v->addWidget(img);
+		if (!caption.isEmpty()) {
+			auto *cap = new QLabel(caption, col);
+			cap->setAlignment(Qt::AlignCenter);
+			cap->setStyleSheet(QStringLiteral("color:#8a9bb2;"));
+			v->addWidget(cap);
+		}
+		return col;
+	};
+
+	const auto section = [&](const QString &title, const QString &body,
+				 const QList<QPair<QString, QString>> &shots) {
+		auto *t = new QLabel(title, &dlg);
+		t->setStyleSheet(QStringLiteral("font-weight:600;"));
+		outer->addWidget(t);
+		if (!shots.isEmpty()) {
+			auto *row = new QHBoxLayout;
+			row->setSpacing(14);
+			for (const auto &shot : shots)
+				row->addWidget(picture(shot.first, shot.second,
+						       &dlg));
+			row->addStretch(1);
+			outer->addLayout(row);
+		}
+		auto *text = new QLabel(body, &dlg);
+		text->setWordWrap(true);
+		text->setMaximumWidth(420);
+		outer->addWidget(text);
+	};
+
+	section(ztr("ZCameraPlugin.Framing.Waving"),
+		ztr("ZCameraPlugin.Framing.WavingHelp"),
+		{{QStringLiteral("gesture_waving.png"), QString()}});
+	section(ztr("ZCameraPlugin.Framing.GestureFov"),
+		ztr("ZCameraPlugin.Framing.GestureFovHelp"),
+		{{QStringLiteral("gesture_full_body.png"),
+		  ztr("ZCameraPlugin.Framing.GestureFullBody")},
+		 {QStringLiteral("gesture_waist.png"),
+		  ztr("ZCameraPlugin.Framing.GestureWaist")},
+		 {QStringLiteral("gesture_closeup.png"),
+		  ztr("ZCameraPlugin.Framing.GestureCloseUp")}});
+
+	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
+	connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+	outer->addWidget(buttons);
+	dlg.exec();
 }
 
 void ZcFramingPanel::refreshPresets()
@@ -5483,9 +5885,14 @@ void ZcFramingPanel::rebuildPresets(const QJsonObject &doc)
 	presetNames_.clear();
 	presetList_->clear();
 	for (const QJsonValue &v : presets) {
-		const QString name = v.toObject().value("name").toString();
+		const QJsonObject o = v.toObject();
+		const QString name = o.value(QLatin1String("name")).toString();
 		presetNames_ << name;
-		presetList_->addItem(name);
+		/* Thumbnail first, name after: the page shows the same picture, and
+		   two presets that differ only in framing read apart at a glance
+		   (bug 44). */
+		auto *item = new QListWidgetItem(name, presetList_);
+		item->setIcon(QIcon(zcFramingPresetThumb(o, 44, 36)));
 	}
 	presetCount_ = presetNames_.size();
 	if (selected >= 0 && selected < presetCount_)
@@ -5535,8 +5942,7 @@ void ZcFramingPanel::nudgeOffset(bool isPlacement, int delta)
 		faceHeight_ = next;
 		client_->setFramingFaceHeight(faceHeight_);
 	}
-	if (pad_)
-		pad_->setOffsets(placement_, faceHeight_);
+	paintPad();
 }
 
 /* Paint the panel from a framing snapshot (/ctrl/framing/all_status) or from a
@@ -5593,6 +5999,12 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 	};
 
 	seg("auto_target", autoTargetSeg_);
+	/* Latch the camera's own value: the detection-area button and the two
+	   Auto Target dependants are gated on it (bug 88). */
+	if (doc.contains("auto_target")) {
+		autoTargetOn_ = asBool("auto_target", autoTargetOn_);
+		autoTargetKnown_ = true;
+	}
 	seg("zoom_lock", zoomLockSeg_);
 	seg("tilt_lock", tiltLockSeg_);
 	seg("track_active_face", faceTrackSeg_);
@@ -5667,19 +6079,25 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 			       asInt("body_size", 0) * kFramingBodySizeStep,
 			   kFramingBodySizeMax));
 	}
-	/* The >=1.0.5 Size row and its preset buttons: the three sizes are the
-	   stored full-body / waist / close-up values (all_status carries them on
-	   both firmware generations). View Angle == Keep sizes nothing (bug
-	   list #25), which the Size stepper below then mirrors. */
+	/* The >=1.0.5 Size row and its preset buttons. `fov_size` here is the
+	   current size; the three presets' own sizes come from
+	   /ctrl/framing/config (refreshFovPresets), never from all_status — its
+	   top-level fullbody/waist/closeup are the gesture switches, read as
+	   booleans just below. View Angle == Keep sizes nothing (bug list #25),
+	   which the Size stepper below then mirrors. */
 	fovKeep_ = doc.contains("fov_type") && asInt("fov_type", 0) == 3;
-	if (doc.contains("fov_size") && fovSizeSp_)
-		fovSizeSp_->setValue(qBound(0, asInt("fov_size", 0), 100));
-	if (doc.contains("fullbody"))
-		fovPresetFullBody_ = asInt("fullbody", fovPresetFullBody_);
-	if (doc.contains("waist"))
-		fovPresetWaist_ = asInt("waist", fovPresetWaist_);
-	if (doc.contains("closeup"))
-		fovPresetCloseup_ = asInt("closeup", fovPresetCloseup_);
+	if (doc.contains("fov_size")) {
+		hasFovSize_ = true;
+		if (fovSizeSp_)
+			fovSizeSp_->setValue(
+			    qBound(0, asInt("fov_size", 0), 100));
+	}
+	/* Lock Zoom, kept as state rather than read back off the segment: the
+	   interlock below turns that segment off whenever the fix-angle box owns
+	   the head, and gating that read the widget it had just written latched
+	   the Size row back to enabled (bug lists 50/182). */
+	if (doc.contains("zoom_lock"))
+		zoomLockOn_ = asBool("zoom_lock", false);
 	/* The two composition offsets. all_status carries them and /fov carries
 	   them again; either is authoritative for the pad — except while a
 	   pad nudge is fresh, when the read-back can only be the stale
@@ -5689,14 +6107,12 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 	if (doc.contains("placement") && !padNudging) {
 		placement_ = qBound(kFramingOffsetMin, asInt("placement", 0),
 				    kFramingOffsetMax);
-		if (pad_)
-			pad_->setOffsets(placement_, faceHeight_);
+		paintPad();
 	}
 	if (doc.contains("face_height") && !padNudging) {
 		faceHeight_ = qBound(kFramingOffsetMin, asInt("face_height", 0),
 				     kFramingOffsetMax);
-		if (pad_)
-			pad_->setOffsets(placement_, faceHeight_);
+		paintPad();
 	}
 	if (doc.contains("start_pos") || doc.contains("start_pos_opts")) {
 		/* The camera names the slots itself (start_pos_opts) and pads the list
@@ -5750,6 +6166,17 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 		fixAngleBoxOn_ = boxFlag("fix_angle_box", fixAngleBoxOn_);
 	if (doc.contains(QLatin1String("tracking_box")))
 		trackingBoxOn_ = boxFlag("tracking_box", trackingBoxOn_);
+	/* The camera never says which box its page is showing; it keeps one enable
+	   flag per box. When exactly one of them is on, that is the mode — infer
+	   it, so the status switch and the Lock Zoom/Tilt interlock follow the
+	   camera instead of a segment left at its initial Fix-Angle position.
+	   Both on or both off is ambiguous, and there the operator's selection
+	   stands (bug lists 22/50/182). */
+	if (boxModeSeg_ && (fixAngleBoxOn_ != trackingBoxOn_)) {
+		const int mode = fixAngleBoxOn_ ? 0 : 1;
+		if (boxModeSeg_->currentIndex() != mode)
+			boxModeSeg_->setCurrentIndex(mode);
+	}
 	if (boxEnableSeg_ && boxModeSeg_)
 		boxEnableSeg_->setCurrentIndex(
 		    boxModeSeg_->currentIndex() == 0 ? (fixAngleBoxOn_ ? 1 : 0)
@@ -5783,6 +6210,11 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 				row->setVisible(supported);
 		};
 		hideRow(zoomLockRow_, doc.contains("zoom_lock"));
+		/* A full snapshot is the whole truth: a firmware that stopped
+		   reporting the lock does not have one, and the stale "locked"
+		   state must not keep greying the Size row. */
+		if (!doc.contains("zoom_lock"))
+			zoomLockOn_ = false;
 		hideRow(sensitivityRow_, doc.contains("sensitivity"));
 		hideRow(accelerationRow_, doc.contains("acceleration"));
 		hideRow(trackingRecordRow_, doc.contains("tracking_record"));
@@ -5891,6 +6323,7 @@ void ZcFramingPanel::applyFirmwareGating()
 	   fov_size (or not). */
 	if (fovSizeField_)
 		fovSizeField_->setVisible(false);
+	hasFovSize_ = false;
 	updateGating();
 }
 
@@ -5919,10 +6352,12 @@ void ZcFramingPanel::updateGating()
 
 	/* Bug list #13: Lock Zoom on greys the Size row (the page's
 	   _updateViewAngleDisabledByLockZoom). Only reachable on a >=1.0.5
-	   firmware, where the row exists at all. */
-	const bool lockZoomOn = zoomLockRow_ && zoomLockRow_->isVisible() &&
-				zoomLockSeg_ && zoomLockSeg_->isEnabled() &&
-				zoomLockSeg_->currentIndex() == 1;
+	   firmware, where the row exists at all. Taken from the camera's last
+	   report, not from the segment: the segment is greyed and switched off by
+	   the fix-angle interlock below, and reading it back meant the two Size
+	   controls lit up again as soon as they were written to (bug lists
+	   50/182). */
+	const bool lockZoomOn = zoomLockOn_;
 
 	/* Bug list 22: with detection off the page greys the view angle, the
 	   size and the position pad — the camera is not framing, so nothing
@@ -5960,6 +6395,14 @@ void ZcFramingPanel::updateGating()
 	if (boxModeSeg_)
 		boxModeSeg_->setEnabled(liveBase && !traceOn_);
 
+	/* Bug 34: Track Active Face on means the camera is following a face, so
+	   the box's own enable switch cannot be flipped either — the camera is
+	   already driving the framing from the face. */
+	const bool faceTrackOn =
+	    faceTrackSeg_ && faceTrackSeg_->currentIndex() == 1;
+	if (boxEnableSeg_)
+		boxEnableSeg_->setEnabled(liveBase && !traceOn_ && !faceTrackOn);
+
 	/* Bug list 13: Tilt Lock on — the pad's up/down arrows grey, left/right
 	   keeps working. */
 	if (pad_)
@@ -5971,18 +6414,24 @@ void ZcFramingPanel::updateGating()
 	   camera has neither the box nor the locks, so this only ever fires on
 	   the new generation. Only the FIX-ANGLE box does this: the tracking box
 	   ("range") leaves both locks usable, which is why the mode is part of
-	   the condition (bug list 27 — a range-on state used to grey them). */
+	   the condition (bug list 27 — a range-on state used to grey them).
+
+	   The camera is what clears the locks here; this only greys the segments
+	   and shows the cleared value. It used to write index 0 into
+	   zoomLockSeg_ as well, which is a latch: the segment then read back as
+	   "off", and every rule derived from it (the Size row) followed it off
+	   while the camera still had the zoom locked (bug lists 22/50/182). */
 	const bool fixAngleOn = fw15_ && boxModeSeg_ &&
 				boxModeSeg_->currentIndex() == 0 && boxEnableSeg_ &&
 				boxEnableSeg_->isEnabled() &&
 				boxEnableSeg_->currentIndex() == 1;
-	if (fixAngleOn) {
-		painting_ = true;
-		if (zoomLockSeg_)
-			zoomLockSeg_->setCurrentIndex(0);
-		if (tiltLockSeg_)
-			tiltLockSeg_->setCurrentIndex(0);
-		painting_ = false;
+	if (fixAngleOn && zoomLockSeg_ && zoomLockSeg_->currentIndex() != 0) {
+		QSignalBlocker block(zoomLockSeg_);
+		zoomLockSeg_->setCurrentIndex(0);
+	}
+	if (fixAngleOn && tiltLockSeg_ && tiltLockSeg_->currentIndex() != 0) {
+		QSignalBlocker block(tiltLockSeg_);
+		tiltLockSeg_->setCurrentIndex(0);
 	}
 	if (zoomLockRow_ && zoomLockRow_->isVisible() && zoomLockSeg_)
 		zoomLockSeg_->setEnabled(!fixAngleOn);
@@ -5999,9 +6448,17 @@ void ZcFramingPanel::updateGating()
 	   firmware. */
 	if (maskEditBtn_) {
 		const bool maskOn = maskSeg_ && maskSeg_->currentIndex() == 1;
+		/* Read the camera's own last word on Auto Target when it has given
+		   one; the segment is only the fallback for a firmware whose status
+		   does not carry the key. Reading the segment first was the same
+		   latch as #30/#74/#182: the widget keeps whatever was last written
+		   into it, so a value changed elsewhere (the camera's own page) never
+		   reached this test (bug 88). */
 		const bool autoTargetOk =
-		    !fw15_ || (autoTargetSeg_ &&
-			       autoTargetSeg_->currentIndex() == 1);
+		    !fw15_ || (autoTargetKnown_ ? autoTargetOn_
+						: (autoTargetSeg_ &&
+						   autoTargetSeg_->currentIndex() ==
+						       1));
 		maskEditBtn_->setEnabled(haveSnapshot_ && detectOn_ && maskOn &&
 					 autoTargetOk);
 	}
@@ -6020,6 +6477,19 @@ void ZcFramingPanel::updateGating()
 	   is tracking. The page greys the button in both cases. */
 	if (faceRegBtn_)
 		faceRegBtn_->setEnabled(haveSnapshot_ && detectOn_ && !traceOn_);
+
+	/* Whether framing currently drives the head, which is what the PTZ tab's
+	   trace face has to know: the camera answers every trace command with
+	   code -2 while it does (bug 55). Status 0 is Idle and 4 is Disabled —
+	   neither is framing — so only Detecting / Tracking / Target-lost count,
+	   alongside the detection switch itself. Pushed from here rather than
+	   from the dock's websocket handler so one place owns the answer: the
+	   panel is what receives the snapshot read at connect time, which is the
+	   only way to learn that a camera was already framing before the dock
+	   attached (bug 179). */
+	if (onFramingOwnsPtz)
+		onFramingOwnsPtz(detectOn_ ||
+				 (statusIndex_ >= 1 && statusIndex_ <= 3));
 }
 
 /* A projector window on this camera's source.
@@ -6586,6 +7056,11 @@ void ZcPresetPanel::buildUi()
 void ZcPresetPanel::setClient(ZcCameraClient *client)
 {
 	client_ = client;
+	/* A different camera: forget what the previous one reported about the
+	   preset speed mode and ask the new one. */
+	speedModeKnown_ = false;
+	speedModeCommon_ = false;
+	speedModeAsked_ = false;
 	if (client_)
 		/* The per-preset speed unit / speed follow `ptz_speed_mode`: with the
 		   "Common" preset speed mode the camera applies one shared speed to
@@ -6595,10 +7070,44 @@ void ZcPresetPanel::setClient(ZcCameraClient *client)
 		   speed mode). */
 		connect(client_, &ZcCameraClient::groupRefreshed, this,
 			[this](const QString &catalog) {
-				if (catalog == QLatin1String("ptz"))
-					updateActions();
+				if (catalog != QLatin1String("ptz"))
+					return;
+				const QString v = client_
+						      ? client_->settingValue(QStringLiteral(
+							    "ptz_speed_mode"))
+						      : QString();
+				if (!v.isEmpty()) {
+					speedModeKnown_ = true;
+					speedModeCommon_ =
+					    v.compare(QStringLiteral("Common"),
+						      Qt::CaseInsensitive) == 0;
+				}
+				updateActions();
 			});
+	askSpeedMode();
 	refresh();
+}
+
+/* One read of `ptz_speed_mode`. The key only arrives with the PTZ settings
+   catalog, which is fetched when the operator opens that group; the preset
+   panel can be used without ever opening it, and until it had a value the
+   per-preset speed stayed editable even under the Common mode (bug 74). */
+void ZcPresetPanel::askSpeedMode()
+{
+	if (!client_ || speedModeAsked_)
+		return;
+	speedModeAsked_ = true;
+	ZcCameraClient *c = client_;
+	c->readSetting(QStringLiteral("ptz_speed_mode"),
+		       [this, c](const ZcSettingValue &v) {
+			       if (c != client_ || v.value.isEmpty())
+				       return;
+			       speedModeKnown_ = true;
+			       speedModeCommon_ =
+				   v.value.compare(QStringLiteral("Common"),
+						   Qt::CaseInsensitive) == 0;
+			       updateActions();
+		       });
 }
 
 void ZcPresetPanel::refresh()
@@ -6881,12 +7390,11 @@ void ZcPresetPanel::updateActions()
 		/* With the PTZ preset speed mode "Common" the camera recalls every
 		   preset at one shared speed, so a per-preset unit/speed is refused; the
 		   camera's web UI greys its "Unit"/"Speed" entries in exactly this case.
-		   An unread value (empty) leaves them usable rather than over-disabling
-		   the row. */
+		   An unread value leaves them usable rather than over-disabling the
+		   row. Read from the latched camera value, never from a widget, so
+		   re-selecting a preset cannot light the row up again (bug 74). */
 		const bool perPresetSpeed =
-		    !client_ ||
-		    client_->settingValue(QLatin1String("ptz_speed_mode")) !=
-			QLatin1String("Common");
+		    !client_ || !speedModeKnown_ || !speedModeCommon_;
 		unitCombo_->setEnabled(named && perPresetSpeed);
 		speedCombo_->setEnabled(named && perPresetSpeed &&
 					speedCombo_->count() > 0);
@@ -7057,22 +7565,11 @@ void ZcPresetPanel::commitRename(int index, const QString &text)
 /* ZcControlDock                                                     */
 /* ---------------------------------------------------------------- */
 
-/* Whether an auto-framing status payload means framing is driving the head. The
-   camera reports it as `value` (overall) and/or `detect` (the detection switch);
-   either being on means presets/traces cannot move it (bug 47; the RD comment
-   supplied the exact websocket samples). */
-static bool framingActive(const QJsonObject &status)
-{
-	const auto on = [&status](const char *key) {
-		const QJsonValue v = status.value(QLatin1String(key));
-		if (v.isBool())
-			return v.toBool();
-		if (v.isDouble())
-			return v.toInt() != 0;
-		return false;
-	};
-	return on("value") || on("detect");
-}
+/* Framing ownership of the head is decided inside ZcFramingPanel now
+   (updateGating pushes it out through onFramingOwnsPtz): that panel sees every
+   snapshot, including the one read at connect time, and its status word has
+   already separated Idle/Disabled from Detecting/Tracking/Target-lost — which
+   the old `value != 0` test here did not (bug lists 55/179). */
 
 /* Set by ~ZcControlDock. A connect probe runs a nested event loop inside
    client_->connect(); OBS can tear the dock down from an event delivered in that
@@ -8064,12 +8561,6 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 		[this](const QJsonObject &status) {
 			if (framing_)
 				framing_->applyStatus(status);
-			/* While auto-framing drives the head, the trace transport
-			   does nothing, so grey the trace face instead of letting a
-			   click look broken; the preset family keeps working (bug
-			   list 55). Restored the moment framing turns off. */
-			if (presets_)
-				presets_->setFramingOwned(framingActive(status));
 		});
 	connect(client_, &ZcCameraClient::framingSettingsChanged, this,
 		[this, pushTrackBox]() {
@@ -8078,14 +8569,26 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 			/* The box ROI may be what changed (bug 17). */
 			pushTrackBox();
 		});
+	/* Framing ownership of the head: the panel reports it, because the panel is
+	   what every snapshot lands in — the websocket event, the re-read after a
+	   settings change, and the one read below. While framing drives the head
+	   the camera refuses every trace command with code -2, so the trace face
+	   greys rather than swallowing the click; the preset family keeps working
+	   (bug lists 55/179). */
+	if (framing_)
+		framing_->onFramingOwnsPtz = [this](bool owned) {
+			if (presets_)
+				presets_->setFramingOwned(owned);
+		};
 	/* The WS event only reports framing CHANGES. If the camera was already
 	   framing when we connected, the transport must be greyed now — waiting
 	   for the next event would leave the panel claiming to work while every
-	   preset/trace click is ignored. One snapshot read settles it. */
+	   trace click is ignored. One snapshot read settles it (and reaches the
+	   trace face through the callback above). */
 	if (client_->cameraSupportsAutoFraming())
 		client_->framingQuery([this](const QJsonObject &status) {
-			if (presets_)
-				presets_->setFramingOwned(framingActive(status));
+			if (framing_)
+				framing_->applyStatus(status);
 		});
 	/* A camera change must not leave the previous camera's PTZ tab behind. */
 	updatePtzTab();

@@ -33,6 +33,8 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include "zc_http_transport.h"
 #include "zc_ws_notifier.h"
 #include "zc_settings_engine.h"
+/* ZcFeatures: the /info capability map this class caches for the UI. */
+#include "zc_settings_schema.h"
 
 namespace zc {
 
@@ -91,6 +93,11 @@ public:
 	/* Whether the camera does auto framing: /info feature.autoFraming. The
 	   auto-framing tab is gated on this, independently of the PTZ tab. */
 	bool cameraSupportsAutoFraming() const { return supportsAutoFraming_; }
+	/* The camera's whole `feature` map from /info. Settings rows and the
+	   stream bar are gated on it the way the camera's own page gates its
+	   control tree, instead of on the model name. Empty (and therefore
+	   permissive) until the first /info answer arrives. */
+	const zc::ZcFeatures &cameraFeatures() const { return features_; }
 
 	/* ---- Commands (each returns when the request completes) ---- */
 	void startRecording();
@@ -142,6 +149,12 @@ public:
 	   words: 0 IDLE, 1 Detecting, 2 Tracking, 3 Target Lost, 4 Disabled. The
 	   same index rides on the FramingStatusChanged notification as `value`. */
 	void framingStatusQuery(std::function<void(const QJsonObject &)> cb);
+	/* GET /ctrl/framing/config -> the page's capability object. Its `fov_size`
+	   is a structure ({min, max, fullbody, waist, closeup}) giving the three
+	   composition presets' own sizes; the `fov_size` in all_status is the
+	   current size as a scalar. Do not confuse the two — all_status' top-level
+	   fullbody/waist/closeup are the three *gesture* switches (bools). */
+	void framingConfigQuery(std::function<void(const QJsonObject &)> cb);
 
 	/* The rest of the camera's framing page — the same calls its web UI makes.
 	   Every one of these is a GET on a /ctrl/framing/<sub> endpoint. */
@@ -451,6 +464,9 @@ private:
 	QString firmwareVersion_;
 	bool supportsPtz_ = false;
 	bool supportsAutoFraming_ = false;
+	/* The /info `feature` map, cached: the settings rows, the stream bar and
+	   the face dialog read it instead of the model name. */
+	zc::ZcFeatures features_;
 	/* Empty until the first face-database reply: see faceDbBase(). */
 	QString faceDbBase_;
 	/* Set once that reply has decided the prefix, so the probe never runs

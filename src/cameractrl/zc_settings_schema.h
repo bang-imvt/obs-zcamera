@@ -137,6 +137,57 @@ bool cameraSupportsPtz(const QJsonObject &info);
    than on cameraSupportsPtz(). */
 bool cameraSupportsAutoFraming(const QJsonObject &info);
 
+/* ---- the /info `feature` map: the camera's own capability declaration ----
+   Every option a body has is a key in `feature`; a body that lacks the option
+   leaves the key out or answers false. The camera's own web UI gates its
+   whole control tree on this map (handlProductInfoFeatureResponse() in its
+   controller.js), so the plugin can do the same instead of guessing from the
+   model name — a P2-R1-18x that reports `wifiSupport: false` has no Wi-Fi row
+   even though a sibling of the same family does.
+
+   Values are mixed on the wire — a real boolean (`"autoFraming": true`), a
+   number, or a "0"/"1" string (`"photoSupport": "1"`) — so one predicate
+   normalises all three.
+
+   `declared()` separates "this body says no" from "this body says nothing":
+   firmware that sends no map at all keeps every control, because silence is
+   unknown rather than a refusal. */
+class ZcFeatures {
+public:
+    ZcFeatures() = default;
+    explicit ZcFeatures(const QJsonObject &info);
+
+    /* The /info reply carried a non-empty `feature` object. */
+    bool declared() const { return declared_; }
+    /* The flag is present and truthy. Without a map every flag reads true, so
+       an unknown capability stays visible. */
+    bool has(const char *name) const;
+
+private:
+    QJsonObject map_;
+    bool declared_ = false;
+};
+
+/* One flag out of a `feature` object, normalising bool / number / "0"-"1"
+   string. Absent and unparseable both read false. */
+bool featureFlag(const QJsonObject &feature, const char *name);
+
+/* A settings catalog (a whole group in the sidebar) disappears when the camera
+   declares the option behind it off: `ptz` rides `lens_ctrl_ptz`. */
+bool catalogSupportedByFeatures(const QString &catalogId, const ZcFeatures &f);
+
+/* A single setting row disappears the same way. The table inside mirrors the
+   camera's page, so a row whose option the body does not have is not offered
+   (bug lists: Avatar has no stream settings, the F6 Pro has no expert white
+   balance, a 1.0.3 head has no Wi-Fi). Keys not in the table are always
+   shown — the table is opt-in, never a whitelist. */
+bool settingSupportedByFeatures(const QString &key, const ZcFeatures &f);
+
+/* Whether the body has a network stream encoder to configure at all (any of
+   rtsp / rtmp / srt / webrtc). The stream bar at the top of the Settings tab
+   is hidden when it has none, instead of offering writes that do nothing. */
+bool cameraHasStreamEncoder(const ZcFeatures &f);
+
 /* Query for one /ctrl/preset action. Preset indexes are 0-based (the camera's
    own web UI uses the same indexing). */
 QUrlQuery presetQuery(const QString &action, int index,

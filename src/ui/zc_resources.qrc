@@ -1,0 +1,18 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <!-- Artwork taken from the camera's own framing page (its framing.js draws
+       these as inline SVG; they are rasterised here at 4x so the dock can use
+       QPixmap without pulling in the QtSvg module, which the Qt build OBS ships
+       does not include). Sizes: framing_* = 98x81 (the preset thumbnail
+       figure), gesture_* = 110x90 (the hand-gesture hints on the framing
+       page). -->
+  <qresource prefix="/zc">
+    <file alias="framing_full_body.png">res/framing_full_body.png</file>
+    <file alias="framing_waist.png">res/framing_waist.png</file>
+    <file alias="framing_close_up.png">res/framing_close_up.png</file>
+    <file alias="gesture_waving.png">res/gesture_waving.png</file>
+    <file alias="gesture_full_body.png">res/gesture_full_body.png</file>
+    <file alias="gesture_waist.png">res/gesture_waist.png</file>
+    <file alias="gesture_closeup.png">res/gesture_closeup.png</file>
+  </qresource>
+</RCC>

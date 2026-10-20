@@ -365,8 +365,10 @@ private:
 	void pushLimit(Edge edge);
 	/* Refresh one edge's degree read-out. */
 	void updateLimitLabel(Edge edge);
-	/* Set one edge to the head's current position (the web UI's "取当前位"). */
+	/* Set one edge to the head's current position (the web UI's "Current"). */
 	void setEdgeToCurrent(Edge edge);
+	/* Put one edge back on the head's full travel (the web UI's "Reset"). */
+	void setEdgeToReset(Edge edge);
 
 	/* Lens zoom. The camera's /ctrl/lens?action=zoomin|zoomout&fspeed= is a
 	   continuous move that only stops on zoomstop, and this firmware reports no
@@ -420,7 +422,12 @@ private:
 	QCheckBox *limitCheck_ = nullptr;
 	QSlider *limitSlider_[EdgeCount] = {};
 	QLabel *limitValue_[EdgeCount] = {};
+	/* Two buttons per edge, as on the camera's page (its btn_*_current and
+	   btn_*_reset): "Current" stores the head's position as that edge,
+	   "Reset" puts the edge back on its full travel. They used to be one
+	   glyph button, which read as a reset button (bug 98). */
 	QPushButton *limitCurrent_[EdgeCount] = {};
+	QPushButton *limitReset_[EdgeCount] = {};
 	bool limitLoaded_ = false;
 	/* Stored limit (current) and unlimit (full travel) box, in whole degrees. */
 	int panMin_ = 0, panMax_ = 0, tiltMin_ = 0, tiltMax_ = 0;
@@ -481,6 +488,14 @@ public:
 	explicit ZcFramingPanel(QWidget *parent = nullptr);
 
 	void setClient(ZcCameraClient *client);
+	/* Told whenever this panel's idea of "auto framing is driving the head"
+	   changes. The PTZ tab's trace face hangs off it: while framing frames the
+	   shot the camera refuses every trace command with code -2, so those
+	   buttons must grey rather than swallow the click. It is the panel that
+	   says so because the panel is what receives the snapshots — including the
+	   one read at connect time, which is the only way to learn that a camera
+	   was already framing before the dock attached (bug lists 55/179). */
+	std::function<void(bool)> onFramingOwnsPtz;
 	/* The shared interaction link: the detection-area editor arms through it
 	   and the camera's rectangle is pushed back through it. */
 	void setOverlayLink(ZcOverlayLink *link) { link_ = link; }
@@ -507,6 +522,20 @@ private:
 	/* Re-read /ctrl/framing/preset and rebuild the tile list. */
 	void refreshPresets();
 	void rebuildPresets(const QJsonObject &doc);
+	/* Re-read /ctrl/framing/config, which is where the three composition
+	   presets' sizes live (its `fov_size` is a structure; the scalar of the
+	   same name in all_status is the current size, not the table). Read once
+	   per camera. */
+	void refreshFovPresets();
+	/* The composition size the subject figure should be drawn at, in percent:
+	   the >=1.0.5 Size row when the camera has one, else the 1.0.3 body-size
+	   stepper, which walks four steps between its own min and max. */
+	int subjectSizePct() const;
+	/* Push the two offsets and the subject size into the pad at once. */
+	void paintPad();
+	/* The handle-gesture explanation the camera's page shows, with its
+	   pictures (bug 42). */
+	void showGestureHelp();
 	/* Re-read /ctrl/framing/fov, which carries the two offsets the framing pad
 	   nudges; the page re-reads it after every nudge so its copy cannot drift
 	   from the camera's. */
@@ -633,6 +662,20 @@ private:
 	   rather than one shared state (bug lists 23/24/25/26/27). */
 	bool fixAngleBoxOn_ = false;
 	bool trackingBoxOn_ = false;
+	/* Lock Zoom as the camera last reported it. Kept here rather than read off
+	   zoomLockSeg_ because the interlock below forces that segment to Off when
+	   the fix-angle box takes the head over, and a gating rule that reads the
+	   widget it just wrote then latches: the Size row and the view-angle
+	   controls came back to life while the camera still had the zoom locked
+	   (bug lists 50/182). */
+	bool zoomLockOn_ = false;
+	/* Auto Target as the camera last reported it. Same reason as zoomLockOn_:
+	   the detection-area button greys while Auto Target is off, and reading
+	   that off the segment meant a value changed on the camera's own page was
+	   never seen (bug 88). `known` separates "the camera has said" from "it
+	   never carries the key", which falls back to the segment. */
+	bool autoTargetOn_ = false;
+	bool autoTargetKnown_ = false;
 
 	/* The page's dropdowns. */
 	QComboBox *viewAngleCombo_ = nullptr; /* Live: View Angle (fov_type) */
@@ -655,6 +698,11 @@ private:
 	   all_status carries the key (bug list #10). */
 	QWidget *fovSizeField_ = nullptr;
 	ZcSliderSpin *fovSizeSp_ = nullptr;
+	/* Whether the selected camera reported a `fov_size` at all, i.e. whether
+	   the >=1.0.5 Size row is the one in use. A flag rather than
+	   fovSizeField_->isVisible(), which is false whenever the dock is not the
+	   visible tab — the subject figure would then read the 1.0.3 stepper. */
+	bool hasFovSize_ = false;
 	QPushButton *fovFullBodyBtn_ = nullptr;
 	QPushButton *fovWaistBtn_ = nullptr;
 	QPushButton *fovCloseupBtn_ = nullptr;
@@ -713,6 +761,9 @@ private:
 	/* Set once the optional-feature probe has run for the current camera, so a
 	   refresh does not re-ask on every tick. */
 	bool optionalProbed_ = false;
+	/* Same, for /ctrl/framing/config: the preset sizes do not change while the
+	   same camera is selected. */
+	bool fovConfigProbed_ = false;
 
 	/* Composition presets, at the foot of the live page rather than inside its
 	   grid: the block is a list with a row of buttons of its own, and set
@@ -788,6 +839,11 @@ private:
 	void updateSelection();
 	void updateActions();
 	void updateSpeedControls();
+	/* Read `ptz_speed_mode` once per camera. The PTZ settings catalog — the
+	   only place that key is fetched — is read when the operator opens that
+	   group, so without this the preset panel had no value to gate on and left
+	   the per-preset unit/speed editable under the "Common" mode (bug 74). */
+	void askSpeedMode();
 	void beginRename();
 	void commitRename(int index, const QString &text);
 	/* Re-read the /ctrl/ptrace transport state, then re-enable the buttons. */
@@ -832,6 +888,14 @@ private:
 	bool traceMode_ = false;
 	/* Auto framing currently drives the head: only the trace actions grey. */
 	bool framingOwned_ = false;
+	/* `ptz_speed_mode` as the camera last reported it. Latched rather than
+	   read off a widget for the same reason as zoomLockOn_: a gating rule that
+	   reads the control it just wrote latches (bug 74 — the per-preset speed
+	   row came back to life after every re-selection). */
+	bool speedModeKnown_ = false;
+	bool speedModeCommon_ = false;
+	/* The one-shot read behind those two. */
+	bool speedModeAsked_ = false;
 	/* Last /ctrl/ptrace st_code; only meaningful in trace mode. */
 	int traceState_ = 0;
 
