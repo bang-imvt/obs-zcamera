@@ -272,6 +272,48 @@ bool cameraHasStreamEncoder(const ZcFeatures &f)
 	       f.has("webrtcStream");
 }
 
+/* The camera page's value vocabulary, from its own Chinese language pack.
+   Only whole values are listed: a firmware that sends "On" shows 开, one that
+   sends "Slowest" shows "Slowest" — never a guessed translation. */
+QString settingValueLabelZh(const QString &value)
+{
+	static const QHash<QString, QString> table = {
+	{"On", QString::fromUtf8("开")},
+	{"Off", QString::fromUtf8("关")},
+	{"Auto", QString::fromUtf8("自动")},
+	{"Manual", QString::fromUtf8("手动")},
+	{"Default", QString::fromUtf8("默认")},
+	{"Enable", QString::fromUtf8("启用")},
+	{"Disable", QString::fromUtf8("关闭")},
+	{"Start", QString::fromUtf8("开始")},
+	{"Stop", QString::fromUtf8("停止")},
+	{"Full Body", QString::fromUtf8("全身")},
+	{"Waist", QString::fromUtf8("半身")},
+	{"Close Up", QString::fromUtf8("特写")},
+	{"Medium", QString::fromUtf8("中景")},
+	{"Wide", QString::fromUtf8("广角")},
+	{"Home", QString::fromUtf8("原点")},
+	{"Start Position", QString::fromUtf8("开始位置")},
+	{"Hold Position", QString::fromUtf8("保持当前位置")},
+	{"Preset 1", QString::fromUtf8("预置位 1")},
+	{"Preset 2", QString::fromUtf8("预置位 2")},
+	{"Preset 3", QString::fromUtf8("预置位 3")},
+	{"Preset 4", QString::fromUtf8("预置位 4")},
+	{"Preset 5", QString::fromUtf8("预置位 5")},
+	{"General", QString::fromUtf8("常规")},
+	{"Sports", QString::fromUtf8("运动")},
+	{"Basketball", QString::fromUtf8("篮球")},
+	{"Multi", QString::fromUtf8("多目标")},
+	{"IDLE", QString::fromUtf8("空闲")},
+	{"Detecting", QString::fromUtf8("正在检测")},
+	{"Tracking", QString::fromUtf8("正在跟踪")},
+	{"Target Lost", QString::fromUtf8("目标丢失")},
+	{"Disabled", QString::fromUtf8("禁止")},
+	};
+	const auto it = table.constFind(value);
+	return it == table.constEnd() ? value : it.value();
+}
+
 QUrlQuery presetQuery(const QString &action, int index,
 		      const QList<QPair<QString, QString>> &extra)
 {

@@ -188,6 +188,17 @@ bool settingSupportedByFeatures(const QString &key, const ZcFeatures &f);
    is hidden when it has none, instead of offering writes that do nothing. */
 bool cameraHasStreamEncoder(const ZcFeatures &f);
 
+/* The Chinese label for one of the camera's setting VALUES, or `value` itself
+   when there is none. The words are the camera page's own: its language pack
+   (/www/locales/zh/translation.json) is the authority for what "On" or "Close
+   Up" reads like in Chinese, and this table is that pack's value vocabulary,
+   verbatim (bug 35 — the settings page showed the camera's raw English values
+   in a Chinese UI). Only an exact match is translated; anything else is shown
+   as the camera sent it, so an unknown value is never mistranslated. The
+   caller decides whether the UI is Chinese, because this file has no business
+   knowing about obs_get_locale(). */
+QString settingValueLabelZh(const QString &value);
+
 /* Query for one /ctrl/preset action. Preset indexes are 0-based (the camera's
    own web UI uses the same indexing). */
 QUrlQuery presetQuery(const QString &action, int index,

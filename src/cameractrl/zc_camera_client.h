@@ -178,7 +178,7 @@ public:
 	   a rect smaller than those. Firmware that does not implement the
 	   geometry still answers {"code":0} and keeps its old values, so a
 	   caller must read back rather than trust the reply. */
-	void setFramingMaskRect(bool enabled, float left, float top, float right,
+	void setFramingMaskRect(float left, float top, float right,
 				float bottom); /* /mask_area?enable=&left=&… */
 	/* GET /mask_area -> {left,top,right,bottom,w_min,h_min,enable}. */
 	void framingMaskQuery(std::function<void(const QJsonObject &)> cb);

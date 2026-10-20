@@ -534,11 +534,15 @@ void ZcCameraClient::setFramingMaskEnable(bool enabled)
 	framingFlag(transport_, "/mask_area", enabled);
 }
 
-void ZcCameraClient::setFramingMaskRect(bool enabled, float left, float top,
-					float right, float bottom)
+/* The rectangle only — the enable flag is its own request (/mask_area?enable=),
+   exactly as the camera page writes it: its setMaskArea() sends the four
+   coordinates and nothing else. Sending an extra `enable` here made the camera
+   answer 200 and keep its old rectangle, which is why an edit never reached it
+   (bug 29). Coordinates are 0..1, the same space the page uses. */
+void ZcCameraClient::setFramingMaskRect(float left, float top, float right,
+					float bottom)
 {
 	QUrlQuery q;
-	q.addQueryItem("enable", enabled ? "1" : "0");
 	q.addQueryItem("left", QString::number(left, 'f', 5));
 	q.addQueryItem("top", QString::number(top, 'f', 5));
 	q.addQueryItem("right", QString::number(right, 'f', 5));

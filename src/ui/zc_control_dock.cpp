@@ -102,6 +102,18 @@ static QString ztr(const char *key)
 		QStringLiteral("\\n"), QStringLiteral("\n"));
 }
 
+/* The camera's own Chinese word for a setting VALUE ("On" -> 开), when this OBS
+   runs in Chinese and the camera's page has that word. The table is the
+   camera's language pack, so the two UIs agree; an unknown value stays as the
+   camera sent it (bug 35). */
+static QString zcValueLabel(const QString &value)
+{
+	const QByteArray locale = QString::fromUtf8(obs_get_locale()).toUtf8();
+	if (!locale.startsWith("zh"))
+		return value;
+	return zc::settingValueLabelZh(value);
+}
+
 /* Human label for a settings row. The camera reports lowercase ids
    ("http_auth"); the locale turns the ones whose id is misleading into readable
    text (bug 5: `http_auth` is the identity-authentication switch, not a second
@@ -1593,13 +1605,21 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		QWidget *control = nullptr;
 		if (def.type == 1 && !def.choices.isEmpty()) {
 			/* Choice -> combo box; set the value before connecting so the
-			   initial fill does not fire a spurious write. */
+			   initial fill does not fire a spurious write. The face of each
+			   entry is the camera's own Chinese word where its language pack
+			   has one (bug 35); the value written back is always the raw
+			   string the camera sent, carried as the entry's data. */
 			auto *combo = new QComboBox(rowsContainer_);
-			combo->addItems(def.choices);
-			combo->setCurrentText(def.value);
-			connect(combo, &QComboBox::currentTextChanged, this,
-				[this, key](const QString &text) {
-					writeKey(key, text);
+			for (const QString &choice : def.choices)
+				combo->addItem(zcValueLabel(choice), choice);
+			const int current = combo->findData(def.value);
+			if (current >= 0)
+				combo->setCurrentIndex(current);
+			connect(combo, &QComboBox::currentIndexChanged, this,
+				[this, key, combo](int row) {
+					if (row < 0)
+						return;
+					writeKey(key, combo->itemData(row).toString());
 				});
 			/* Changing the unit must reveal the matching speed/time row right
 			   away instead of waiting for a refresh (bug list "unit switch does
@@ -2245,8 +2265,12 @@ void ZcOverlayLink::commitMask(float left, float top, float right, float bottom)
 	mb_ = bottom;
 	/* Pinned until the camera reports something different. */
 	maskLocalOverride_ = true;
-	if (client_)
-		client_->setFramingMaskRect(true, left, top, right, bottom);
+	if (client_) {
+		/* Two requests, the way the page does it: the rectangle first, then the
+		   switch that makes the camera use it (bug 29). */
+		client_->setFramingMaskRect(left, top, right, bottom);
+		client_->setFramingMaskEnable(true);
+	}
 	pushMask();
 }
 
