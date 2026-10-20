@@ -766,7 +766,10 @@ void ZcCameraClient::framingExportProfileFile(
 }
 
 /* Multipart upload, exactly the request the page's Upload helper builds:
-   one form part named "file" carrying the profile JSON. */
+   one form part named "file" carrying the profile JSON. The camera's own
+   refusal text ("bad profile version", "not a framing profile", …) is
+   passed back verbatim: "code -1" alone tells nobody which part of the
+   file it objected to (bug list #7). */
 void ZcCameraClient::framingImportProfile(
     const QByteArray &profile, const QString &filename,
     std::function<void(bool ok, const QString &error)> cb)
@@ -794,13 +797,29 @@ void ZcCameraClient::framingImportProfile(
 		    QJsonParseError err{};
 		    const QJsonDocument doc =
 			    QJsonDocument::fromJson(rsp.body, &err);
-		    const int code = err.error == QJsonParseError::NoError &&
-					     doc.isObject()
-					 ? doc.object().value("code").toInt()
-					 : -1;
-		    cb(code == 0, code == 0 ? QString()
-					    : QStringLiteral("code ") +
-						  QString::number(code));
+		    const QJsonObject obj =
+			err.error == QJsonParseError::NoError && doc.isObject()
+			    ? doc.object()
+			    : QJsonObject();
+		    const int code = obj.value(QLatin1String("code")).toInt(-1);
+		    if (code == 0) {
+			    cb(true, QString());
+			    return;
+		    }
+		    QString why;
+		    for (const char *k : {"detail", "error", "msg", "message"}) {
+			    const QString v =
+				obj.value(QLatin1String(k)).toString();
+			    if (!v.isEmpty()) {
+				    why = v;
+				    break;
+			    }
+		    }
+		    QString msg = QStringLiteral("code ") +
+				  QString::number(code);
+		    if (!why.isEmpty())
+			    msg += QStringLiteral(": ") + why;
+		    cb(false, msg);
 	    },
 	    20000);
 }

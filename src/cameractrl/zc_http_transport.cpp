@@ -868,7 +868,7 @@ void ZcHttpTransport::doRequest(const char *method,
 	dispatch(
 		method, pathWithQuery, body, contentType, timeoutMs,
 		[this, methodBytes, pathWithQuery, body, cb, timeoutMs,
-		 retries](int status, const QByteArray &headers,
+		 retries, contentType](int status, const QByteArray &headers,
 			  const QByteArray &payload, const QString &error,
 			  bool timedOut) {
 			emit requestLogged(QStringLiteral("%1 %2  %3")
@@ -883,12 +883,19 @@ void ZcHttpTransport::doRequest(const char *method,
 
 			/* Fresh 401 challenge: transparently re-auth and retry the
 			   SAME request once (the reference client does exactly one
-			   transparent retry on a stale=true challenge). */
+			   transparent retry on a stale=true challenge). The retry has
+			   to keep the body's Content-Type: this camera answers 401 to
+			   the *first* request of every connection, so a multipart POST
+			   always runs as a retry, and dropping the type here sent a
+			   multipart body labelled urlencoded — the camera could not
+			   parse the form part and refused the framing profile it was
+			   perfectly able to import (bug list #7). */
 			if (status == 401 && retries > 0 &&
 			    !creds_.username.isEmpty() &&
 			    parseChallenge(headers)) {
 				doRequest(methodBytes.constData(), pathWithQuery,
-					  body, cb, timeoutMs, retries - 1);
+					  body, cb, timeoutMs, retries - 1,
+					  contentType);
 				return;
 			}
 
