@@ -31,9 +31,8 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <obs.h>
 #include <obs-frontend-api.h>
 
-/* For the Win32 call that keeps the monitor window above the OBS main window
-   (see zcRaiseMonitorWindow). Deliberately after ssp-mdns.h, whose winsock2
-   has to precede windows.h. */
+/* Win32: deliberately after ssp-mdns.h, whose winsock2 has to precede
+   windows.h. Kept for the window-handle lookups below. */
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -6870,44 +6869,7 @@ static QWidget *zcFindMonitorWindow(const QString &name)
 	return fullScreen;
 }
 
-/* Bring the monitor window to the front and keep it there. It is useless the
-   moment focus moves to the dock — the detection boxes are drawn over the
-   live picture, so the operator has to be able to see it *while* working, and
-   a plain window drops behind the OBS main window as soon as it loses focus.
 
-   Win32's SetWindowPos is what OBS's own projector "Always on top" action
-   ends up calling (UI/platform-windows.cpp SetAlwaysOnTop), reached directly
-   here so it does not depend on an internal slot name that may change between
-   OBS releases. It only reorders the window in the Z order — the native
-   window is not recreated, so the OBS display bound to it survives. */
-static void zcRaiseMonitorWindow(QWidget *w)
-{
-	if (!w)
-		return;
-
-	/* Once per window: re-applying the Z order on every click would fight a
-	   deliberate un-pin from the projector's own context menu. */
-	if (!w->property("zcMonitorOnTop").toBool()) {
-#ifdef _WIN32
-		SetWindowPos((HWND)w->winId(), HWND_TOPMOST, 0, 0, 0, 0,
-			     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-		w->setProperty("zcMonitorOnTop", true);
-#else
-		/* Other platforms: use the projector's own toggle, which is the
-		   only state it will re-apply on its own. */
-		if (QMetaObject::invokeMethod(w, "AlwaysOnTopToggled",
-					      Qt::DirectConnection,
-					      Q_ARG(bool, true)))
-			w->setProperty("zcMonitorOnTop", true);
-#endif
-	}
-
-	if (w->isMinimized())
-		w->showNormal();
-	w->show();
-	w->raise();
-	w->activateWindow();
-}
 
 /* The title suffix of this camera's monitor window, and whether it names the
    camera's own source (as opposed to the current scene, which is the fallback
@@ -6945,8 +6907,38 @@ QString ZcFramingPanel::monitorWindowName(bool &isSource)
    tried first (exact, and it covers a window whose title OBS has since
    retitled), then a scan by title — which also finds a projector the operator
    opened from OBS's own View menu, so the button reflects it too. */
+/* This camera's window, whatever kind it is: the source's Interaction window
+   (the one the dock opens, and the one that can be dragged in), or a projector
+   the operator opened from OBS's own View menu. */
+static QWidget *zcCameraWindowFor(const QString &host)
+{
+	if (host.isEmpty())
+		return nullptr;
+	for (QWidget *w : zcAllWindows()) {
+		if (!w->isVisible() || !w->inherits("OBSBasicInteraction"))
+			continue;
+		if (w->property(kInteractHostProp).toString() == host)
+			return w;
+	}
+	return nullptr;
+}
+
 QWidget *ZcFramingPanel::monitorWindow()
 {
+	/* ONE window per camera. The monitor used to be an OBS projector, which
+	   cannot be interacted with, so arming the detection-area editor had to
+	   open the Interaction window as well — two views of the same camera. The
+	   Interaction window renders exactly the same picture and the same overlay
+	   and it takes the mouse, so it is the window for watching and for
+	   editing; the projector stays only for one the operator opened himself. */
+	if (client_) {
+		if (QWidget *w = zcCameraWindowFor(client_->host())) {
+			monitorWnd_ = w;
+			monitorWndName_.clear();
+			return w;
+		}
+	}
+
 	bool isSource = false;
 	const QString name = monitorWindowName(isSource);
 	if (name.isEmpty())
@@ -6989,6 +6981,11 @@ void ZcFramingPanel::closeMonitorWindow()
 	QWidget *w = monitorWindow();
 	if (!w)
 		return;
+	/* The editor draws into this view, so taking the window down disarms it:
+	 * a mode with no window would keep the source drawing handles nobody can
+	 * see or drag. */
+	if (link_)
+		link_->armMode(zc::OverlayInteraction::None);
 	w->close();
 	monitorWnd_.clear();
 	monitorWndName_.clear();
@@ -6996,47 +6993,27 @@ void ZcFramingPanel::closeMonitorWindow()
 
 void ZcFramingPanel::openMonitorWindow()
 {
-	if (!client_)
+	if (!client_ || !link_)
 		return;
 
-	bool isSource = false;
-	const QString name = monitorWindowName(isSource);
-	if (name.isEmpty())
-		return;
-
-	/* Exactly one monitor window. obs_frontend_open_projector() has no
-	   "already open?" notion — it unconditionally constructs a new window —
-	   so clicking the button used to stack up one per click. */
-	QWidget *existing = monitorWindow();
-	if (existing) {
-		zcRaiseMonitorWindow(existing);
+	/* Already up for this camera: raise it. There is only ever one, and it is
+	   the same window the detection-area editor draws into. */
+	if (QWidget *existing = monitorWindow()) {
+		existing->raise();
+		existing->activateWindow();
 		return;
 	}
 
-	const QList<QWidget *> before = zcProjectorWindows();
-	obs_frontend_open_projector(isSource ? "Source" : "Scene", -1, nullptr,
-				    name.toUtf8().constData());
-
-	/* The projector constructs itself and calls show() inside its own
-	   constructor, so it is already in the widget tree by the time this
-	   returns — no need to wait for an event-loop turn. The window this call
-	   built is the one that was not there before it: identifying it that way
-	   beats matching the title, which OBS rewrites when the source is renamed
-	   and disambiguates when two sources share a name. */
-	QWidget *created = nullptr;
-	for (QWidget *w : zcProjectorWindows()) {
-		if (!before.contains(w)) {
-			created = w;
-			break;
-		}
-	}
-	if (!created)
-		created = zcFindMonitorWindow(name);
-	if (created) {
-		created->setProperty(kMonitorNameProp, name);
-		monitorWnd_ = created;
-		monitorWndName_ = name;
-		zcRaiseMonitorWindow(created);
+	/* No window yet: the dock opens the source's Interaction window (it owns
+	   the source lookup and tags the window with this camera). Doing it this
+	   way instead of a projector is what makes editing reuse the window
+	   rather than stack a second one — a projector takes no mouse. */
+	if (link_->openInteract)
+		link_->openInteract();
+	if (QWidget *w = zcCameraWindowFor(client_->host())) {
+		monitorWnd_ = w;
+		w->raise();
+		w->activateWindow();
 	}
 }
 
@@ -8522,14 +8499,6 @@ void ZcControlDock::openSourceInteraction()
 			    ztr("ZCameraPlugin.Dock.InteractNoSource").arg(host));
 		return;
 	}
-	/* One window per camera. The interaction window is the one that can be
-	   dragged in, so it replaces the monitor projector instead of opening
-	   beside it — OBS happily builds a second window and the operator ends up
-	   with two views of the same camera and no idea which one to drag in
-	   (bug 28 follow-up). Keys, position and the overlay all survive: the
-	   rectangle is source state, not window state. */
-	if (framing_)
-		framing_->dropMonitorForInteraction();
 	obs_frontend_open_source_interaction(lookup.found);
 	/* The window is built and shown inside that call, so it is already in the
 	   widget tree here — no need to wait for an event-loop turn to tag it. */

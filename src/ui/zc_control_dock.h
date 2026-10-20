@@ -510,11 +510,6 @@ public:
 	void setFirmwareNew(bool atLeast15);
 	/* The "edit detection area" tick, for the dock's mode sync. */
 	QPushButton *maskEditButton() const { return maskEditBtn_; }
-	/* Give up this camera's monitor window so the interaction window can take
-	   its place. One window per camera: clicking "edit detection area" with
-	   the monitor already open used to stack a second window on top of it
-	   (bug 28 follow-up). No-op when nothing is open. */
-	void dropMonitorForInteraction() { closeMonitorWindow(); }
 	/* Told after the operator flips the framing box (mode or enable), so the
 	   dock re-reads its rectangle and repaints the overlay frame: the camera's
 	   settings-changed event is for changes made elsewhere and does not fire
