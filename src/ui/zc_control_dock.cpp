@@ -2114,6 +2114,8 @@ private:
 	/* What the camera last reported, and whether a local edit is pinned
 	   because the camera did not take it. */
 	float camL_ = 0.0f, camT_ = 0.0f, camR_ = 1.0f, camB_ = 1.0f;
+	/* The camera's own enable flag, so a change in it counts as news (bug 28). */
+	bool camOn_ = false;
 	bool maskLocalOverride_ = false;
 
 	bool markerOn_ = false;
@@ -2227,12 +2229,19 @@ void ZcOverlayLink::setMask(bool enabled, float left, float top, float right,
 	    std::abs(left - camL_) > 1e-4f || std::abs(top - camT_) > 1e-4f ||
 	    std::abs(right - camR_) > 1e-4f ||
 	    std::abs(bottom - camB_) > 1e-4f;
+	/* The enable flag is part of "the camera said something new" too: the
+	   operator's own click pins a local override, and if the camera later
+	   reports the flag the other way (its page, or a rejected write being
+	   corrected) the rectangle has to follow. Without this, a flapped switch
+	   left the overlay stuck on the last local value for good (bug 28). */
+	const bool enableChanged = (enabled != camOn_);
 	camL_ = left;
 	camT_ = top;
 	camR_ = right;
 	camB_ = bottom;
+	camOn_ = enabled;
 
-	if (cameraChanged)
+	if (cameraChanged || enableChanged)
 		maskLocalOverride_ = false;
 	else if (maskLocalOverride_)
 		return; /* keep what the operator drew */
@@ -4841,12 +4850,17 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		if (painting_ || !client_)
 			return;
 		client_->setFramingMaskEnable(index == 1);
-		/* Bug list 28: switching the area off must take its rectangle off
-		   the picture at once. The next snapshot carries the flag too, but
-		   it is a second away and a frame left behind reads as a switch
-		   that did nothing. */
-		if (link_ && index == 0)
-			link_->setMaskVisible(false);
+		/* Bug list 28: the rectangle follows this switch both ways and
+		   nothing else. Off takes it off the picture at once, on puts the
+		   last rectangle back at once — the next snapshot carries the flag
+		   too, but it is a second away, and a frame left behind (or a frame
+		   that will not come back until something else changes) reads as a
+		   switch that does nothing. Switching this off used to latch the
+		   overlay at "hidden" for good: setMaskVisible() pins a local
+		   override that only a *different* rectangle from the camera could
+		   clear, and switching back on never touched it. */
+		if (link_)
+			link_->setMaskVisible(index == 1);
 		/* The "edit" button belongs to this switch (bug list 31). */
 		updateGating();
 	};
@@ -5276,6 +5290,7 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 			if (painting_ || !client_)
 				return;
 			client_->setFramingTrackingRecord(index == 1);
+			setRecording(recording_);
 		};
 
 		setLay->addWidget(box);
@@ -5438,6 +5453,11 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 			/* Bug list #49: the box state drives the Lock Zoom /
 			   Lock Tilt interlock, which lives in updateGating(). */
 			updateGating();
+			/* Bug 53: the monitor window's frame comes from the camera's
+			   box rectangle, which is re-read here because our own write
+			   does not come back as a settings-changed event. */
+			if (onBoxStateChanged)
+				onBoxStateChanged();
 		};
 
 		boxGroup_ = box;
@@ -6398,6 +6418,29 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
    Enable/Disable and Start/Stop according to the two live switches. Both are
    mirrored here so the panel and the page can never disagree about whether
    detection is running — the state the AI detection overlay depends on. */
+/* Bug 93: "tracking triggers recording" makes the CAMERA start recording on
+   its own once it tracks a face, so the switch alone never told the operator
+   that anything happened. The row says so while it is recording, which is the
+   only place the consequence of that switch is visible. */
+void ZcFramingPanel::setRecording(bool on)
+{
+	/* No early return on an unchanged flag: this is also called when the
+	   switch itself moves, and the row still has to be repainted then. */
+	recording_ = on;
+	if (!trackingRecordRow_)
+		return;
+	auto *label = trackingRecordRow_->findChild<QLabel *>();
+	if (!label)
+		return;
+	const bool active =
+	    recording_ && trackingRecordSeg_ &&
+	    trackingRecordSeg_->currentIndex() == 1;
+	label->setText(active ? ztr("ZCameraPlugin.Framing.TrackingRecordActive")
+			      : ztr("ZCameraPlugin.Framing.TrackingRecord"));
+	label->setStyleSheet(active ? QStringLiteral("color:#e5484d;")
+				    : QString());
+}
+
 void ZcFramingPanel::updateStatusLabel()
 {
 	const int idx = qBound(0, statusIndex_, kFramingStatusCount - 1);
@@ -8588,11 +8631,15 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 		[this]() {
 			if (recBadge_)
 				recBadge_->show();
+			if (framing_)
+				framing_->setRecording(true);
 		});
 	connect(client_, &ZcCameraClient::recordingStopped, this,
 		[this]() {
 			if (recBadge_)
 				recBadge_->hide();
+			if (framing_)
+				framing_->setRecording(false);
 		});
 	/* A duration tick means the camera is recording right now -- this is
 	   also how a dock that attached mid-recording learns it, when the
@@ -8601,6 +8648,8 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 		[this](int seconds) {
 			if (recBadge_ && seconds > 0)
 				recBadge_->show();
+			if (framing_)
+				framing_->setRecording(seconds > 0);
 		});
 	/* The camera's notification socket is a live heartbeat: when it drops (power
 	   loss / network drop) the row must show offline without the operator
@@ -8643,6 +8692,12 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 						  .toDouble());
 		});
 	};
+
+	/* The operator's own box switch does not come back as a settings-changed
+	   event (that one is for changes made elsewhere), so the frame the monitor
+	   window draws would only appear after some other write (bug 53). */
+	if (framing_)
+		framing_->onBoxStateChanged = pushTrackBox;
 
 	/* /info arrives asynchronously: the tab appears (or disappears) and the
 	   preset list loads once the model is known. */

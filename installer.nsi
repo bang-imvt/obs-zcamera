@@ -19,7 +19,7 @@
 Unicode true
 
 !define PLUGIN_NAME "obs-zcamera"
-!define VERSION "0.15.2"
+!define VERSION "0.15.3"
 ; Build date stamp appended to the installer name, e.g. obs-zcamera-0.15.0-setup_1016.exe
 !define /date BUILD_DATE "%m%d"
 

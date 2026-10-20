@@ -510,6 +510,16 @@ public:
 	void setFirmwareNew(bool atLeast15);
 	/* The "edit detection area" tick, for the dock's mode sync. */
 	QPushButton *maskEditButton() const { return maskEditBtn_; }
+	/* Told after the operator flips the framing box (mode or enable), so the
+	   dock re-reads its rectangle and repaints the overlay frame: the camera's
+	   settings-changed event is for changes made elsewhere and does not fire
+	   for our own write, which left the monitor window without a frame (bug
+	   53). */
+	std::function<void()> onBoxStateChanged;
+	/* Whether the camera is recording right now. The "tracking triggers
+	   recording" row shows it: the camera starts recording on its own, so the
+	   switch alone never told the operator it had done anything (bug 93). */
+	void setRecording(bool on);
 
 public slots:
 	/* Re-read the framing snapshot and the preset list, then repaint. */
@@ -713,6 +723,8 @@ private:
 	    fovPresetCloseup_ = 40;
 	/* Firmware generation: >= 1.0.5 (see setFirmwareNew). */
 	bool fw15_ = false;
+	/* The camera's recording flag, for the tracking-record row (bug 93). */
+	bool recording_ = false;
 	/* View Angle == Keep (fov_type == 3): the camera keeps its current
 	   framing, so the Size stepper has nothing to size — the page greys it
 	   (bug list #25). */
