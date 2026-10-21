@@ -219,15 +219,24 @@ const SettingGate kSettingGates[] = {
 	   The MF-assist rows go with them: the bodies that report this flag are the
 	   cinema ones, whose firmware has no "MF assist while standby / while
 	   recording" setting at all (bug 115 — the plugin offered rows the body
-	   cannot set). */
-	{"af_mode", "mfOnly", false},
-	{"caf", "mfOnly", false},
-	{"caf_sens", "mfOnly", false},
-	{"af_area", "mfOnly", false},
-	{"live_caf", "mfOnly", false},
-	{"af_speed", "mfOnly", false},
-	{"mf_mag", "mfOnly", false},
-	{"mf_recording", "mfOnly", false},
+	   cannot set).
+
+	   `hiddenWhenOn` is TRUE here: the flag is a *negative* capability — it
+	   says the AF family must go away when it is on. It was written the other
+	   way round, which inverted the whole family: an e2ptz that does not
+	   report `mfOnly` at all (both test units) lost `Area`, Continuous AF,
+	   CAF sensitivity, Live CAF, the two MF-assist rows and AF Speed, while a
+	   body that really is manual-only would have kept them (bug 218 — QA
+	   compared the lens tab with the camera's own page, which shows AF Speed
+	   unconditionally). */
+	{"af_mode", "mfOnly", true},
+	{"caf", "mfOnly", true},
+	{"caf_sens", "mfOnly", true},
+	{"af_area", "mfOnly", true},
+	{"live_caf", "mfOnly", true},
+	{"af_speed", "mfOnly", true},
+	{"mf_mag", "mfOnly", true},
+	{"mf_recording", "mfOnly", true},
 	/* The focus family rides the negative `noFocus` flag: a body without a
 	   focus motor reports it, and every focus row is meaningless there
 	   (bug 115 — MF-assist rows offered on a body that has no such setting). */
