@@ -565,6 +565,11 @@ private:
 	   the >=1.0.5 Size row when the camera has one, else the 1.0.3 body-size
 	   stepper, which walks four steps between its own min and max. */
 	int subjectSizePct() const;
+	/* The framing size the read-out under the pad prints: the number the
+	   control that owns it shows. `subjectSizePct()` is the same size on the
+	   0..100 scale the figure is drawn with, which is NOT what a 1.0.3 body
+	   displays — its Size stepper reads 80..120 % (bug 214). */
+	int sizeReadoutPct() const;
 	/* Push the two offsets and the subject size into the pad at once. */
 	void paintPad();
 	/* The handle-gesture explanation the camera's page shows, with its

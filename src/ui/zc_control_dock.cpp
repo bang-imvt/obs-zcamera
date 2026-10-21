@@ -4871,10 +4871,15 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		auto *presetRow = new QHBoxLayout();
 		presetRow->setSpacing(4);
 		const auto presetBtn = [this, sizeCol, presetRow](const char *key,
+							const char *tipKey,
 							QPushButton **slot,
 							int *preset) {
+			/* Bug 216: the caption is the short form — these three sit
+			   side by side in a fixed-width column, and the English
+			   "Full body / Waist / Close up" was elided to "ll bo /
+			   Nalsi / ose u". The full name goes in the tooltip. */
 			auto *btn = new QPushButton(ztr(key), sizeCol);
-			btn->setToolTip(ztr(key));
+			btn->setToolTip(ztr(tipKey));
 			/* Checkable, because the page marks the preset the current
 			   Size corresponds to; the tick is painted in
 			   updateFovPresetButtons() (bug lists 16/17/20). */
@@ -4898,11 +4903,14 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 			*slot = btn;
 			return btn;
 		};
-		presetBtn("ZCameraPlugin.Framing.FovFullBody", &fovFullBodyBtn_,
+		presetBtn("ZCameraPlugin.Framing.FovFullBodyShort",
+			  "ZCameraPlugin.Framing.FovFullBody", &fovFullBodyBtn_,
 			  &fovPresetFullBody_);
-		presetBtn("ZCameraPlugin.Framing.FovWaist", &fovWaistBtn_,
+		presetBtn("ZCameraPlugin.Framing.FovWaistShort",
+			  "ZCameraPlugin.Framing.FovWaist", &fovWaistBtn_,
 			  &fovPresetWaist_);
-		presetBtn("ZCameraPlugin.Framing.FovCloseUp", &fovCloseupBtn_,
+		presetBtn("ZCameraPlugin.Framing.FovCloseUpShort",
+			  "ZCameraPlugin.Framing.FovCloseUp", &fovCloseupBtn_,
 			  &fovPresetCloseup_);
 		/* Exactly one of the three carries the tick: the one whose stored
 		   size equals the current Size. The sizes come from all_status
@@ -6144,6 +6152,19 @@ int ZcFramingPanel::subjectSizePct() const
 	return 50;
 }
 
+/* The number the read-out prints. Both firmware generations name their size in
+   percent but on different scales — >=1.0.5 a 0..100 slider, 1.0.3 an 80..120 %
+   stepper — and the read-out has to agree with the control next to it, not with
+   the drawing (bug 214: a 110 % stepper with "size 75 %" under it). */
+int ZcFramingPanel::sizeReadoutPct() const
+{
+	if (hasFovSize_ && fovSizeSp_)
+		return fovSizeSp_->value();
+	if (bodySizeSp_)
+		return bodySizeSp_->value();
+	return subjectSizePct();
+}
+
 void ZcFramingPanel::paintPad()
 {
 	if (pad_) {
@@ -6153,10 +6174,18 @@ void ZcFramingPanel::paintPad()
 	if (padReadout_) {
 		/* Bug 185: the value follows the arrows at once, from the same numbers
 		   the tile is drawn from, so the read-out and the picture can never
-		   disagree. */
+		   disagree.
+
+		   Bugs 214/215: all three numbers the pad is drawn from are printed,
+		   each with its own name, in the order the camera's page lists them
+		   (face height, horizontal placement, framing size). The size is the
+		   number the Size control shows, which is what the operator compares
+		   it with — not the 0..100 scale the figure is drawn on, which is
+		   what made a 110 % stepper read 75 % underneath it (bug 214). */
 		padReadout_->setText(ztr("ZCameraPlugin.Framing.PadReadout")
 					 .arg(faceHeight_)
-					 .arg(subjectSizePct()));
+					 .arg(placement_)
+					 .arg(sizeReadoutPct()));
 	}
 }
 
@@ -6719,6 +6748,8 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 			   kFramingBodySizeMin +
 			       asInt("body_size", 0) * kFramingBodySizeStep,
 			   kFramingBodySizeMax));
+		/* The 1.0.3 size, same read-out as fov_size (bug 214). */
+		paintPad();
 	}
 	/* The >=1.0.5 Size row and its preset buttons. `fov_size` here is the
 	   current size; the three presets' own sizes come from
@@ -6732,6 +6763,10 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 		if (fovSizeSp_)
 			fovSizeSp_->setValue(
 			    qBound(0, asInt("fov_size", 0), 100));
+		/* Bug 214: the read-out under the pad draws this size, and a
+		   programmatic setValue() runs no commit handler, so it has to be
+		   repainted here or it keeps whatever the last nudge left. */
+		paintPad();
 	}
 	/* Lock Zoom, kept as state rather than read back off the segment: the
 	   interlock below turns that segment off whenever the fix-angle box owns
