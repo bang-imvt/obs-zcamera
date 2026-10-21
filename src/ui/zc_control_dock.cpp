@@ -2239,6 +2239,11 @@ private:
 	float markerX_ = 0.5f, markerY_ = 0.5f;
 	bool dragging_ = false;
 	float anchorX_ = 0.0f, anchorY_ = 0.0f;
+	/* The gesture the current press started (bug 212): the source draws from
+	   the same rule, so what is written on release is the rectangle the
+	   operator saw. The rectangle it started from is ml_/mt_/mr_/mb_, which
+	   a drag does not touch. */
+	zc::MaskGesture gesture_ = zc::MaskGesture::None;
 
 	bool trackOn_ = false;
 	float tbL_ = 0.0f, tbT_ = 0.0f, tbW_ = 0.0f, tbH_ = 0.0f;
@@ -2483,13 +2488,20 @@ void ZcOverlayLink::onOverlayPointer(int phase, int button, float nx, float ny)
 
 	/* MaskEdit. The source draws the live rectangle itself; the dock only
 	   needs the corners, and it computes them from the same coordinates so
-	   the write and the drawing cannot disagree. */
+	   the write and the drawing cannot disagree.
+
+	   Bug 212: the press decides what the drag means — a corner resizes the
+	   rectangle, the inside moves it, anywhere else draws a new one — using
+	   the rule the source uses (zc::maskGestureAt / zc::maskDragRect), so
+	   the picture on the way and the write at the end are the same
+	   rectangle. */
 	if (button != MOUSE_LEFT && button != -1)
 		return;
 	if (phase == zc::OverlayPointerPress) {
 		dragging_ = true;
 		anchorX_ = nx;
 		anchorY_ = ny;
+		gesture_ = zc::maskGestureAt(ml_, mt_, mr_, mb_, maskOn_, nx, ny);
 	} else if (phase == zc::OverlayPointerDrag) {
 		if (!dragging_)
 			return;
@@ -2497,8 +2509,10 @@ void ZcOverlayLink::onOverlayPointer(int phase, int button, float nx, float ny)
 		if (!dragging_)
 			return;
 		dragging_ = false;
-		const float l = qMin(anchorX_, nx), r = qMax(anchorX_, nx);
-		const float t = qMin(anchorY_, ny), b = qMax(anchorY_, ny);
+		float l = ml_, t = mt_, r = mr_, b = mb_;
+		zc::maskDragRect(gesture_, ml_, mt_, mr_, mb_, anchorX_, anchorY_,
+				 nx, ny, &l, &t, &r, &b);
+		gesture_ = zc::MaskGesture::None;
 		/* A stray click with no drag is not a rectangle: ignore it rather
 		   than write a zero-area mask the camera will refuse. */
 		if (r - l < 0.02f && b - t < 0.02f)

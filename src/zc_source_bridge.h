@@ -39,6 +39,41 @@ enum OverlayPointerPhase {
 	OverlayPointerRelease = 2,
 };
 
+/* What a press on the detection-area rectangle starts.
+
+   The camera's own page lets the operator work on the rectangle it already
+   has: grab a corner to resize it, grab the inside to move it, press outside
+   to draw a new one. The plugin used to start a new rectangle on every press,
+   so the first click of an edit destroyed the one being edited (bug 212). */
+enum class MaskGesture {
+	None = 0,
+	New,          /* press on empty picture: draw a fresh rectangle        */
+	Move,         /* press inside: carry the whole rectangle along        */
+	ResizeLeftTop,
+	ResizeRightTop,
+	ResizeLeftBottom,
+	ResizeRightBottom,
+};
+
+/* How far from a corner (normalized units) a press still counts as "on that
+   corner". Both sides of the bridge use this one number, so the rectangle the
+   source draws and the one the dock writes cannot disagree. */
+constexpr float kMaskGrabTolerance = 0.025f;
+
+/* What a press at (nx, ny) starts, given the rectangle currently on the
+   picture. An empty or switched-off rectangle always starts a new one. */
+MaskGesture maskGestureAt(float left, float top, float right, float bottom,
+			  bool on, float nx, float ny);
+
+/* The rectangle a drag produces: from the press state (`base*`, the corners
+   before the press; `grabX`/`grabY`, where the pointer went down) to the
+   pointer at (nx, ny). Corners stay ordered and inside the picture, and a
+   resize never crosses over its own fixed corner. For MaskGesture::New the
+   grab point is the anchor, so the rectangle is grown from it. */
+void maskDragRect(MaskGesture gesture, float baseL, float baseT, float baseR,
+		  float baseB, float grabX, float grabY, float nx, float ny,
+		  float *outL, float *outT, float *outR, float *outB);
+
 /* Implemented by the dock. One sink at a time: the dock drives one camera. */
 class OverlayPointerSink {
 public:

@@ -465,6 +465,10 @@ private:
 	bool overlayDragPrevOn_ = false;
 	float overlayDragPrevL_ = 0.0f, overlayDragPrevT_ = 0.0f;
 	float overlayDragPrevR_ = 1.0f, overlayDragPrevB_ = 1.0f;
+	/* Which gesture the current press started (zc::MaskGesture): a new
+	   rectangle, a move of the whole one, or a resize from one corner
+	   (bug 212). */
+	int overlayDragGesture_ = 0;
 	/* One-shot latch for the "nothing to draw" line: reported when the
 	   overlay goes empty, cleared as soon as anything is drawn. */
 	bool overlayDiagReported_ = false;
@@ -1323,7 +1327,13 @@ void ZcSspSource::onPointerEvent(int phase, int button, int px, int py)
 	/* Mask editing is tracked here as well, so the rectangle follows the
 	   pointer on the next frame instead of after a camera round-trip. Only
 	   the left button draws; the dock is told about every phase regardless,
-	   because it is the side that writes the camera. */
+	   because it is the side that writes the camera.
+
+	   Bug 212: a press used to start a new rectangle wherever it landed, so
+	   the first click of an edit threw away the rectangle being edited. The
+	   gestures are the camera page's own (corner = resize, inside = move,
+	   outside = new), shared with the dock through the bridge so the drawn
+	   rectangle and the written one are the same one. */
 	if (mode == zc::OverlayInteraction::MaskEdit &&
 	    (phase == zc::OverlayPointerDrag || button == MOUSE_LEFT)) {
 		std::lock_guard<std::mutex> lock(overlayMutex_);
@@ -1341,21 +1351,39 @@ void ZcSspSource::onPointerEvent(int phase, int button, int px, int py)
 			overlayDragging_ = true;
 			overlayDragAnchorX_ = nx;
 			overlayDragAnchorY_ = ny;
-			overlayMaskOn_ = true;
-			overlayMaskL_ = nx;
-			overlayMaskT_ = ny;
-			overlayMaskR_ = nx;
-			overlayMaskB_ = ny;
+			overlayDragGesture_ = (int)zc::maskGestureAt(
+			    overlayMaskL_, overlayMaskT_, overlayMaskR_,
+			    overlayMaskB_, overlayMaskOn_, nx, ny);
+			if (overlayDragGesture_ ==
+			    (int)zc::MaskGesture::New) {
+				/* A fresh rectangle starts as a point under the
+				   pointer and grows with the drag. */
+				overlayMaskOn_ = true;
+				overlayMaskL_ = nx;
+				overlayMaskT_ = ny;
+				overlayMaskR_ = nx;
+				overlayMaskB_ = ny;
+			}
 		} else if (phase == zc::OverlayPointerDrag && overlayDragging_) {
-			overlayMaskL_ = qMin(overlayDragAnchorX_, nx);
-			overlayMaskR_ = qMax(overlayDragAnchorX_, nx);
-			overlayMaskT_ = qMin(overlayDragAnchorY_, ny);
-			overlayMaskB_ = qMax(overlayDragAnchorY_, ny);
+			float l = overlayMaskL_, t = overlayMaskT_,
+			      r = overlayMaskR_, b = overlayMaskB_;
+			zc::maskDragRect((zc::MaskGesture)overlayDragGesture_,
+					 overlayDragPrevL_, overlayDragPrevT_,
+					 overlayDragPrevR_, overlayDragPrevB_,
+					 overlayDragAnchorX_,
+					 overlayDragAnchorY_, nx, ny, &l, &t, &r, &b);
+			overlayMaskOn_ = true;
+			overlayMaskL_ = l;
+			overlayMaskT_ = t;
+			overlayMaskR_ = r;
+			overlayMaskB_ = b;
 		} else if (phase == zc::OverlayPointerRelease) {
 			overlayDragging_ = false;
 			const float dw = overlayMaskR_ - overlayMaskL_;
 			const float dh = overlayMaskB_ - overlayMaskT_;
 			if (dw < 0.02f && dh < 0.02f) {
+				/* Too small to be a rectangle (a stray click, or a
+				   resize dragged shut): put the previous one back. */
 				overlayMaskOn_ = overlayDragPrevOn_;
 				overlayMaskL_ = overlayDragPrevL_;
 				overlayMaskT_ = overlayDragPrevT_;
