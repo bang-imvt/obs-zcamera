@@ -7693,6 +7693,21 @@ void ZcPresetPanel::setClient(ZcCameraClient *client)
 				}
 				updateActions();
 			});
+	/* The panels are attached BEFORE the client connects (openCameraNow does
+	   setClient(), then connect()), so the read issued below goes out on a
+	   transport that has no origin yet and fails. The `asked` latch then kept it
+	   from ever being asked again — which is bug 74 on 1.0.6: the camera says
+	   Common, the row never greys, and opening the PTZ settings group is the
+	   only thing that would ever correct it. Re-arm on every successful
+	   connection and ask then. */
+	connect(client_, &ZcCameraClient::connectionStateChanged, this,
+		[this](bool up) {
+			if (!up || !client_)
+				return;
+			speedModeAsked_ = false;
+			askSpeedMode();
+			updateActions();
+		});
 	askSpeedMode();
 	refresh();
 }
