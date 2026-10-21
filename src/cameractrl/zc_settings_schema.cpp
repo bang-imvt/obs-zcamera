@@ -27,10 +27,22 @@ static std::vector<CatalogDef> makeCatalogs()
 {
 	/* Mirrors ZCamGuiOpen settings-schema.ts groups + catalogs. */
 	return {
-	    {"exposure", {}, {"ev_choice", "flicker", "meter_mode", "iris",
-			      "iso", "min_iso", "max_iso", "iso_ctrl", "shutter",
-			      "max_shutter", "shutter_angle_ctrl", "sht_operation",
-			      "eND", "lock_ae_in_rec", "ae_speed", "bl_comp"}},
+	    /* Bug 217: `shutter_time` / `shutter_angle` and the two MAX Shutter
+	       rows are ordered as the camera's own page puts them (Aperture,
+	       Shutter, ISO — the batch reply puts `iso` before `iris`, and the
+	       order below is what decides where a probed key lands). The names
+	       `shutter` / `max_shutter` are the other generation's spelling and
+	       are kept for it; the P2 line answers only the `_time` / `_angle`
+	       ones, which its getbatch reply does not list at all. */
+	    {"exposure",
+	     {},
+	     {"ev_choice", "flicker", "meter_mode", "iso", "iris", "shutter_time",
+	      "shutter_angle", "shutter", "min_iso", "max_iso", "iso_ctrl",
+	      "sht_operation", "shutter_angle_ctrl", "max_exp_shutter_time",
+	      "max_exp_shutter_angle", "max_shutter", "eND", "lock_ae_in_rec",
+	      "ae_speed", "bl_comp"},
+	     {"shutter_time", "shutter_angle", "max_exp_shutter_time",
+	      "max_exp_shutter_angle"}},
 	    {"wb", {}, {"wb", "wb_priority", "lock_awb_in_rec", "mwb", "tint",
 			"mwb_r", "mwb_g", "mwb_b"}},
 	    {"lens", {}, {"focus", "af_mode", "caf", "caf_sens", "af_area",

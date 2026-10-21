@@ -93,9 +93,89 @@ void ZcSettingsEngine::readGroup(const QString &catalog,
 				      return;
 			      }
 			      applyBatch(catalog, doc.object());
-			      if (cb)
-				      cb(true);
+			      probeMissingKeys(catalog, cb);
 		      });
+}
+
+/* Place a key at the position the catalog order gives it: before the first
+   key already in the list that the order lists after it, else at the end.
+   Keys the order does not mention (the camera reports plenty of those) are
+   skipped, so they never move. */
+static void insertByCatalogOrder(QStringList &keys, const QStringList &order,
+				 const QString &key)
+{
+	const int self = order.indexOf(key);
+	int at = keys.size();
+	if (self >= 0) {
+		for (int i = 0; i < keys.size(); ++i) {
+			const int other = order.indexOf(keys.at(i));
+			if (other > self) {
+				at = i;
+				break;
+			}
+		}
+	}
+	keys.insert(at, key);
+}
+
+/* Keys a catalog declares as per-key-only (CatalogDef::probeKeys) are read
+   individually after the batch and inserted into the group where the catalog
+   order puts them; a key the camera rejects (code -1) is left out exactly as
+   the batch path leaves out an unsupported cfg. Every probe is skipped for a
+   key the batch already delivered. */
+void ZcSettingsEngine::probeMissingKeys(const QString &catalog,
+					std::function<void(bool)> cb)
+{
+	QStringList order;
+	QStringList probes;
+	for (const auto &cat : zc::catalogs()) {
+		if (cat.id == catalog) {
+			order = cat.keys;
+			probes = cat.probeKeys;
+			break;
+		}
+	}
+	if (probes.isEmpty()) {
+		if (cb)
+			cb(true);
+		return;
+	}
+
+	const QStringList have = groupKeys_.value(catalog);
+	QStringList todo;
+	for (const QString &key : probes) {
+		if (!have.contains(key))
+			todo << key;
+	}
+	if (todo.isEmpty()) {
+		if (cb)
+			cb(true);
+		return;
+	}
+
+	auto pending = std::make_shared<int>(todo.size());
+	auto found = std::make_shared<QStringList>();
+	for (const QString &key : todo) {
+		readKey(key, [this, catalog, order, key, pending, found,
+			      cb](const ZcSettingValue &v) {
+			if (v.supported)
+				found->append(key);
+			if (--*pending > 0)
+				return;
+			if (!found->isEmpty()) {
+				QStringList keys = groupKeys_.value(catalog);
+				for (const QString &k : *found) {
+					if (!keys.contains(k))
+						insertByCatalogOrder(keys, order,
+								     k);
+				}
+				groupKeys_.insert(catalog, keys);
+			}
+			emit groupRefreshed(catalog);
+			if (cb)
+				cb(true);
+		});
+	}
 }
 
 /* Old-firmware path: read each schema key of the catalog through /ctrl/get

@@ -50,6 +50,11 @@ struct CatalogDef {
 	QString id;
 	QString parent;       /* indented under this group (System children) */
 	QStringList keys;     /* keys belonging to this catalog              */
+	/* Keys of `keys` that the camera answers only through /ctrl/get: its
+	   getbatch reply for this catalog does not carry them, so they are read
+	   one by one after the batch (bug 217 — the `exposure` batch of a P2 has
+	   no shutter key at all, yet /ctrl/get?k=shutter_time answers one). */
+	QStringList probeKeys;
 };
 
 /* Post-write dependency map: writing any srcKey in the list re-reads the

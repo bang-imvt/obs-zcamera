@@ -99,6 +99,9 @@ private:
 	   non-JSON body or an empty cfgs). */
 	void readGroupByKeys(const QString &catalog,
 			     std::function<void(bool)> cb);
+	/* Read the keys a catalog declares as per-key-only after a batch read,
+	   and add them to the group (CatalogDef::probeKeys). */
+	void probeMissingKeys(const QString &catalog, std::function<void(bool)> cb);
 
 	QJsonObject values_;
 	QHash<QString, ZcSettingValue> defs_;

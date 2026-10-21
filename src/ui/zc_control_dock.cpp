@@ -134,6 +134,16 @@ static QString settingLabel(const QString &key)
 		{QStringLiteral("ev_choice"), "ZCameraPlugin.Setting.EvChoice"},
 		{QStringLiteral("shutter"), "ZCameraPlugin.Setting.Shutter"},
 		{QStringLiteral("max_shutter"), "ZCameraPlugin.Setting.MaxShutter"},
+		/* Bug 217: the P2 line spells the pair `shutter_time` and
+		   `max_exp_shutter_time` (and the angle pair the same way); the
+		   rows above keep their names for the generation that uses them. */
+		{QStringLiteral("shutter_time"), "ZCameraPlugin.Setting.Shutter"},
+		{QStringLiteral("max_exp_shutter_time"),
+		 "ZCameraPlugin.Setting.MaxShutter"},
+		{QStringLiteral("shutter_angle"),
+		 "ZCameraPlugin.Setting.ShutterAngle"},
+		{QStringLiteral("max_exp_shutter_angle"),
+		 "ZCameraPlugin.Setting.MaxShutterAngle"},
 		{QStringLiteral("sht_operation"),
 		 "ZCameraPlugin.Setting.ShutterOperation"},
 		{QStringLiteral("exposure_window_idx"),
@@ -1572,6 +1582,28 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		return false;
 	};
 
+	/* The two shutter flavours, by the names each generation uses for them
+	   (bug 217). */
+	auto isShutterTimeKey = [](const QString &key) {
+		static const char *const kKeys[] = {"shutter_time", "shutter",
+						    "max_exp_shutter_time",
+						    "max_shutter"};
+		for (const char *k : kKeys) {
+			if (key == QLatin1String(k))
+				return true;
+		}
+		return false;
+	};
+	auto isShutterAngleKey = [](const QString &key) {
+		static const char *const kKeys[] = {"shutter_angle",
+						    "max_exp_shutter_angle"};
+		for (const char *k : kKeys) {
+			if (key == QLatin1String(k))
+				return true;
+		}
+		return false;
+	};
+
 	for (const QString &key : keys) {
 		/* The WDR setting is not offered by the camera's web UI (it is reported
 		   under the raw id `compose_mode`); showing it here only confuses, so it
@@ -1619,6 +1651,19 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		if (!zc::settingSupportedByFeatures(key,
 						   client_->cameraFeatures()))
 			continue;
+		/* Bug 217: shutter is offered in two flavours — exposure time and
+		   shutter angle — and the camera runs one at a time; `sht_operation`
+		   is the switch, and its own page swaps the two rows with it. Offer
+		   the pair that matches, and default to time when the camera has not
+		   said yet (every body we ship for starts in Speed). */
+		if (isShutterTimeKey(key) || isShutterAngleKey(key)) {
+			const bool angleMode =
+			    client_->settingValue(
+				QLatin1String("sht_operation")) ==
+			    QLatin1String("Angle");
+			if (angleMode != isShutterAngleKey(key))
+				continue;
+		}
 		ZcSettingValue def;
 		if (!client_->settingDefinition(key, &def))
 			continue;
