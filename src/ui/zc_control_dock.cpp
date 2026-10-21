@@ -9209,33 +9209,42 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 		framing_->onBoxStateChanged = pushTrackBox;
 
 	/* /info arrives asynchronously: the tab appears (or disappears) and the
-	   preset list loads once the model is known. */
+	   preset list loads once the model is known. Bug 194: the reply can also
+	   arrive *inside* connect() — which runs a nested event loop for its origin
+	   probe — that is, before this handler is subscribed. Switching to the
+	   second camera then left the whole pane on the first camera's model:
+	   updatePtzTab() never ran, the firmware generation stayed at the value
+	   guessed from an empty version, and framing_->refresh() (the read that
+	   decides which rows this camera has) was never issued, so the newer
+	   firmware's Lock Zoom / Sensitivity / Acceleration rows stayed hidden.
+	   Hence the same work is done once here, after connect() returns, as well
+	   as on every later /info. */
+	const auto applyCameraInfo = [this, pushTrackBox]() {
+		updatePtzTab();
+		if (framing_)
+			framing_->setFirmwareNew(
+				client_ && client_->firmwareAtLeast("1.0.5"));
+		if (client_ && client_->cameraSupportsPtz()) {
+			presets_->refresh();
+			/* Seed the position read-out and the range-limit
+			   sliders from the camera (bug list: the Range
+			   Limit group). */
+			ptz_->refreshState();
+			/* The PTZ catalog carries the keys the PTZ tab
+			   and the preset pane depend on (`ptz_limit` for
+			   the Range Limit group, `ptz_speed_mode` for
+			   the per-preset speed row); read it once so
+			   those dependencies are known without the
+			   operator having to open the group. */
+			client_->readGroup(QLatin1String("ptz"), nullptr);
+		}
+		if (client_ && client_->cameraSupportsAutoFraming())
+			framing_->refresh();
+		pushTrackBox();
+	};
 	connect(client_, &ZcCameraClient::cameraInfoChanged, this,
-		[this, pushTrackBox]() {
-			updatePtzTab();
-			if (framing_)
-				framing_->setFirmwareNew(
-					client_ &&
-					client_->firmwareAtLeast("1.0.5"));
-			if (client_ && client_->cameraSupportsPtz()) {
-				presets_->refresh();
-				/* Seed the position read-out and the range-limit
-				   sliders from the camera (bug list: the Range
-				   Limit group). */
-				ptz_->refreshState();
-				/* The PTZ catalog carries the keys the PTZ tab
-				   and the preset pane depend on (`ptz_limit` for
-				   the Range Limit group, `ptz_speed_mode` for
-				   the per-preset speed row); read it once so
-				   those dependencies are known without the
-				   operator having to open the group. */
-				client_->readGroup(QLatin1String("ptz"),
-						   nullptr);
-			}
-			if (client_ && client_->cameraSupportsAutoFraming())
-				framing_->refresh();
-			pushTrackBox();
-		});
+		applyCameraInfo);
+	applyCameraInfo();
 	/* Live position (ptzfChange): the read-out follows the head as it moves. */
 	connect(client_, &ZcCameraClient::ptzPositionChanged, this,
 		[this](double pan, double tilt, double) {
