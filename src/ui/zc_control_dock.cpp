@@ -1040,6 +1040,17 @@ ZcSettingsPanel::ZcSettingsPanel(QWidget *parent) : QWidget(parent)
 	header->addWidget(refresh);
 	layout->addLayout(header);
 
+	/* Playback banner (bug 167): the camera discards every setting write while
+	   it plays a file back, so the pane says so and locks rather than looking
+	   healthy while nothing takes effect. Hidden unless the mode says so. */
+	playbackBanner_ = new QLabel(this);
+	playbackBanner_->setWordWrap(true);
+	playbackBanner_->setStyleSheet(
+	    "color:#f0d9a8;background:#3a3323;border:1px solid #6b5a33;"
+	    "border-radius:4px;padding:6px 8px;font-size:11px;");
+	playbackBanner_->hide();
+	layout->addWidget(playbackBanner_);
+
 	/* The stream bar sits above the group list rather than in it: how the
 	   camera encodes the network stream is the setting an operator reaches for
 	   most, so it must be there without navigating to a group (spec §2). */
@@ -1246,6 +1257,31 @@ void ZcSettingsPanel::hidePrompts()
 		loginPage_->hide();
 	subtabList_->show();
 	rowsContainer_->show();
+}
+
+void ZcSettingsPanel::setPlaybackMode(bool on)
+{
+	if (!playbackBanner_)
+		return;
+	/* Repainted by the dock on every mode change, so this has to be cheap and
+	   idempotent: the text is only rewritten when the state actually flips. */
+	if (playbackShown_ == on)
+		return;
+	playbackShown_ = on;
+	playbackBanner_->setText(
+	    ztr("ZCameraPlugin.Dock.PlaybackBanner"));
+	playbackBanner_->setVisible(on);
+	/* Lock what cannot take effect. The camera answers code 0 to these writes
+	   and discards them, so leaving them live is worse than grey: the operator
+	   cannot tell a dropped write from an applied one. The Refresh button stays
+	   live — re-reading is harmless and is how the pane notices the switch
+	   back to record. */
+	if (streamBar_)
+		streamBar_->setEnabled(!on);
+	if (subtabList_)
+		subtabList_->setEnabled(!on);
+	if (rowsContainer_)
+		rowsContainer_->setEnabled(!on);
 }
 
 void ZcSettingsPanel::setClient(ZcCameraClient *client)
@@ -8950,6 +8986,11 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 			overlay_->setClient(nullptr, QString());
 		delete client_;
 		client_ = nullptr;
+		/* The playback lock and the banner belong to the camera that reported
+		   them (bug 167): the next one has its own mode. */
+		if (modePoll_)
+			modePoll_->stop();
+		settings_->setPlaybackMode(false);
 	}
 	client_ = new ZcCameraClient(this);
 	settings_->setClient(client_);
@@ -8994,6 +9035,12 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 		client_ = nullptr;
 		/* No client: the PTZ tab must go, and every control is inert. */
 		updatePtzTab();
+		/* The playback lock belongs to the camera that reported it; a dead
+		   connection must not leave the pane locked (bug 167). */
+		if (modePoll_)
+			modePoll_->stop();
+		if (settings_)
+			settings_->setPlaybackMode(false);
 		statusBarLabel_->setText(
 		    ztr("ZCameraPlugin.Dock.OfflineReason").arg(host));
 		return false;
@@ -9006,18 +9053,23 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 	client_->refreshStatus();
 	settings_->refreshGroup();
 
-	/* The status line, with the playback caveat (bug list #94): a camera left
-	   in its playback mode ignores every setting write, and the only symptom
-	   was "nothing works". The client already forces record mode on connect
-	   (RD note), but the operator can still switch it on the camera itself;
-	   when that happens the line says so in amber instead of the plain
-	   connected text. */
+	/* The status line, with the playback caveat (bugs #94 / #167): a camera in
+	   its playback mode shows no live picture, drops the audio and ignores
+	   every setting write, with no error anywhere — it reads as "the plugin is
+	   broken". The client forces record mode on connect, but the operator can
+	   still switch the camera over from its own web UI afterwards; the line and
+	   the settings pane then say so instead of showing a healthy camera.
+
+	   The test is ZcCameraClient::isPlaybackMode(), not "contains play": the
+	   wire carries either the page's numeric CAMERA_MODE_* in ModeChanged or a
+	   /ctrl/mode word starting with "pb" (bug 167 — the old text match missed
+	   both, which is why the hint never showed on E2_F6). */
 	const auto updateModeStatus = [this]() {
 		if (!client_)
 			return;
 		const QString mode = client_->mode();
-		if (mode.contains(QLatin1String("play"),
-				  Qt::CaseInsensitive)) {
+		const bool playback = ZcCameraClient::isPlaybackMode(mode);
+		if (playback) {
 			statusBarLabel_->setStyleSheet(
 			    "color:#d8b878;padding:2px 6px;");
 			statusBarLabel_->setText(
@@ -9031,6 +9083,8 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 				.arg(currentHost_)
 				.arg(mode));
 		}
+		if (settings_)
+			settings_->setPlaybackMode(playback);
 	};
 	connect(client_, &ZcCameraClient::statusChanged, this,
 		[this, updateModeStatus](const QJsonObject &status) {
@@ -9044,6 +9098,22 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 		});
 	connect(client_, &ZcCameraClient::modeChanged, this,
 		[updateModeStatus](const QString &) { updateModeStatus(); });
+	/* Bug 167: also ASK for the mode on a slow tick. The camera's own web UI
+	   can put it into playback without this WebSocket saying anything at all,
+	   and on E2_F6 firmware it never says anything — the status line and the
+	   banner stayed silent while the picture was gone. 2 s keeps the extra
+	   request off the camera's single-threaded HTTP server. */
+	if (!modePoll_) {
+		modePoll_ = new QTimer(this);
+		modePoll_->setInterval(2000);
+		connect(modePoll_, &QTimer::timeout, this, [this]() {
+			if (client_)
+				client_->refreshMode();
+		});
+	}
+	modePoll_->start();
+	/* First paint: the connect() read may already have answered. */
+	updateModeStatus();
 	/* The REC badge (bug list #20). A fresh client starts not recording;
 	   from here the camera's own notifications keep it true. Some firmwares
 	   restate the recording flag in camera_status, so honour it when the

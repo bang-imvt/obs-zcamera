@@ -215,6 +215,12 @@ public:
 	   loads empty"). */
 	void showLoginLocked();
 	void hidePrompts();
+	/* The camera is in its playback mode (bug 167): /ctrl/mode says so, either
+	   from a ModeChanged event or from the poll in the client. Everything on
+	   this pane ignores writes in that mode, so say why at the top of the pane
+	   and lock the controls instead of letting the operator click into a void
+	   — the camera answers {"code":0} to a write it discards. */
+	void setPlaybackMode(bool on);
 
 public slots:
 	/* Re-read the stream bar and the visible group from the camera. */
@@ -283,6 +289,13 @@ private:
 	QToolButton *passReveal_ = nullptr;
 	QPushButton *loginBtn_ = nullptr;
 	QString loginHost_;
+
+	/* Playback-mode banner (bug 167): amber line above the stream bar, shown
+	   while the camera reports a playback mode. */
+	QLabel *playbackBanner_ = nullptr;
+	/* The last state painted into the banner, so a repaint on every poll does
+	   not re-layout the pane. */
+	bool playbackShown_ = false;
 
 	/* Stream bar controls. */
 	QWidget *streamBar_ = nullptr;
@@ -1048,6 +1061,11 @@ private:
 	   registered as the global pointer sink for its lifetime. */
 	ZcOverlayLink *overlay_ = nullptr;
 	QLabel *statusBarLabel_ = nullptr;
+	/* Polls /ctrl/mode while connected (bug 167): firmware that never pushes
+	   ModeChanged leaves the operator's own switch to playback invisible, so the
+	   dock asks instead of waiting. Two seconds — the camera's HTTP server is
+	   single-threaded and this must not compete with the panel reads. */
+	QTimer *modePoll_ = nullptr;
 	/* "● REC" while the camera records -- including the recording the camera
 	   starts itself when tracking triggers it (bug list #20). */
 	QLabel *recBadge_ = nullptr;

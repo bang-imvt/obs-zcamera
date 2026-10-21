@@ -25,6 +25,7 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <QList>
 #include <QPair>
 #include <QHash>
+#include <QTimer>
 
 #include "zc_settings_schema.h"
 
@@ -108,6 +109,11 @@ bool ZcCameraClient::connect(const QString &host, int port,
 
 	connected_ = true;
 
+	/* Ask for the mode before forcing record: a camera left in playback is the
+	   state the dock must report (bug 167), and a firmware that never pushes
+	   ModeChanged would otherwise leave mode_ empty forever. */
+	refreshMode();
+
 	/* A camera left in playback mode (from its own web UI) shows no live stream
 	   and ignores every setting write, with no error — it looks like the plugin
 	   is broken (bug list "camera in playback mode"). Put it back in record
@@ -154,8 +160,15 @@ void ZcCameraClient::handleWsEvent(const QString &what,
 		/* Also refresh temperature/mode from the status payload. */
 		if (obj.contains("temperature"))
 			emit temperatureChanged(obj.value("temperature").toDouble());
-		if (obj.contains("mode"))
-			emit modeChanged(obj.value("mode").toString());
+		if (obj.contains("mode")) {
+			/* Keep the member in step: the dock asks mode() when it repaints,
+			   so emitting without storing reported the previous mode. */
+			const QString m = obj.value("mode").toString();
+			if (m != mode_) {
+				mode_ = m;
+				emit modeChanged(mode_);
+			}
+		}
 	} else if (what == ws_events::kRecStarted) {
 		setRecording(true);
 		emit recordingStarted();
@@ -269,6 +282,55 @@ void ZcCameraClient::setMode(const QString &mode)
 	QUrlQuery q;
 	q.addQueryItem("action", mode);
 	sendQuery(transport_, http::kMode, "", q);
+	/* The reply to the action carries no new mode ({"code":0,"msg":""}), so the
+	   result can only be learned by asking. A switch is not instant on the
+	   camera, hence the small delay before the read-back. */
+	QTimer::singleShot(600, this, [this]() { refreshMode(); });
+}
+
+bool ZcCameraClient::isPlaybackMode(const QString &mode)
+{
+	if (mode.isEmpty())
+		return false;
+	/* Numeric: the ModeChanged event's value is the page's CAMERA_MODE_*
+	   (0 movie, 1 photo, 2 playback, 4 standby, 7 replay). */
+	bool ok = false;
+	const int n = mode.toInt(&ok);
+	if (ok)
+		return n == 2 || n == 7;
+	/* String: /ctrl/mode `msg` is a prefix word — the same one the page tests
+	   with mode.startsWith("pb"): "pb", "pb_running", "to_pb". The spelled-out
+	   forms are accepted for firmwares that return those instead. */
+	const QString m = mode.trimmed().toLower();
+	return m.startsWith(QLatin1String("pb")) ||
+	       m.contains(QLatin1String("play")) ||
+	       m.contains(QLatin1String("replay"));
+}
+
+void ZcCameraClient::refreshMode()
+{
+	if (!connected_)
+		return;
+	transport_.get(http::kMode, [this](const ZcHttpResponse &rsp) {
+		QJsonParseError err{};
+		const QJsonDocument doc =
+			QJsonDocument::fromJson(rsp.body, &err);
+		if (err.error != QJsonParseError::NoError || !doc.isObject())
+			return;
+		/* `msg` carries the mode word. A camera in a transitional state answers
+		   code -1 with an empty msg — keep what we have then, rather than
+		   reporting "not in playback" on a transient. */
+		const QJsonObject o = doc.object();
+		QString m = o.value(QLatin1String("msg")).toString();
+		if (m.isEmpty())
+			m = o.value(QLatin1String("desc")).toString();
+		if (m.isEmpty())
+			return;
+		if (m == mode_)
+			return;
+		mode_ = m;
+		emit modeChanged(mode_);
+	});
 }
 
 void ZcCameraClient::lensZoomIn(int speed)

@@ -61,6 +61,18 @@ public:
 	bool isConnected() const { return connected_; }
 	QString host() const;
 	QString mode() const { return mode_; }
+	/* Whether `mode` means "the camera is in playback" (bug 167). Two shapes
+	   arrive on this wire and both must be understood: /ctrl/mode answers with
+	   a string ("rec", "pb", "pb_running", "tl", …) while the ModeChanged
+	   WebSocket event carries the page's numeric CAMERA_MODE_* (2 playback,
+	   7 replay). Comparing the dock's text against "play" — as it used to —
+	   matched neither, which is why the hint never appeared. */
+	static bool isPlaybackMode(const QString &mode);
+	/* Read /ctrl/mode and adopt its `msg`. The mode has to be *asked for*:
+	   firmware that never pushes ModeChanged (E2_F6, bug 167) leaves the client
+	   without one, and a camera switched over from its own web UI is invisible
+	   to us otherwise. Cheap enough to poll. */
+	void refreshMode();
 	bool isRecording() const { return recording_; }
 	double temperature() const { return temperature_; }
 	/* The camera answered a request with a Digest challenge. A connect() that
