@@ -6164,6 +6164,17 @@ void ZcFramingPanel::refreshMaskRect()
 			if (link_)
 				link_->armMode(zc::OverlayInteraction::MaskEdit);
 		});
+		/* ...and then the other half of bug 28: switching the area off has
+		   to take the rectangle off the picture and close the editor. Also
+		   leaves the camera the way this hook found it. */
+		QTimer::singleShot(12000, this, [this]() {
+			if (link_) {
+				link_->setMaskVisible(false);
+				link_->armMode(zc::OverlayInteraction::None);
+			}
+			if (client_)
+				client_->setFramingMaskEnable(false);
+		});
 	}
 	client_->framingMaskQuery([this](const QJsonObject &doc) {
 		if (!client_ || !link_)
