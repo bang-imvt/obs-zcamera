@@ -36,6 +36,7 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 
 #include "obs-ssp.h"
 #include "ssp-mdns.h"
+#include "cameractrl/zc_credential_store.h"
 #include "ui/zc_control_dock.h"
 #include "zc_source_bridge.h"
 
@@ -123,6 +124,44 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 		   path can be seen in the log. */
 		const QByteArray testHost =
 		    qgetenv("ZC_TEST_CAMERA").trimmed();
+		/* Credential-store hook, also opt-in:
+		     ZC_TEST_CREDS=host:user:password  writes one login through the
+		     same path a successful sign-in uses;
+		     ZC_TEST_CREDS_READ=host           reads one back.
+		   Two runs are what prove the round trip: the read run is a fresh
+		   process, so the answer can only come from the sealed file. The
+		   password itself is never logged — only its length. */
+		const QByteArray testCreds = qgetenv("ZC_TEST_CREDS").trimmed();
+		if (!testCreds.isEmpty()) {
+			const QStringList parts =
+			    QString::fromUtf8(testCreds).split(QLatin1Char(':'));
+			if (parts.size() == 3) {
+				zc::ZcCredentials creds;
+				creds.username = parts[1];
+				creds.password = parts[2];
+				zc::saveCredentials(parts[0], creds);
+				blog(LOG_INFO,
+				     "[obs-zcamera] creds hook: saved host %s user %s (%d chars)",
+				     parts[0].toUtf8().constData(),
+				     parts[1].toUtf8().constData(),
+				     int(parts[2].size()));
+			} else {
+				blog(LOG_WARNING,
+				     "[obs-zcamera] creds hook: expected host:user:password, got %d parts",
+				     int(parts.size()));
+			}
+		}
+		const QByteArray testCredsRead =
+		    qgetenv("ZC_TEST_CREDS_READ").trimmed();
+		if (!testCredsRead.isEmpty()) {
+			const QString host = QString::fromUtf8(testCredsRead);
+			const zc::ZcCredentials back = zc::lookupCredentials(host);
+			blog(LOG_INFO,
+			     "[obs-zcamera] creds hook: read back host %s user '%s' password %d chars",
+			     testCredsRead.constData(),
+			     back.username.toUtf8().constData(),
+			     int(back.password.size()));
+		}
 		blog(LOG_INFO, "[obs-zcamera] test hook: finished loading (host '%s')",
 		     testHost.constData());
 		if (!testHost.isEmpty()) {

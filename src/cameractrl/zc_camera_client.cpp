@@ -30,24 +30,8 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 
 namespace zc {
 
-/* The shared per-host credential store (see the header). A function-local
-   static: initialised on first use and alive until the process exits, so
-   neither the dock nor a source can free it out from under the other. */
-static QHash<QString, ZcCredentials> &credentialStore()
-{
-	static QHash<QString, ZcCredentials> store;
-	return store;
-}
-
-void rememberCredentials(const QString &host, const ZcCredentials &creds)
-{
-	credentialStore()[host] = creds;
-}
-
-ZcCredentials lookupCredentials(const QString &host)
-{
-	return credentialStore().value(host);
-}
+/* The shared per-host credential store lives in zc_credential_store.cpp; the
+   declarations reach this file through zc_camera_client.h. */
 
 ZcCameraClient::ZcCameraClient(QObject *parent) : QObject(parent)
 {

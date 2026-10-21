@@ -35,18 +35,13 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include "zc_settings_engine.h"
 /* ZcFeatures: the /info capability map this class caches for the UI. */
 #include "zc_settings_schema.h"
+/* Per-host camera logins (session + the sealed file a successful login is
+   written to). Kept in its own unit because the dock and the source both read
+   it; included here so callers that already pull in this header keep the
+   declarations. */
+#include "zc_credential_store.h"
 
 namespace zc {
-
-/* Per-host credentials remembered for the running session. Memory-only by
-   design: never written to disk and never stored in the scene collection, so
-   they are gone when OBS exits. The dock fills them in when the operator logs
-   a camera in (bug 4); the source's Properties bitrate push reads them to
-   reach a camera that requires a login, because a source has no login UI of
-   its own. Accessed from the OBS UI thread only — the dock and source
-   updates both run there — so a plain function-local static is enough. */
-void rememberCredentials(const QString &host, const ZcCredentials &creds);
-ZcCredentials lookupCredentials(const QString &host);
 
 class ZcCameraClient : public QObject {
 	Q_OBJECT

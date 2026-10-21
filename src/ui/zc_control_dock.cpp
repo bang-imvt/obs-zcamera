@@ -1106,6 +1106,13 @@ ZcSettingsPanel::ZcSettingsPanel(QWidget *parent) : QWidget(parent)
 		connect(loginBtn_, &QPushButton::clicked, this, [this]() {
 			emit loginRequested(loginUser_->text(), loginPass_->text());
 		});
+		/* Enter in either field submits, the way the camera's own page does:
+		   the operator types the password and presses Enter. */
+		const auto submit = [this]() {
+			emit loginRequested(loginUser_->text(), loginPass_->text());
+		};
+		connect(loginUser_, &QLineEdit::returnPressed, this, submit);
+		connect(loginPass_, &QLineEdit::returnPressed, this, submit);
 	}
 	loginPage_->hide();
 	layout->addWidget(loginPage_);
@@ -1171,6 +1178,15 @@ void ZcSettingsPanel::showLoginPrompt(const QString &host)
 	loginPage_->show();
 	subtabList_->hide();
 	rowsContainer_->hide();
+	/* A login this camera has used before comes up filled in, so the usual
+	   retry is one click rather than retyping both fields. A login the camera
+	   just refused is not in the store any more (the dock drops it), so this
+	   only ever fills in credentials that have not been rejected. */
+	const ZcCredentials known = zc::lookupCredentials(host);
+	if (!known.username.isEmpty()) {
+		loginUser_->setText(known.username);
+		loginPass_->setText(known.password);
+	}
 	loginUser_->setFocus();
 }
 
@@ -1358,6 +1374,17 @@ void ZcSettingsPanel::writeStreamParams(
 			return;
 		streamDoc_ = doc;
 		updateStreamBar();
+		/* A reply that reports the bitrate/GOP read-only is usually the
+		   camera restarting its encoder after this very write, not a
+		   permanent lock (bug 200). Read the settled document once instead
+		   of leaving the sliders grey until the operator switches encoder or
+		   resolution. Guarded like any other async reply. */
+		if (doc.value("bitrateRo").toBool() ||
+		    doc.value("gopRo").toBool())
+			QTimer::singleShot(1200, this, [this, c, index]() {
+				if (c == client_ && index == streamIndex_)
+					loadStream();
+			});
 	});
 }
 
@@ -1920,31 +1947,29 @@ void ZcSettingsPanel::updateStreamBar()
 				    kStreamBitrateMin);
 	streamBitrate_->setRange(kStreamBitrateMin, bitrateMax);
 	streamBitrate_->setValue(qBound(kStreamBitrateMin, bitrate, bitrateMax));
-	/* The encoder's bitrate and GOP cannot be changed while the stream is
-	   running: the camera refuses the write and only reports the field
-	   read-only afterwards, so on a freshly opened camera the two sliders used
-	   to look writable and greyed themselves only after the first drag (bug
-	   102, E2_F6_Pro). The running state is in the same document, so it is
-	   what greys them from the start. */
-	const bool streamRunning =
-	    streamDoc_.value(QLatin1String("streaming")).toBool() ||
-	    streamDoc_.value(QLatin1String("status"))
-		.toString()
-		.contains(QLatin1String("streaming"), Qt::CaseInsensitive);
-	const QString lockedTip =
-	    streamRunning ? ztr("ZCameraPlugin.Dock.StreamRunningTip")
-			  : QString();
-	streamBitrate_->setEnabled(!streamDoc_.value("bitrateRo").toBool() &&
-				   !streamRunning);
-	streamBitrate_->setToolTip(lockedTip);
+	/* Bitrate and GOP are writable unless the CAMERA says otherwise. The old
+	   rule also greyed them whenever the document's status read "streaming",
+	   which is the normal state of a camera whose encoder is up — every model
+	   here reports it at idle, so the two sliders were grey the moment the pane
+	   opened and only came back after an encoder/resolution switch re-read the
+	   document (bug 200). The camera's own `bitrateRo` / `gopRo` is the
+	   authority; the web UI greys them on exactly that and stays writable
+	   otherwise.
+	   A write can make the camera report the flag for a moment while it
+	   restarts its encoder, so a reply that says read-only schedules one re-read
+	   (see writeStreamParams) instead of latching grey. */
+	const bool bitrateRo = streamDoc_.value("bitrateRo").toBool();
+	const bool gopRo = streamDoc_.value("gopRo").toBool();
+	const QString lockedTip = ztr("ZCameraPlugin.Dock.StreamLockedTip");
+	streamBitrate_->setEnabled(!bitrateRo);
+	streamBitrate_->setToolTip(bitrateRo ? lockedTip : QString());
 	streamBitrateValue_->setText(ztr("ZCameraPlugin.Dock.Kbps").arg(bitrate));
 
 	const int gop = streamDoc_.value("gop_n").toInt();
 	streamGop_->setRange(1, qMax(streamDoc_.value("maxGop").toInt(), gop));
 	streamGop_->setValue(gop);
-	streamGop_->setEnabled(!streamDoc_.value("gopRo").toBool() &&
-			       !streamRunning);
-	streamGop_->setToolTip(lockedTip);
+	streamGop_->setEnabled(!gopRo);
+	streamGop_->setToolTip(gopRo ? lockedTip : QString());
 	streamGopValue_->setText(QString::number(gop));
 
 	const QString resolution =
@@ -4019,7 +4044,11 @@ const QString kFramingPanelStyle =
        off one. Used by the monitor-window toggle in the status row. */
     "QPushButton:checked { background:#d8b878; color:#1f2927; "
     "border-color:#d8b878; font-weight:bold; }"
-    "QPushButton#framingEnable { font-weight:bold; }"
+    /* Bug 199: at 11px bold the "i" of "Disable" is one merged stem-plus-dot
+       and reads as a capital I ("DIsable"). One point larger and not bold is
+       what makes the dot separate from the stem again; the accent border keeps
+       the button the loudest one in the row. */
+    "QPushButton#framingEnable { font-size:12px; }"
     /* The page's segment: joined cells, the live one filled. */
     "QToolButton[zcCell] { color:#cfe0dc; background:#2b3a38; "
     "border:1px solid #3c514e; padding:3px 8px; font-size:11px; }"
@@ -5571,14 +5600,18 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		/* The page explains both switches with hand-gesture pictures. The
 		   dock carries those pictures in its resources and shows them in a
 		   help dialog, instead of leaving the two rows explaining themselves
-		   only through a tooltip (bug 42). */
+		   only through a tooltip (bug 42).
+		   Bug 201: the "?" belongs on the line of the Off/On segments, not on
+		   the caption line above them. It is put in a field of its own with an
+		   empty caption, which is what puts it at the segments' height while
+		   keeping it a single flow item (so wrapping never splits it off). */
 		auto *helpBtn = new QToolButton(box);
 		helpBtn->setText(QStringLiteral("?"));
 		helpBtn->setAutoRaise(true);
 		helpBtn->setToolTip(ztr("ZCameraPlugin.Framing.GestureHelp"));
 		connect(helpBtn, &QToolButton::clicked, this,
 			[this]() { showGestureHelp(); });
-		lay->addWidget(helpBtn);
+		lay->addWidget(makeRow(box, QStringLiteral(" "), helpBtn, 34));
 
 		setLay->addWidget(box);
 	}
@@ -8853,7 +8886,22 @@ void ZcControlDock::updatePtzTab()
    (spec §1, L11). */
 bool ZcControlDock::openCamera(const QString &host)
 {
-	return openCamera(host, creds_.value(host));
+	ZcCredentials creds = creds_.value(host);
+	/* Nothing typed in this run: use whatever a previous run saved after a
+	   successful login, so the operator is not asked for the same password at
+	   every start. The login form only appears when the camera refuses it (the
+	   caller drops the stored login then) or when there is none. */
+	if (creds.username.isEmpty())
+		creds = zc::lookupCredentials(host);
+	/* An entry with no password (a build that cannot seal one only persists the
+	   user name) must never be submitted on its own: a rejected login counts
+	   toward the camera's own lockout, and five starts would lock the account.
+	   The form comes up with the user name filled in instead. */
+	if (creds.password.isEmpty())
+		creds = ZcCredentials();
+	if (!creds.username.isEmpty() && !creds_.contains(host))
+		creds_[host] = creds;
+	return openCamera(host, creds);
 }
 
 bool ZcControlDock::openCamera(const QString &host, const ZcCredentials &creds)
@@ -9235,7 +9283,9 @@ void ZcControlDock::onLoginSubmitted(const QString &user, const QString &passwor
 	creds_[currentHost_] = creds;
 	/* Mirror into the shared store so the source's Properties bitrate push
 	   can authenticate to this camera too — the source has no login UI of
-	   its own and reads credentials back from the store (memory-only). */
+	   its own and reads credentials back from the store. Only a login the
+	   camera ACCEPTS is written to disk (see below): a rejected password must
+	   not be replayed automatically at the next start. */
 	zc::rememberCredentials(currentHost_, creds);
 	/* The form can be submitted while a connect is still probing (the probe runs
 	   a nested event loop). openCamera() would refuse and this handler would then
@@ -9252,6 +9302,9 @@ void ZcControlDock::onLoginSubmitted(const QString &user, const QString &passwor
 		return;
 	if (ok) {
 		loginAttempts_ = 0;
+		/* The camera accepted this login: keep it, so the next start connects
+		   without asking for the password again (DPAPI-sealed on Windows). */
+		zc::saveCredentials(currentHost_, creds);
 		reachableHosts_.insert(currentHost_);
 		unreachableHosts_.remove(currentHost_);
 	} else if (lastAuthRequired_) {
@@ -9264,6 +9317,10 @@ void ZcControlDock::onLoginSubmitted(const QString &user, const QString &passwor
 		   Five rejections in a row is the camera's own lockout (bug list #3),
 		   so at that point the form says the account is locked and stops
 		   accepting clicks. */
+		/* Drop the rejected login everywhere: keeping it in the session map
+		   would make every later click retry it instead of showing the form. */
+		creds_.remove(currentHost_);
+		zc::forgetCredentials(currentHost_);
 		++loginAttempts_;
 		if (loginAttempts_ >= 5)
 			settings_->showLoginLocked();
@@ -9319,6 +9376,13 @@ void ZcControlDock::onCameraClicked(const QString &host)
 		return;
 	}
 	currentHost_ = host;
+	/* A login saved by an earlier run (or typed earlier in this one) is tried
+	   automatically, so a camera that needs authentication connects without the
+	   form. Note whether the attempt used one: if the camera refuses it, the
+	   stored login is wrong and has to go, or every start would retry it. */
+	const bool triedSavedLogin =
+	    creds_.value(host).username.isEmpty() &&
+	    !zc::lookupCredentials(host).password.isEmpty();
 	bool ok = openCamera(host);
 	/* The probe may have torn the dock down (see g_controlDockClosing): stop
 	   before touching a freed member. */
@@ -9327,10 +9391,22 @@ void ZcControlDock::onCameraClicked(const QString &host)
 	qWarning().noquote() << "[obs-zcamera] click" << host << "ok" << ok
 			     << "authReq" << lastAuthRequired_
 			     << "tlsUnavail" << lastTlsUnavailable_;
+	/* Connected with a login: keep it. Covers the deferred submit path (a
+	   login typed while a probe was in flight replays through here) and a
+	   camera that a stored login just opened. */
+	if (ok) {
+		const ZcCredentials used = creds_.value(host);
+		if (!used.username.isEmpty())
+			zc::saveCredentials(host, used);
+	}
 	/* The camera answered 401: it wants a login we do not have. Show the in-page
-	   login form instead of a modal dialog. */
-	if (!ok && lastAuthRequired_)
+	   login form instead of a modal dialog. A stored login that the camera just
+	   refused is dropped first, so the form is not prefilled with it. */
+	if (!ok && lastAuthRequired_) {
+		if (triedSavedLogin)
+			zc::forgetCredentials(host);
 		settings_->showLoginPrompt(host);
+	}
 	/* HTTPS-only camera with no TLS backend: show the switch-to-http notice in
 	   the pane. */
 	else if (!ok && lastTlsUnavailable_)

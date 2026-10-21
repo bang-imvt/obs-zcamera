@@ -141,6 +141,7 @@ if(ENABLE_CAMERA_CONTROL AND ENABLE_QT AND ENABLE_FRONTEND_API)
        src/cameractrl/zc_ai_detect.cpp
        src/cameractrl/zc_settings_engine.cpp
        src/cameractrl/zc_camera_client.cpp
+       src/cameractrl/zc_credential_store.cpp
        src/cameractrl/zc_settings_schema.cpp
        src/ui/zc_control_dock.cpp
        src/ui/zc_debug_panel.cpp
@@ -155,6 +156,7 @@ if(ENABLE_CAMERA_CONTROL AND ENABLE_QT AND ENABLE_FRONTEND_API)
        src/cameractrl/zc_ai_detect.h
        src/cameractrl/zc_settings_engine.h
        src/cameractrl/zc_camera_client.h
+       src/cameractrl/zc_credential_store.h
        src/cameractrl/zc_settings_schema.h
        src/ui/zc_control_dock.h
        src/ui/zc_debug_panel.h)
@@ -215,6 +217,11 @@ if(ZC_ENABLE_DEBUG_PANEL)
   target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ZC_ENABLE_DEBUG_PANEL)
 endif()
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE mdns)
+if(WIN32)
+  # crypt32: the camera logins the dock saves are sealed with DPAPI
+  # (CryptProtectData) so the password is never on disk in the clear.
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE crypt32)
+endif()
 
 # Link with the plugin-support library for PLUGIN_NAME and PLUGIN_VERSION
 if(TARGET plugin-support)

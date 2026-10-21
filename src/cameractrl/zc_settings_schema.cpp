@@ -274,7 +274,14 @@ bool cameraHasStreamEncoder(const ZcFeatures &f)
 
 /* The camera page's value vocabulary, from its own Chinese language pack.
    Only whole values are listed: a firmware that sends "On" shows 开, one that
-   sends "Slowest" shows "Slowest" — never a guessed translation. */
+   sends "Slowest" shows "Slowest" — never a guessed translation.
+
+   These are the page's GENERIC words (its language pack's bare keys: "Medium"
+   is 中, "Strong" is 强). The framing-size words are not here: the page keeps
+   those under `aframe.*` ("aframe.Medium" is 中景) and the framing tab draws
+   them from the .ini, not from a setting's option list. Putting 中景 on the
+   generic "Medium" made the sharpness, noise-reduction and bitrate-level
+   option lists read 中景 where the page says 中 (bugs 202/203/204). */
 QString settingValueLabelZh(const QString &value)
 {
 	static const QHash<QString, QString> table = {
@@ -290,8 +297,20 @@ QString settingValueLabelZh(const QString &value)
 	{"Full Body", QString::fromUtf8("全身")},
 	{"Waist", QString::fromUtf8("半身")},
 	{"Close Up", QString::fromUtf8("特写")},
-	{"Medium", QString::fromUtf8("中景")},
 	{"Wide", QString::fromUtf8("广角")},
+	/* Strength / size / level words (bugs 202/203/204/205): the page's own
+	   generic keys, shared by sharpness (Strong/Medium/None), noise reduction
+	   (Medium/Weak/Off), bitrate level (Low/Medium/High) and AF area size
+	   (Small/Medium/Large). */
+	{"Strong", QString::fromUtf8("强")},
+	{"Medium", QString::fromUtf8("中")},
+	{"Middle", QString::fromUtf8("中")},
+	{"Weak", QString::fromUtf8("弱")},
+	{"None", QString::fromUtf8("无")},
+	{"Low", QString::fromUtf8("低")},
+	{"High", QString::fromUtf8("高")},
+	{"Small", QString::fromUtf8("小")},
+	{"Large", QString::fromUtf8("大")},
 	{"Home", QString::fromUtf8("原点")},
 	{"Start Position", QString::fromUtf8("开始位置")},
 	{"Hold Position", QString::fromUtf8("保持当前位置")},
