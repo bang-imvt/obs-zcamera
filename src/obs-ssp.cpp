@@ -30,6 +30,9 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <QAction>
 #include <QMainWindow>
 #include <QPointer>
+#include <QTimer>
+
+#include <memory>
 
 #include "obs-ssp.h"
 #include "ssp-mdns.h"
@@ -109,8 +112,54 @@ static QPointer<QAction> zc_tools_action;
 
 static void on_frontend_event(enum obs_frontend_event event, void *)
 {
-	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING)
+	if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
 		zc_dock_raise_armed = true;
+		/* Test hook, off unless the environment asks for it: selecting a
+		   camera from a script is the only way to exercise the dock's HTTP
+		   side (and therefore the detection-area overlay) without a person
+		   clicking the rail. ZC_TEST_CAMERA=<ip> opens that camera;
+		   ZC_TEST_MASK=1 additionally forces its rectangle on so the draw
+		   path can be seen in the log. */
+		const QByteArray testHost =
+		    qgetenv("ZC_TEST_CAMERA").trimmed();
+		blog(LOG_INFO, "[obs-zcamera] test hook: finished loading (host '%s')",
+		     testHost.constData());
+		if (!testHost.isEmpty()) {
+			QByteArray arg = testHost;
+			/* Waits for the dock rather than a single queued call, because
+			   the frontend reports "finished loading" before the dock can be
+			   built. The selection itself is made ONCE: calling it again
+			   while a connect is in flight drops that connect, and the camera
+			   then never answers the auth handshake. */
+			auto picked = std::make_shared<bool>(false);
+			auto *timer = new QTimer(
+			    (QObject *)obs_frontend_get_main_window());
+			timer->setInterval(250);
+			QObject::connect(
+			    timer, &QTimer::timeout,
+			    (QObject *)obs_frontend_get_main_window(),
+			    [timer, arg, picked]() {
+				    /* The dock is built lazily, so create it first — a
+				       selection into a null dock is silently dropped. */
+				    show_zcamera_control_dock(nullptr, nullptr);
+				    blog(LOG_INFO,
+					 "[obs-zcamera] test hook tick: dock %s",
+					 zc_control_dock ? "up" : "MISSING");
+				    if (!zc_control_dock)
+					    return;
+				    if (*picked)
+					    return;
+				    *picked = true;
+				    blog(LOG_INFO,
+					 "[obs-zcamera] test hook: selecting %s",
+					 arg.constData());
+				    zc_control_dock->selectCamera(
+					QString::fromUtf8(arg));
+				    timer->stop();
+			    });
+			timer->start();
+		}
+	}
 }
 
 static void on_source_created(void *, calldata_t *params)

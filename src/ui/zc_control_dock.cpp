@@ -2178,8 +2178,13 @@ void ZcOverlayLink::setPtzSpeed(float speed)
 void ZcOverlayLink::pushMask()
 {
 	zc::OverlayTarget *t = zc::overlayFindTarget(host_);
-	if (!t)
+	if (!t) {
+		blog(LOG_INFO,
+		     "[obs-zcamera] overlay push: no source is registered for "
+		     "host '%s'",
+		     host_.toUtf8().constData());
 		return;
+	}
 	t->setOverlayMask(hasMask_ && maskOn_, ml_, mt_, mr_, mb_);
 }
 
@@ -2202,6 +2207,8 @@ void ZcOverlayLink::armMode(zc::OverlayInteraction mode)
 	if (onModeChanged)
 		onModeChanged(mode_);
 	zc::OverlayTarget *t = zc::overlayFindTarget(host_);
+	blog(LOG_INFO, "[obs-zcamera] armMode %d -> target %s", (int)mode,
+	     t ? "found" : "MISSING");
 	if (!t)
 		return;
 	t->setOverlayInteraction(mode);
@@ -2224,20 +2231,16 @@ void ZcOverlayLink::disarm()
 /* The camera's own rectangle arriving from a snapshot (all_status or
    /mask_area). A local edit the camera did not take is pinned: firmware that
    answers {"code":0} but keeps its old geometry must not have the operator's
-   rectangle pulled out from under them on the next refresh. A change that
-   came from anywhere else is adopted. */
+   rectangle pulled out from under them on the next refresh. Only the camera
+   switching the feature itself (on or off) overrides that pin. */
 void ZcOverlayLink::setMask(bool enabled, float left, float top, float right,
 			    float bottom)
 {
-	const bool cameraChanged =
-	    std::abs(left - camL_) > 1e-4f || std::abs(top - camT_) > 1e-4f ||
-	    std::abs(right - camR_) > 1e-4f ||
-	    std::abs(bottom - camB_) > 1e-4f;
-	/* The enable flag is part of "the camera said something new" too: the
+	/* The enable flag is part of "the camera said something new": the
 	   operator's own click pins a local override, and if the camera later
 	   reports the flag the other way (its page, or a rejected write being
 	   corrected) the rectangle has to follow. Without this, a flapped switch
-	   left the overlay stuck on the last local value for good (bug 28). */
+	   left the overlay stuck on the last local value for good (bug 88). */
 	const bool enableChanged = (enabled != camOn_);
 	camL_ = left;
 	camT_ = top;
@@ -2245,10 +2248,16 @@ void ZcOverlayLink::setMask(bool enabled, float left, float top, float right,
 	camB_ = bottom;
 	camOn_ = enabled;
 
-	if (cameraChanged || enableChanged)
+	/* A snapshot may only end a local override when the camera's own switch
+	   flipped. Geometry alone is not enough: firmware that answers {"code":0}
+	   yet keeps its old rectangle reports the drift on the very next poll, and
+	   that was wiping the rectangle out from under the operator one second
+	   after the editor opened (bug 28). */
+	if (maskLocalOverride_) {
+		if (!enableChanged)
+			return; /* keep what the operator drew */
 		maskLocalOverride_ = false;
-	else if (maskLocalOverride_)
-		return; /* keep what the operator drew */
+	}
 
 	hasMask_ = true;
 	maskOn_ = enabled;
@@ -4993,18 +5002,25 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 	connect(maskEditBtn_, &QPushButton::toggled, this, [this](bool on) {
 		if (!link_)
 			return;
-		link_->armMode(on ? zc::OverlayInteraction::MaskEdit
-				  : zc::OverlayInteraction::None);
-		if (!on)
+		if (!on) {
+			link_->armMode(zc::OverlayInteraction::None);
 			return;
+		}
+		/* Window first, mode last. Opening the view reuses the camera's
+		   window and takes any previous one down, and taking a window down
+		   disarms the overlay (a mode with no window would keep drawing
+		   handles nobody can grab). Arming before that teardown is what made
+		   the editor disarm itself a quarter second after it opened — the
+		   rectangle appeared and could not be dragged (bug 28). */
+		if (link_->openInteract)
+			link_->openInteract();
 		/* Bug 29: the editor opened with nothing on the picture — no
 		   rectangle had ever been written, so there was nothing to grab and
 		   nothing to drag. Seed a centred box for the operator to work from;
 		   the first drag is what reaches the camera. */
 		if (!link_->hasMask())
 			link_->seedMask(0.2f, 0.2f, 0.8f, 0.8f);
-		if (link_->openInteract)
-			link_->openInteract();
+		link_->armMode(zc::OverlayInteraction::MaskEdit);
 	});
 
 	indicatorSeg_ = offSegment(colDetect->parentWidget());
@@ -6130,11 +6146,36 @@ void ZcFramingPanel::refreshMaskRect()
 {
 	if (!client_ || !client_->isConnected() || !link_)
 		return;
+	if (qEnvironmentVariableIsSet("ZC_TEST_MASK")) {
+		/* Test hook: do exactly what an operator does — switch the camera's
+		   detection area on, seed a rectangle, arm the editor — and open the
+		   window, so a script can prove the overlay reaches a real picture.
+		   The preview pane is the canvas mix, which the overlay is never
+		   drawn into. QTimer rather than a straight call: the switch write is
+		   HTTP, and the editor must be armed after the gating that follows
+		   it, or `updateGating` disarms it again (it drops the mode whenever
+		   the camera still reports the area as off). */
+		if (client_)
+			client_->setFramingMaskEnable(true);
+		link_->seedMask(0.2f, 0.2f, 0.8f, 0.8f);
+		if (!monitorWindow())
+			openMonitorWindow();
+		QTimer::singleShot(2500, this, [this]() {
+			if (link_)
+				link_->armMode(zc::OverlayInteraction::MaskEdit);
+		});
+	}
 	client_->framingMaskQuery([this](const QJsonObject &doc) {
 		if (!client_ || !link_)
 			return;
+		blog(LOG_INFO, "[obs-zcamera] mask_area answered %s",
+		     QJsonDocument(doc).toJson(QJsonDocument::Compact)
+			 .constData());
 		if (doc.contains(QLatin1String("code")) &&
 		    doc.value(QLatin1String("code")).toInt() < 0)
+			return;
+		/* The hook above owns the rectangle on a self-test run. */
+		if (qEnvironmentVariableIsSet("ZC_TEST_MASK"))
 			return;
 		const auto num = [&doc](const char *key, float fallback) {
 			const QJsonValue v = doc.value(QLatin1String(key));
@@ -8536,6 +8577,8 @@ void ZcControlDock::openSourceInteraction()
 			    ztr("ZCameraPlugin.Dock.InteractNoSource").arg(host));
 		return;
 	}
+	blog(LOG_INFO, "[obs-zcamera] opening interaction window for %s",
+	     host.toUtf8().constData());
 	obs_frontend_open_source_interaction(lookup.found);
 	/* The window is built and shown inside that call, so it is already in the
 	   widget tree here — no need to wait for an event-loop turn to tag it. */

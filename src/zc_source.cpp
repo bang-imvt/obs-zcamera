@@ -50,6 +50,7 @@ extern "C" {
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -460,8 +461,18 @@ private:
 	/* The left-button drag in progress, if any: press records the anchor,
 	   move follows, release ends it. */
 	bool overlayDragging_ = false;
-	/* Rate limit for the "nothing to draw" line above. */
+	/* One-shot latch for the "nothing to draw" line: reported when the
+	   overlay goes empty, cleared as soon as anything is drawn. */
+	bool overlayDiagReported_ = false;
+	/* What the last "drawn" line described, so that line is emitted when the
+	   picture changes rather than on a timer. */
+	float overlayDrawL_ = -1.0f, overlayDrawT_ = -1.0f;
+	float overlayDrawR_ = -1.0f, overlayDrawB_ = -1.0f;
+	int overlayDrawMode_ = -1;
 	uint64_t overlayDiagNextNs_ = 0;
+	uint64_t overlayRenderNextNs_ = 0;
+	uint64_t overlayEnterNextNs_ = 0;
+	uint64_t overlayCallNextNs_ = 0;
 	float overlayDragAnchorX_ = 0.0f, overlayDragAnchorY_ = 0.0f;
 	/* 1x1 solid texture the rectangle and crosshair are stretched from, in
 	   the interaction colour (the box texture is red). Graphics thread only. */
@@ -469,6 +480,9 @@ private:
 	/* 1x1 50% black, for the band the editor dims everything outside the
 	   rectangle with (the page does the same). Graphics thread only. */
 	gs_texture_t *overlayDim_ = nullptr;
+	/* The page's edit accent (#ff4e05, the colour of its corner handles),
+	   used for the rectangle while it is being placed. Graphics thread only. */
+	gs_texture_t *overlayAccent_ = nullptr;
 	/* Same for the tracking-box frame, in amber. Graphics thread only. */
 	gs_texture_t *trackSolid_ = nullptr;
 	/* The camera address the source is registered under, so a re-registration
@@ -557,6 +571,10 @@ ZcSspSource::~ZcSspSource()
 	if (overlayDim_) {
 		gs_texture_destroy(overlayDim_);
 		overlayDim_ = nullptr;
+	}
+	if (overlayAccent_) {
+		gs_texture_destroy(overlayAccent_);
+		overlayAccent_ = nullptr;
 	}
 	if (trackSolid_) {
 		gs_texture_destroy(trackSolid_);
@@ -1336,13 +1354,28 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 		anyOperatorOverlay = overlayMaskOn_ || overlayMarkerOn_ ||
 				     overlayTrackOn_;
 	}
-	if (mode == zc::OverlayInteraction::None && !anyOperatorOverlay) {
-		/* One line every five seconds: a "the frame is not there" report can
-		   then be answered from the log, because this says the source had
-		   nothing to draw — a state problem, not a drawing one. */
+	{
+		/* Self-test aid (opt-in: only with the harness that also seeds a
+		   rectangle): what state this pass sees, and for which camera. */
 		const uint64_t now = os_gettime_ns();
-		if (now >= overlayDiagNextNs_) {
-			overlayDiagNextNs_ = now + 5000000000ULL;
+		if (qEnvironmentVariableIsSet("ZC_TEST_MASK") &&
+		    now >= overlayCallNextNs_) {
+			overlayCallNextNs_ = now + 5000000000ULL;
+			blog(LOG_INFO,
+			     "[obs-zcamera] overlay call: ip=%s mode=%d mask=%d "
+			     "marker=%d track=%d",
+			     ip_.c_str(), (int)mode, overlayMaskOn_ ? 1 : 0,
+			     overlayMarkerOn_ ? 1 : 0, overlayTrackOn_ ? 1 : 0);
+		}
+	}
+	if (mode == zc::OverlayInteraction::None && !anyOperatorOverlay) {
+		/* Once per "went empty", not every five seconds: a report of "the
+		   frame is not there" can be answered from the log, because this says
+		   the source had nothing to draw — a state problem, not a drawing
+		   one — without turning a quiet log into a drumbeat. */
+		if (!overlayDiagReported_) {
+			overlayDiagReported_ = true;
+			overlayDiagNextNs_ = 0;
 			blog(LOG_INFO,
 			     "[obs-zcamera] overlay: no rectangle, marker or box is "
 			     "set on this source (mode %d), nothing drawn",
@@ -1350,6 +1383,7 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 		}
 		return;
 	}
+	overlayDiagReported_ = false;
 
 	/* The editing aid never goes into the program: it is drawn into a preview
 	   pass or not at all. Unlike the boxes it has no in-program mode -- it is
@@ -1383,6 +1417,12 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 		uint8_t dim[4] = {0, 0, 0, 128};
 		const uint8_t *dimData = dim;
 		overlayDim_ = gs_texture_create(1, 1, GS_RGBA, 1, &dimData, 0);
+		/* The page's edit accent, #ff4e05 — the colour it fills the four
+		   corner handles with while the detection area is being placed. */
+		uint8_t accent[4] = {0xff, 0x4e, 0x05, 0xff};
+		const uint8_t *accentData = accent;
+		overlayAccent_ = gs_texture_create(1, 1, GS_RGBA, 1, &accentData,
+						   0);
 	}
 
 	uint32_t thick_px = (fw < fh ? fw : fh) / 360;
@@ -1429,44 +1469,89 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 	gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
 	gs_effect_set_texture(img, overlaySolid_);
 
-	const auto fill = [&](float x, float y, float w, float h) {
-		if (w <= 0.0f || h <= 0.0f)
+	/* The colour of the quad comes from the effect's `image` parameter, not
+	   from the texture handed to `gs_draw_sprite`: passing a texture there and
+	   relying on it silently paints everything in whatever the parameter was
+	   last set to (the dim bands came out in the plain overlay colour, bug 28).
+	   So the helper sets the parameter itself, every call. */
+	const auto fillWith = [&](gs_texture_t *tex, float x, float y, float w,
+				  float h) {
+		if (!tex || w <= 0.0f || h <= 0.0f)
 			return;
+		gs_effect_set_texture(img, tex);
 		gs_matrix_push();
 		gs_matrix_translate3f(x, y, 0.0f);
-		gs_draw_sprite(overlaySolid_, 0, (uint32_t)w, (uint32_t)h);
+		gs_draw_sprite(tex, 0, (uint32_t)w, (uint32_t)h);
 		gs_matrix_pop();
+	};
+	const auto fill = [&](float x, float y, float w, float h) {
+		fillWith(overlaySolid_, x, y, w, h);
 	};
 
 	if (maskOn && mr > ml && mb > mt) {
 		const float x = ml * (float)fw, y = mt * (float)fh;
 		const float w = (mr - ml) * (float)fw, h = (mb - mt) * (float)fh;
+		/* Proof for a live check that the frame really reaches the picture:
+		   emitted when the rectangle or the mode changes, and it names the
+		   surface being drawn into (a display, or a mix nobody would ever
+		   see). Silent while nothing changes, so a shipped build logs once
+		   per edit and not once per five seconds. */
+		{
+			const bool changed =
+			    std::fabs(ml - overlayDrawL_) > 1e-4f ||
+			    std::fabs(mt - overlayDrawT_) > 1e-4f ||
+			    std::fabs(mr - overlayDrawR_) > 1e-4f ||
+			    std::fabs(mb - overlayDrawB_) > 1e-4f ||
+			    (int)mode != overlayDrawMode_;
+			if (changed) {
+				overlayDrawL_ = ml;
+				overlayDrawT_ = mt;
+				overlayDrawR_ = mr;
+				overlayDrawB_ = mb;
+				overlayDrawMode_ = (int)mode;
+				gs_texture_t *rt = gs_get_render_target();
+				blog(LOG_INFO,
+				     "[obs-zcamera] overlay draw: mask rect "
+				     "%.3f,%.3f,%.3f,%.3f on %ux%u into %s%ux%u "
+				     "mode %d",
+				     ml, mt, mr, mb, fw, fh,
+				     rt ? "off-screen target " : "a display, ",
+				     rt ? gs_texture_get_width(rt) : 0,
+				     rt ? gs_texture_get_height(rt) : 0,
+				     (int)mode);
+			}
+		}
 		/* Editing dims everything outside the rectangle, exactly as the page
 		   does (`_framingDrawMaskArea` fills the canvas with 50% black and
 		   clears the rectangle): the area that will be watched is the bright
 		   part, and there is no mistaking which rectangle is being dragged.
-		   Four bands, because the solid draw here has no "clear" op. */
-		if (mode == zc::OverlayInteraction::MaskEdit) {
-			gs_effect_set_texture(img, overlayDim_);
-			fill(0.0f, 0.0f, (float)fw, y);
-			fill(0.0f, y + h, (float)fw, (float)fh - y - h);
-			fill(0.0f, y, x, h);
-			fill(x + w, y, (float)fw - x - w, h);
-			gs_effect_set_texture(img, overlaySolid_);
+		   Four bands, because the solid draw here has no "clear" op. The
+		   frame itself switches to the page's edit accent (#ff4e05) while it
+		   is being placed — the cyan read-only colour reads as "this is the
+		   area", the accent reads as "this is the thing you are dragging". */
+		const bool editing = (mode == zc::OverlayInteraction::MaskEdit);
+		if (editing) {
+			fillWith(overlayDim_, 0.0f, 0.0f, (float)fw, y);
+			fillWith(overlayDim_, 0.0f, y + h, (float)fw,
+				 (float)fh - y - h);
+			fillWith(overlayDim_, 0.0f, y, x, h);
+			fillWith(overlayDim_, x + w, y, (float)fw - x - w, h);
 		}
-		fill(x, y, w, thick);
-		fill(x, y + h - thick, w, thick);
-		fill(x, y, thick, h);
-		fill(x + w - thick, y, thick, h);
+		gs_texture_t *frame =
+		    (editing && overlayAccent_) ? overlayAccent_ : overlaySolid_;
+		fillWith(frame, x, y, w, thick);
+		fillWith(frame, x, y + h - thick, w, thick);
+		fillWith(frame, x, y, thick, h);
+		fillWith(frame, x + w - thick, y, thick, h);
 		/* Corner handles only while editing, so a read-only view stays
 		   clean. */
-		if (mode == zc::OverlayInteraction::MaskEdit) {
+		if (editing) {
 			const float s = thick * 4.0f;
 			if (w > s * 2.0f && h > s * 2.0f) {
-				fill(x, y, s, s);
-				fill(x + w - s, y, s, s);
-				fill(x, y + h - s, s, s);
-				fill(x + w - s, y + h - s, s, s);
+				fillWith(frame, x, y, s, s);
+				fillWith(frame, x + w - s, y, s, s);
+				fillWith(frame, x, y + h - s, s, s);
+				fillWith(frame, x + w - s, y + h - s, s, s);
 			}
 		}
 	}
@@ -1488,13 +1573,13 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 			trackSolid_ = gs_texture_create(1, 1, GS_RGBA, 1, &data, 0);
 		}
 		if (trackSolid_) {
-			gs_effect_set_texture(img, trackSolid_);
 			const float x = tl * (float)fw, y = tt * (float)fh;
-			fill(x, y, tw * (float)fw, thick);
-			fill(x, y + th * (float)fh - thick, tw * (float)fw, thick);
-			fill(x, y, thick, th * (float)fh);
-			fill(x + tw * (float)fw - thick, y, thick, th * (float)fh);
-			gs_effect_set_texture(img, overlaySolid_);
+			fillWith(trackSolid_, x, y, tw * (float)fw, thick);
+			fillWith(trackSolid_, x, y + th * (float)fh - thick,
+				 tw * (float)fw, thick);
+			fillWith(trackSolid_, x, y, thick, th * (float)fh);
+			fillWith(trackSolid_, x + tw * (float)fw - thick, y, thick,
+				 th * (float)fh);
 		}
 	}
 
@@ -2401,6 +2486,21 @@ void ZcSspSource::onMeta(imf::SspVideoMeta *v, imf::SspAudioMeta *a,
 
 void ZcSspSource::videoRender(gs_effect_t *effect)
 {
+	{
+		/* Self-test aid (opt-in): is this pass running at all, and into
+		   what. Only with ZC_TEST_MASK set — a shipped build stays quiet. */
+		const uint64_t now = os_gettime_ns();
+		if (qEnvironmentVariableIsSet("ZC_TEST_MASK") &&
+		    now >= overlayEnterNextNs_) {
+			overlayEnterNextNs_ = now + 5000000000ULL;
+			gs_texture_t *rt = gs_get_render_target();
+			blog(LOG_INFO,
+			     "[obs-zcamera] video_render enter, target %s%ux%u",
+			     rt ? "off-screen " : "display ",
+			     rt ? gs_texture_get_width(rt) : 0,
+			     rt ? gs_texture_get_height(rt) : 0);
+		}
+	}
 	gs_texture_t *tex = NULL;
 	bool fallbackToSoftware = false;
 	int frameW = 0, frameH = 0;
@@ -2544,6 +2644,13 @@ void ZcSspSource::videoRender(gs_effect_t *effect)
 
 #ifdef ENABLE_CAMERA_CONTROL
 		drawAiOverlay(effect);
+		/* The operator overlay (detection rectangle, click crosshair, range
+		   frame) has to be drawn on THIS path too. Windows takes it: the
+		   texture is a normal sampler2D and libobs already entered the
+		   default effect's Draw pass, so only the rect path below used to
+		   call the overlay — which is why the rectangle never appeared on a
+		   Windows build while the AI boxes did (bug 28). */
+		drawInteractionOverlay(effect);
 #endif
 		return;
 	}
@@ -2560,6 +2667,21 @@ void ZcSspSource::videoRender(gs_effect_t *effect)
 
 	gs_effect_set_texture(gs_effect_get_param_by_name(draw_effect, "image"),
 			      tex);
+	{
+		/* Self-test aid (opt-in): proves the source's render pass runs at
+		   all, and names the surface. */
+		const uint64_t now = os_gettime_ns();
+		if (qEnvironmentVariableIsSet("ZC_TEST_MASK") &&
+		    now >= overlayRenderNextNs_) {
+			overlayRenderNextNs_ = now + 5000000000ULL;
+			gs_texture_t *rt = gs_get_render_target();
+			blog(LOG_INFO,
+			     "[obs-zcamera] video_render into %s%ux%u",
+			     rt ? "off-screen target " : "a display, ",
+			     rt ? gs_texture_get_width(rt) : 0,
+			     rt ? gs_texture_get_height(rt) : 0);
+		}
+	}
 	while (gs_effect_loop(draw_effect, "Draw")) {
 		gs_draw_sprite(tex, 0, 0, 0);
 
