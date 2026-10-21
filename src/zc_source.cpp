@@ -1593,11 +1593,20 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 		   area", the accent reads as "this is the thing you are dragging". */
 		const bool editing = (mode == zc::OverlayInteraction::MaskEdit);
 		if (editing) {
-			fillWith(overlayDim_, 0.0f, 0.0f, (float)fw, y);
-			fillWith(overlayDim_, 0.0f, y + h, (float)fw,
-				 (float)fh - y - h);
-			fillWith(overlayDim_, 0.0f, y, x, h);
-			fillWith(overlayDim_, x + w, y, (float)fw - x - w, h);
+			/* The bands overlap the frame by its own thickness. They
+			   meet its edge on a fractional pixel, and `gs_draw_sprite`
+			   takes whole pixels, so a band sized to end exactly at the
+			   edge can leave the row between it and the frame
+			   undimmed — a one-pixel bright line across the picture at
+			   the top of the rectangle (bug 213). The frame is drawn
+			   after the bands and is opaque, so the overlap costs
+			   nothing. */
+			fillWith(overlayDim_, 0.0f, 0.0f, (float)fw, y + thick);
+			fillWith(overlayDim_, 0.0f, y + h - thick, (float)fw,
+				 (float)fh - (y + h - thick));
+			fillWith(overlayDim_, 0.0f, y, x + thick, h);
+			fillWith(overlayDim_, x + w - thick, y,
+				 (float)fw - (x + w - thick), h);
 		}
 		gs_texture_t *frame =
 		    (editing && overlayAccent_) ? overlayAccent_ : overlaySolid_;
