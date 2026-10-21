@@ -459,8 +459,12 @@ private:
 	float overlayTrackL_ = 0.0f, overlayTrackT_ = 0.0f;
 	float overlayTrackW_ = 0.0f, overlayTrackH_ = 0.0f;
 	/* The left-button drag in progress, if any: press records the anchor,
-	   move follows, release ends it. */
+	   move follows, release ends it. The rectangle that was on the picture
+	   before the press is kept so a click without a drag can put it back. */
 	bool overlayDragging_ = false;
+	bool overlayDragPrevOn_ = false;
+	float overlayDragPrevL_ = 0.0f, overlayDragPrevT_ = 0.0f;
+	float overlayDragPrevR_ = 1.0f, overlayDragPrevB_ = 1.0f;
 	/* One-shot latch for the "nothing to draw" line: reported when the
 	   overlay goes empty, cleared as soon as anything is drawn. */
 	bool overlayDiagReported_ = false;
@@ -797,6 +801,13 @@ void ZcSspSource::update(obs_data_t *settings)
    the feed goes quiet (the camera rebooted, its AI was switched off, the
    socket dropped): the boxes then disappear instead of freezing on screen. */
 static constexpr uint64_t ZC_AI_STALE_NS = 1500000000ULL;
+
+/* The size a camera source reports before its first frame arrives. Every Z
+   CAM this plugin drives streams 1280x720 by default; the exact number only
+   has to be a sane quad so OBS has something for the mouse to land on and
+   the overlay has a pixel space to draw in. */
+static constexpr uint32_t kDefaultStreamWidth = 1280;
+static constexpr uint32_t kDefaultStreamHeight = 720;
 
 /* Apply the Properties "AI detection overlay" checkbox. Nothing here touches
    the SSP video path or writes to the camera, so the overlay can be toggled
@@ -1317,6 +1328,16 @@ void ZcSspSource::onPointerEvent(int phase, int button, int px, int py)
 	    (phase == zc::OverlayPointerDrag || button == MOUSE_LEFT)) {
 		std::lock_guard<std::mutex> lock(overlayMutex_);
 		if (phase == zc::OverlayPointerPress) {
+			/* Remember what was on the picture. A press that never moves
+			   is not an edit: the dock refuses to write a zero-area mask,
+			   so if this collapsed the rectangle it would stay collapsed
+			   for good (nothing writes it back — the camera's next
+			   snapshot is the same corner set the dock already has). */
+			overlayDragPrevOn_ = overlayMaskOn_;
+			overlayDragPrevL_ = overlayMaskL_;
+			overlayDragPrevT_ = overlayMaskT_;
+			overlayDragPrevR_ = overlayMaskR_;
+			overlayDragPrevB_ = overlayMaskB_;
 			overlayDragging_ = true;
 			overlayDragAnchorX_ = nx;
 			overlayDragAnchorY_ = ny;
@@ -1332,6 +1353,15 @@ void ZcSspSource::onPointerEvent(int phase, int button, int px, int py)
 			overlayMaskB_ = qMax(overlayDragAnchorY_, ny);
 		} else if (phase == zc::OverlayPointerRelease) {
 			overlayDragging_ = false;
+			const float dw = overlayMaskR_ - overlayMaskL_;
+			const float dh = overlayMaskB_ - overlayMaskT_;
+			if (dw < 0.02f && dh < 0.02f) {
+				overlayMaskOn_ = overlayDragPrevOn_;
+				overlayMaskL_ = overlayDragPrevL_;
+				overlayMaskT_ = overlayDragPrevT_;
+				overlayMaskR_ = overlayDragPrevR_;
+				overlayMaskB_ = overlayDragPrevB_;
+			}
 		}
 	}
 
@@ -1391,8 +1421,12 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 	if (zc_render_target_is_canvas_mix())
 		return;
 
-	const uint32_t fw = lastWidth_.load(std::memory_order_relaxed);
-	const uint32_t fh = lastHeight_.load(std::memory_order_relaxed);
+	const uint32_t fw = lastWidth_.load(std::memory_order_relaxed)
+				? lastWidth_.load(std::memory_order_relaxed)
+				: kDefaultStreamWidth;
+	const uint32_t fh = lastHeight_.load(std::memory_order_relaxed)
+				? lastHeight_.load(std::memory_order_relaxed)
+				: kDefaultStreamHeight;
 	if (!fw || !fh)
 		return;
 
@@ -2630,8 +2664,21 @@ void ZcSspSource::videoRender(gs_effect_t *effect)
 		return;
 	}
 
-	if (!tex)
+	if (!tex) {
+#ifdef ENABLE_CAMERA_CONTROL
+		/* No picture this pass: the stream is still coming up, or it
+		   dropped and the source is reconnecting. The operator overlays
+		   are quads drawn on the pass — not pixels of the image — so they
+		   have no business waiting for a frame. Tying them to the texture
+		   is what made a reconnecting camera look like a broken detection
+		   area: the window stayed black and the editor had nothing on it to
+		   grab. libobs has already entered the Draw pass, so the quads can
+		   go on now; there is simply no image underneath them. */
+		if (effect)
+			drawInteractionOverlay(effect);
+#endif
 		return;
+	}
 
 	/* Draw the texture. */
 	const bool rect = gs_texture_is_rect(tex);
@@ -2711,13 +2758,20 @@ void ZcSspSource::enumActiveSources(obs_source_enum_proc_t cb, void *param)
 uint32_t ZcSspSource::getWidth()
 {
 	std::lock_guard<std::mutex> lock(frameMutex_);
-	return lastWidth_;
+	/* Before the first frame OBS asks for the size, and 0 makes the source a
+	   zero-size quad: the Interact window then has no surface to take the
+	   mouse on, and the overlay's normalised coordinates cannot be turned
+	   into pixels. A camera that is still reconnecting has to be editable
+	   all the same, so fall back to the resolution every Z CAM streams. */
+	const uint32_t w = lastWidth_;
+	return w ? w : kDefaultStreamWidth;
 }
 
 uint32_t ZcSspSource::getHeight()
 {
 	std::lock_guard<std::mutex> lock(frameMutex_);
-	return lastHeight_;
+	const uint32_t h = lastHeight_;
+	return h ? h : kDefaultStreamHeight;
 }
 
 /* ------------------------------------------------------------------ */

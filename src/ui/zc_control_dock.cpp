@@ -30,6 +30,7 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <obs-module.h>
 #include <obs.h>
 #include <obs-frontend-api.h>
+#include <util/platform.h>
 
 /* Win32: deliberately after ssp-mdns.h, whose winsock2 has to precede
    windows.h. Kept for the window-handle lookups below. */
@@ -2115,12 +2116,18 @@ private:
 	bool hasMask_ = false;
 	bool maskOn_ = false;
 	float ml_ = 0.0f, mt_ = 0.0f, mr_ = 1.0f, mb_ = 1.0f;
-	/* What the camera last reported, and whether a local edit is pinned
-	   because the camera did not take it. */
+	/* What the camera last reported, so an unchanged snapshot costs nothing
+	   and a changed one is adopted. */
 	float camL_ = 0.0f, camT_ = 0.0f, camR_ = 1.0f, camB_ = 1.0f;
-	/* The camera's own enable flag, so a change in it counts as news (bug 28). */
 	bool camOn_ = false;
-	bool maskLocalOverride_ = false;
+	/* When this dock last wrote the rectangle or its switch. Snapshots that
+	   arrive inside the window are the camera's *old* word — two snapshots
+	   feed this (all_status carries mask_left/top/right/bottom, /mask_area
+	   carries enable + the same corners), and the one that was in flight
+	   when we wrote used to pull the rectangle back out from under the
+	   operator a few hundred milliseconds after the switch went on. */
+	uint64_t localWriteNs_ = 0;
+	void markLocalWrite() { localWriteNs_ = os_gettime_ns(); }
 
 	bool markerOn_ = false;
 	float markerX_ = 0.5f, markerY_ = 0.5f;
@@ -2154,7 +2161,7 @@ void ZcOverlayLink::setClient(ZcCameraClient *client, const QString &host)
 	client_ = client;
 	host_ = host;
 	hasMask_ = false;
-	maskLocalOverride_ = false;
+	localWriteNs_ = 0;
 }
 
 void ZcOverlayLink::setTrackBox(bool enabled, float left, float top,
@@ -2228,35 +2235,70 @@ void ZcOverlayLink::disarm()
 	}
 }
 
-/* The camera's own rectangle arriving from a snapshot (all_status or
-   /mask_area). A local edit the camera did not take is pinned: firmware that
-   answers {"code":0} but keeps its old geometry must not have the operator's
-   rectangle pulled out from under them on the next refresh. Only the camera
-   switching the feature itself (on or off) overrides that pin. */
+/* The camera's own rectangle arriving from a snapshot. Two endpoints report
+   it (`all_status` carries mask_left/top/right/bottom, `/mask_area` carries
+   enable plus the same corners), so this has to be idempotent and it must
+   never fight the operator or our own writes:
+
+   - an unchanged snapshot costs nothing, so the two readers cannot undo
+     each other;
+   - a snapshot that arrives while our own write is still in flight is the
+     camera's word from *before* that write — the switch used to flip the
+     frame on, then a 300 ms reread reported the old state and took it away
+     again, which is the "flash and gone" the operator kept seeing;
+   - while the editor is armed the geometry on the picture is the
+     operator's. Adopting a read-back mid-drag dragged the box back under
+     their cursor. The switch is still the camera's word, because turning
+     the area off on the camera's own page has to take the frame away. */
 void ZcOverlayLink::setMask(bool enabled, float left, float top, float right,
 			    float bottom)
 {
-	/* The enable flag is part of "the camera said something new": the
-	   operator's own click pins a local override, and if the camera later
-	   reports the flag the other way (its page, or a rejected write being
-	   corrected) the rectangle has to follow. Without this, a flapped switch
-	   left the overlay stuck on the last local value for good (bug 88). */
-	const bool enableChanged = (enabled != camOn_);
+	/* Already handled this exact state: two endpoints report it, and the
+	   poll repeats it every 300 ms. */
+	const bool same = (enabled == camOn_) &&
+			  std::fabs(left - camL_) <= 1e-4f &&
+			  std::fabs(top - camT_) <= 1e-4f &&
+			  std::fabs(right - camR_) <= 1e-4f &&
+			  std::fabs(bottom - camB_) <= 1e-4f;
+	if (same)
+		return;
+
+	/* Our own write has not had time to reach the camera, so this is its
+	   word from before that write. Note that nothing is cached here: the
+	   same value is re-examined on the next poll, after the window, and
+	   adopted then if the camera really did not take the write. Caching it
+	   now would swallow the correction and leave the frame on forever. */
+	const uint64_t now = os_gettime_ns();
+	const bool recent = localWriteNs_ && now - localWriteNs_ < 1500000000ULL;
+	if (qEnvironmentVariableIsSet("ZC_TEST_FLOW")) {
+		blog(LOG_INFO,
+		     "[obs-zcamera] setMask en=%d %.3f,%.3f,%.3f,%.3f mode=%d "
+		     "recent=%d shown=%d",
+		     enabled ? 1 : 0, left, top, right, bottom, (int)mode_,
+		     recent ? 1 : 0, maskOn_ ? 1 : 0);
+	}
+	if (recent)
+		return;
+	localWriteNs_ = 0;
+
+	/* From here on this is the camera's settled word. */
+	camOn_ = enabled;
 	camL_ = left;
 	camT_ = top;
 	camR_ = right;
 	camB_ = bottom;
-	camOn_ = enabled;
 
-	/* A snapshot may only end a local override when the camera's own switch
-	   flipped. Geometry alone is not enough: firmware that answers {"code":0}
-	   yet keeps its old rectangle reports the drift on the very next poll, and
-	   that was wiping the rectangle out from under the operator one second
-	   after the editor opened (bug 28). */
-	if (maskLocalOverride_) {
-		if (!enableChanged)
-			return; /* keep what the operator drew */
-		maskLocalOverride_ = false;
+	/* While the editor is armed the geometry on the picture is the
+	   operator's: adopting a read-back mid-drag drags the box back under
+	   their cursor. The switch is still the camera's, so turning the area
+	   off on the camera's own page takes the frame away here too. */
+	if (mode_ == zc::OverlayInteraction::MaskEdit && enabled) {
+		hasMask_ = true;
+		if (!maskOn_) {
+			maskOn_ = true;
+			pushMask();
+		}
+		return;
 	}
 
 	hasMask_ = true;
@@ -2276,18 +2318,18 @@ void ZcOverlayLink::seedMask(float left, float top, float right, float bottom)
 	mt_ = top;
 	mr_ = right;
 	mb_ = bottom;
-	/* Local until the first drag writes it, so a read-back cannot take the
-	   seed away before the operator has touched anything. */
-	maskLocalOverride_ = true;
+	/* Local until the operator's first drag writes it, so a read-back cannot
+	   take the seed away before they have touched anything. */
+	markLocalWrite();
 	pushMask();
 }
 
 void ZcOverlayLink::setMaskVisible(bool visible)
 {
 	maskOn_ = visible;
-	/* A local decision, so a following read-back that still says "on" must
-	   not undo it before the camera has accepted the write. */
-	maskLocalOverride_ = true;
+	/* A local decision: the snapshot that is already in flight still says the
+	   old state, and it must not undo this click. */
+	markLocalWrite();
 	pushMask();
 }
 
@@ -2299,8 +2341,9 @@ void ZcOverlayLink::commitMask(float left, float top, float right, float bottom)
 	mt_ = top;
 	mr_ = right;
 	mb_ = bottom;
-	/* Pinned until the camera reports something different. */
-	maskLocalOverride_ = true;
+	/* Our rectangle until the camera has taken it: a read-back that still
+	   carries the old corners is the write in flight, not news. */
+	markLocalWrite();
 	if (client_) {
 		/* Two requests, the way the page does it: the rectangle first, then the
 		   switch that makes the camera use it (bug 29). */
@@ -3658,6 +3701,14 @@ public:
 		return 0;
 	}
 
+	/* What a mouse click does, from a test: same signal, same handler. */
+	void activate(int index)
+	{
+		if (index < 0 || index >= int(buttons_.size()))
+			return;
+		buttons_.at(index)->click();
+	}
+
 private:
 	QList<QToolButton *> buttons_;
 	QButtonGroup *group_ = nullptr;
@@ -4963,8 +5014,16 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		    ztr("ZCameraPlugin.Framing.MaskAreaTip"));
 	}
 	maskSeg_->onActivated = [this](int index) {
+		if (qEnvironmentVariableIsSet("ZC_TEST_FLOW"))
+			blog(LOG_INFO,
+			     "[obs-zcamera] mask switch clicked -> %d (painting=%d "
+			     "client=%d enabled=%d)",
+			     index, painting_ ? 1 : 0, client_ ? 1 : 0,
+			     maskSeg_ ? (maskSeg_->isEnabled() ? 1 : 0) : -1);
 		if (painting_ || !client_)
 			return;
+		/* The snapshot in flight is older than this click. */
+		maskWriteClock_.start();
 		client_->setFramingMaskEnable(index == 1);
 		/* Bug list 28: the rectangle follows this switch both ways and
 		   nothing else. Off takes it off the picture at once, on puts the
@@ -4977,10 +5036,11 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		   clear, and switching back on never touched it. */
 		if (link_) {
 			link_->setMaskVisible(index == 1);
-			/* The rectangle the camera holds is what has to appear; read it
-			   back after the write so a camera-side default (not the seed)
-			   is what the operator sees. */
-			QTimer::singleShot(300, this, [this]() {
+			/* Read the rectangle back once the camera has had time to
+			   apply the switch. At 300 ms it answered with the state
+			   from before the write, which is what hid the frame again
+			   right after this click showed it. */
+			QTimer::singleShot(1600, this, [this]() {
 				refreshMaskRect();
 			});
 		}
@@ -5020,6 +5080,10 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		   the first drag is what reaches the camera. */
 		if (!link_->hasMask())
 			link_->seedMask(0.2f, 0.2f, 0.8f, 0.8f);
+		/* Arming is the operator saying "show me the area": a rectangle that
+		   a snapshot had hidden has to be back on the picture now, or the
+		   editor opens with nothing to drag. */
+		link_->setMaskVisible(true);
 		link_->armMode(zc::OverlayInteraction::MaskEdit);
 	});
 
@@ -6142,10 +6206,97 @@ void ZcFramingPanel::showGestureHelp()
 	dlg.exec();
 }
 
+void ZcFramingPanel::zcTestOperatorFlow()
+{
+	if (!client_ || !link_)
+		return;
+	/* Once per run: refreshMaskRect() is entered from several places, and a
+	   second flow on top of the first would click the switch again — the
+	   run would then be testing itself. */
+	static bool started = false;
+	if (started)
+		return;
+	started = true;
+
+	/* An operator can only click a live switch, and the first snapshot that
+	   makes it live arrives a moment after this panel is built. Wait for it
+	   instead of clicking a disabled button (which Qt ignores, quietly). */
+	auto *waiter = new QTimer(this);
+	waiter->setInterval(250);
+	QObject::connect(waiter, &QTimer::timeout, this, [this, waiter]() {
+		if (!maskSeg_ || !maskSeg_->isEnabled())
+			return;
+		waiter->stop();
+		waiter->deleteLater();
+		zcTestOperatorFlowClicks();
+	});
+	waiter->start();
+}
+
+void ZcFramingPanel::zcTestOperatorFlowClicks()
+{
+	/* Exactly the two clicks an operator makes, through the same handlers a
+	   mouse goes through: Detection area -> On, then "Edit detection area".
+	   Then back to Off, which has to take the frame off the picture. */
+	blog(LOG_INFO, "[obs-zcamera] flow: click Detection area = On");
+	if (maskSeg_)
+		maskSeg_->activate(1);
+
+	QTimer::singleShot(1500, this, [this]() {
+		if (!link_)
+			return;
+		blog(LOG_INFO,
+		     "[obs-zcamera] flow: after On — edit enabled=%d len=%d",
+		     maskEditBtn_ && maskEditBtn_->isEnabled() ? 1 : 0,
+		     link_->hasMask() ? 1 : 0);
+		if (maskEditBtn_) {
+			blog(LOG_INFO,
+			     "[obs-zcamera] flow: click Edit detection area");
+			maskEditBtn_->click();
+			blog(LOG_INFO,
+			     "[obs-zcamera] flow: after Edit — mode=%d len=%d "
+			     "window=%d",
+			     (int)link_->mode(), link_->hasMask() ? 1 : 0,
+			     link_->openInteract ? 1 : 0);
+		}
+	});
+
+	QTimer::singleShot(6000, this, [this]() {
+		if (!link_)
+			return;
+		blog(LOG_INFO, "[obs-zcamera] flow: 6 s in — mode=%d len=%d",
+		     (int)link_->mode(), link_->hasMask() ? 1 : 0);
+	});
+
+	/* Long enough for a script to take a picture and drag on the window
+	   while the editor is up; the switch-off is the last thing it does. */
+	QTimer::singleShot(45000, this, [this]() {
+		if (!link_)
+			return;
+		blog(LOG_INFO, "[obs-zcamera] flow: click Detection area = Off");
+		if (maskSeg_)
+			maskSeg_->activate(0);
+		QTimer::singleShot(1200, this, [this]() {
+			if (link_)
+				blog(LOG_INFO,
+				     "[obs-zcamera] flow: after Off — mode=%d "
+				     "len=%d",
+				     (int)link_->mode(),
+				     link_->hasMask() ? 1 : 0);
+		});
+	});
+}
+
 void ZcFramingPanel::refreshMaskRect()
 {
 	if (!client_ || !client_->isConnected() || !link_)
 		return;
+	if (qEnvironmentVariableIsSet("ZC_TEST_FLOW")) {
+		/* The operator's own path, driven by a script: the switch click and
+		   the editor click, through the real handlers. Everything else in
+		   this function is the read-back these two have to survive. */
+		zcTestOperatorFlow();
+	}
 	if (qEnvironmentVariableIsSet("ZC_TEST_MASK")) {
 		/* Test hook: do exactly what an operator does — switch the camera's
 		   detection area on, seed a rectangle, arm the editor — and open the
@@ -6355,7 +6506,14 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 	seg("auto_start", autoStartSeg_);
 	seg("tally", tallySeg_);
 	seg("tracking_record", trackingRecordSeg_);
-	seg("maskarea", maskSeg_);
+	/* Not while our own write is in flight: this snapshot was already on its
+	   way when the switch was clicked, so it carries the value the operator
+	   just replaced. Painting it back flipped the switch to Off by itself,
+	   greyed out "Edit detection area" and dropped the editor — the editor
+	   then looked like it could not be used at all, and the frame strobed on
+	   and off at the poll rate. */
+	if (!maskWriteRecent())
+		seg("maskarea", maskSeg_);
 	/* The rectangle itself, for the source to paint on its Interact window.
 	   all_status carries it alongside the flag on this firmware; when it is
 	   absent the mask is a switch only and nothing is drawn. */
@@ -6819,35 +6977,28 @@ void ZcFramingPanel::updateGating()
 		tiltLockSeg_->setEnabled(haveSnapshot_ && detectOn_ &&
 					 !fixAngleOn);
 
-	/* Bug list #48: on a >=1.0.5 firmware the detection-area button greys
-	   while Auto Target is off (the page's _updateMaskEditBtnStatus); the
-	   1.0.3 page keeps it live, so this is version-gated.
-
-	   Bug list 31: the editor belongs to the detection-area switch, so with
-	   that switch off there is nothing to draw and the button greys on every
-	   firmware. */
-	/* Read the camera's own last word on Auto Target when it has given one; the
-	   segment is only the fallback for a firmware whose status does not carry
-	   the key. Reading the segment first was the same latch as #30/#74/#182:
-	   the widget keeps whatever was last written into it, so a value changed
-	   elsewhere (the camera's own page) never reached this test (bug 88). */
-	const bool autoTargetOk =
-	    !fw15_ || (autoTargetKnown_ ? autoTargetOn_
-					: (autoTargetSeg_ &&
-					   autoTargetSeg_->currentIndex() == 1));
-	/* Bug 31: on a >=1.0.5 firmware Auto Target gates the detection area
-	   itself — with it off there is no target area, so both the area switch
-	   and its editor grey out. A 1.0.3 camera has no Auto Target and keeps the
-	   switch live. */
-	if (maskSeg_ && fw15_)
-		maskSeg_->setEnabled(liveBase && autoTargetOk);
+	/* Bug list #48: on a >=1.0.5 firmware the page greys the detection-area
+	   button while Auto Target is off. That interlock is dropped here: the
+	   rectangle is an operator aid, and the camera takes /mask_area whether
+	   or not Auto Target is running. Gating it on Auto Target left the
+	   switch (and with it the whole editor) greyed out on a camera whose
+	   Auto Target happened to be off, which read as "the detection area
+	   cannot be adjusted at all". The one thing the editor really needs is
+	   the area switched on, because that is what the camera paints. */
+	if (maskSeg_)
+		maskSeg_->setEnabled(haveSnapshot_);
 	const bool maskOn = maskSeg_ && maskSeg_->currentIndex() == 1;
 	if (maskEditBtn_) {
-		maskEditBtn_->setEnabled(liveBase && maskOn && autoTargetOk);
+		maskEditBtn_->setEnabled(haveSnapshot_ && maskOn);
 		/* Bug 189: with the area switched off the editor cannot stay armed —
 		   it would keep painting handles on a rectangle that no longer
 		   exists. Drop the tick and the mode with the switch. */
 		if (!maskOn && maskEditBtn_->isChecked()) {
+			if (qEnvironmentVariableIsSet("ZC_TEST_FLOW"))
+				blog(LOG_INFO,
+				     "[obs-zcamera] gating disarms the editor "
+				     "(maskOn=0 seg=%d)",
+				     maskSeg_ ? maskSeg_->currentIndex() : -1);
 			QSignalBlocker block(maskEditBtn_);
 			maskEditBtn_->setChecked(false);
 			if (link_)
@@ -6872,6 +7023,16 @@ void ZcFramingPanel::updateGating()
 	   otherwise. The >=1.0.5 generation keeps its own rule (detection on, not
 	   tracking). */
 	if (faceRegBtn_) {
+		/* The camera's own last word on Auto Target when it has given one;
+		   the segment is only the fallback for a firmware whose status does
+		   not carry the key (reading the segment first is the latch behind
+		   bugs #30/#74/#88/#182). */
+		const bool autoTargetOk =
+		    !fw15_ ||
+		    (autoTargetKnown_
+			 ? autoTargetOn_
+			 : (autoTargetSeg_ &&
+			    autoTargetSeg_->currentIndex() == 1));
 		const bool indicatorOn =
 		    indicatorSeg_ && indicatorSeg_->currentIndex() == 1;
 		faceRegBtn_->setEnabled(haveSnapshot_ && detectOn_ && !traceOn_ &&

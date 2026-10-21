@@ -510,6 +510,11 @@ public:
 	void setFirmwareNew(bool atLeast15);
 	/* The "edit detection area" tick, for the dock's mode sync. */
 	QPushButton *maskEditButton() const { return maskEditBtn_; }
+	/* Self-test only (ZC_TEST_FLOW): click the detection-area switch and its
+	   editor the way an operator does, so a run can prove the whole path —
+	   write, read-back, rectangle, drag — without a mouse. */
+	void zcTestOperatorFlow();
+	void zcTestOperatorFlowClicks();
 	/* Told after the operator flips the framing box (mode or enable), so the
 	   dock re-reads its rectangle and repaints the overlay frame: the camera's
 	   settings-changed event is for changes made elsewhere and does not fire
@@ -735,6 +740,18 @@ private:
 	bool recording_ = false;
 	/* The detection-area rectangle has been read once for this camera. */
 	bool maskRectRead_ = false;
+	/* When this panel last wrote the detection-area switch. The 300 ms
+	   snapshot that is already in flight still carries the old value, and
+	   painting it back over the operator's click flipped the switch to Off
+	   by itself — which greyed out "Edit detection area" and dropped the
+	   editor a moment after it opened. The switch is the operator's until
+	   the camera has had time to answer. */
+	QElapsedTimer maskWriteClock_;
+	bool maskWriteRecent() const
+	{
+		return maskWriteClock_.isValid() &&
+		       maskWriteClock_.elapsed() < 1500;
+	}
 	/* View Angle == Keep (fov_type == 3): the camera keeps its current
 	   framing, so the Size stepper has nothing to size — the page greys it
 	   (bug list #25). */

@@ -37,6 +37,7 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include "obs-ssp.h"
 #include "ssp-mdns.h"
 #include "ui/zc_control_dock.h"
+#include "zc_source_bridge.h"
 
 /* Minimum OBS version this plugin is built and tested against (mirrors
    buildspec.json). Advisory only — see check_obs_version_compatibility(). */
@@ -158,6 +159,31 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 				    timer->stop();
 			    });
 			timer->start();
+			/* With ZC_TEST_TRACK, also push a range frame at the source:
+			   the tracking box (bug 53) is drawn by the same pass, and a
+			   camera-side lock is not something a script can switch on.
+			   Repeated, because the dock mirrors the camera's own (off)
+			   tracking-box state and would otherwise clear it again. */
+			if (qEnvironmentVariableIsSet("ZC_TEST_TRACK")) {
+				QTimer::singleShot(16000, timer, [arg]() {
+					auto *push = new QTimer(
+					    (QObject *)obs_frontend_get_main_window());
+					push->setInterval(2000);
+					QObject::connect(
+					    push, &QTimer::timeout,
+					    (QObject *)obs_frontend_get_main_window(),
+					    [push, arg]() {
+						    if (auto *t =
+							    zc::overlayFindTarget(
+								QString::fromUtf8(
+								    arg)))
+							    t->setOverlayTrackBox(
+								    true, 0.15f, 0.15f,
+								    0.7f, 0.55f);
+					    });
+					push->start();
+				});
+			}
 		}
 	}
 }
