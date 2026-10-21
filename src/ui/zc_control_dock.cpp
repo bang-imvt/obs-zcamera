@@ -6815,11 +6815,14 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 		hideRow(accelerationRow_, doc.contains("acceleration"));
 		/* Bug 186: the group holds only those two rows, so a firmware without
 		   /ctrl/framing/speed would show an empty titled box. Hide the box
-		   with them. */
+		   with them. `isHidden()` and not `isVisible()`: setVisible(true) on a
+		   row whose page is not the current tab leaves isVisible() false, so a
+		   snapshot landing while the operator is on the Settings page used to
+		   hide the whole group on a camera that has it (bug 207, same shape). */
 		if (speedGroup_)
 			speedGroup_->setVisible(
-			    !(sensitivityRow_ && !sensitivityRow_->isVisible() &&
-			      accelerationRow_ && !accelerationRow_->isVisible()));
+			    !(sensitivityRow_ && sensitivityRow_->isHidden() &&
+			      accelerationRow_ && accelerationRow_->isHidden()));
 		hideRow(trackingRecordRow_, doc.contains("tracking_record"));
 		/* Bug lists #10/#11: the >=1.0.5 firmware removes View Angle,
 		   Size and the Detected Indicator (its Size row replaces them;
@@ -7060,8 +7063,18 @@ void ZcFramingPanel::updateGating()
 		tiltLockSeg_->setCurrentIndex(0);
 	}
 	/* Bugs 184/189: these live on the Live page and belong to the framing
-	   engine, so with detection off they grey with the rest of the block. */
-	if (zoomLockRow_ && zoomLockRow_->isVisible() && zoomLockSeg_)
+	   engine, so with detection off they grey with the rest of the block.
+
+	   Bug 207: this used to ask `zoomLockRow_->isVisible()` first, and the
+	   control that clears fixAngleOn is the Fix-angle box — which sits on the
+	   *Settings* page. Turning the box off therefore happens while the Live
+	   page is not the current tab, isVisible() answers false, the segment is
+	   left with the disabled look it was given while the box was on, and
+	   nothing repaints it until some later snapshot happens to arrive with
+	   the Live page showing. The row is hidden only for a firmware with no
+	   zoom_lock, and a hidden row cannot be clicked, so the guard protected
+	   nothing: decide on the state alone. */
+	if (zoomLockSeg_)
 		zoomLockSeg_->setEnabled(liveBase && !fixAngleOn);
 	if (sensitivitySp_)
 		sensitivitySp_->setEnabled(liveBase);
