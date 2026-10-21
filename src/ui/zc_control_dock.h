@@ -804,6 +804,10 @@ private:
 	/* The downloaded framing profile waiting for finishProfileExport()'s
 	   save dialog (empty + non-empty error text = show the error). */
 	QByteArray pendingExportProfile_;
+	/* The name the camera gave that file (P2-R1-18x.fprf), used as the save
+	   dialog's default so an export is never named .json again — the profile
+	   is not JSON and the camera's own upload input only takes .fprf. */
+	QString pendingExportName_;
 	QString pendingExportError_;
 	/* Runs from the last framing-pad nudge. Every write fires a camera
 	   notification whose all_status/fov read-back can still carry the value

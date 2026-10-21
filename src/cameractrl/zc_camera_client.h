@@ -266,20 +266,23 @@ public:
 	   onto — the page's "Detected Indicator". /marker?enable= (its older
 	   spelling /indicator answers {"code":-1}). */
 	void setFramingMarker(bool enabled);      /* /marker?enable= */
-	/* GET /export -> the framing profile as JSON, for the page's Export
-	   button. A camera without it answers {"code":-1}. NOTE: this reply is
-	   only a work order — {"code":0,"filename":"..."} — the profile itself
-	   is a file the page then downloads from /app_data/preset/<filename>.
-	   framingExportProfile() hands back that raw work-order object;
-	   framingExportProfileFile() performs the two-step download and
-	   delivers the actual profile bytes. */
+	/* GET /export -> a work order only, NOT the profile: {"code":0,
+	   "filename":"P2-R1-18x.fprf"}. The profile itself is a file the page
+	   then downloads from /app_data/preset/<filename>, and it is not JSON —
+	   it is ~20 KB of 0/1-encoded bytes, which is why the camera's own upload
+	   input is `accept=.fprf` (see issue 7). A camera without the feature
+	   answers {"code":-1}. framingExportProfile() hands back the raw work
+	   order; framingExportProfileFile() performs the two-step download and
+	   delivers the profile bytes plus the camera's own file name. */
 	void framingExportProfile(std::function<void(const QJsonObject &)> cb);
 	/* Result code for framingExportProfileFile's callback:
-	   0  ok, `profile` holds the downloaded profile JSON
+	   0  ok, `profile` holds the downloaded profile and `filename` the name
+	      the camera gave it (the export dialog's default name)
 	   <0 the camera has no profile export ({"code":-1} work order)
 	   1  transport/HTTP error, or the camera answered without a filename */
 	void framingExportProfileFile(
-	    std::function<void(int result, const QByteArray &profile)> cb);
+	    std::function<void(int result, const QByteArray &profile,
+			       const QString &filename)> cb);
 	/* Multipart POST /ctrl/framing/import (the page's
 	   showUploadFramingProfileDialog): upload a previously exported profile
 	   file. `result` is true when the camera answers {"code":0}. */

@@ -786,30 +786,34 @@ void ZcCameraClient::framingExportProfile(
 
 /* The camera's own page (exportFramingProfile in controller.js) does this in
    two steps: GET /ctrl/framing/export answers only a work order
-   {"code":0,"filename":"framing_profile.json"} — writing THAT to a file is
-   what made the plugin's exported JSON carry no settings (bug list #3) — and
-   then fetches the real profile from /app_data/preset/<filename>. */
+   {"code":0,"filename":"P2-R1-18x.fprf"} — writing THAT to a file is what made
+   the plugin's exported JSON carry no settings (bug list #3) — and then fetches
+   the real profile from /app_data/preset/<filename>. The profile is not JSON:
+   it is ~21 KB of 0/1-encoded bytes, and the page's own upload input is
+   `accept=.fprf` (issue 7). The camera's file name is handed back so the
+   export dialog can default to it instead of inventing a .json name. */
 void ZcCameraClient::framingExportProfileFile(
-    std::function<void(int result, const QByteArray &profile)> cb)
+    std::function<void(int result, const QByteArray &profile,
+		       const QString &filename)> cb)
 {
 	framingExportProfile([this, cb](const QJsonObject &doc) {
 		if (doc.contains("code") && doc.value("code").toInt() < 0) {
-			cb(-1, QByteArray()); /* firmware without the feature */
+			cb(-1, QByteArray(), QString()); /* firmware without it */
 			return;
 		}
 		const QString filename = doc.value("filename").toString();
 		if (filename.isEmpty()) {
-			cb(1, QByteArray());
+			cb(1, QByteArray(), QString());
 			return;
 		}
 		transport_.get(QStringLiteral("/app_data/preset/") + filename,
-			       [cb](const ZcHttpResponse &rsp) {
+			       [cb, filename](const ZcHttpResponse &rsp) {
 				       if (rsp.statusCode != 200 ||
 					   rsp.body.isEmpty()) {
-					       cb(1, QByteArray());
+					       cb(1, QByteArray(), QString());
 					       return;
 				       }
-				       cb(0, rsp.body);
+				       cb(0, rsp.body, filename);
 			       },
 			       20000);
 	});

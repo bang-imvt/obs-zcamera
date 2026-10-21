@@ -5772,15 +5772,18 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 			if (!client_)
 				return;
 			client_->framingExportProfileFile(
-			    [this](int result, const QByteArray &profile) {
+			    [this](int result, const QByteArray &profile,
+				   const QString &filename) {
 				    if (result != 0) {
 					    pendingExportProfile_.clear();
+					    pendingExportName_.clear();
 					    pendingExportError_ =
 					        result < 0
 						    ? ztr("ZCameraPlugin.Framing.Unsupported")
 						    : ztr("ZCameraPlugin.Framing.ExportFailed");
 				    } else {
 					    pendingExportProfile_ = profile;
+					    pendingExportName_ = filename;
 					    pendingExportError_.clear();
 				    }
 				    QTimer::singleShot(0, this, [this]() {
@@ -5798,9 +5801,17 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		connect(importBtn, &QPushButton::clicked, this, [this]() {
 			if (!client_)
 				return;
+			/* The camera's own upload input is `accept=.fprf` (issue 7):
+			   the profile is not JSON, so offering only "JSON (*.json)"
+			   invited the operator to pick the wrong file — the 38-byte
+			   work order an older build used to export, which the camera
+			   then refuses. "All files" stays so a file that already
+			   exists under another name can still be chosen. */
 			const QString path = QFileDialog::getOpenFileName(
 				this, ztr("ZCameraPlugin.Framing.Import"),
-				QString(), QStringLiteral("JSON (*.json)"));
+				QString(),
+				QStringLiteral(
+				    "Framing profile (*.fprf);;All files (*)"));
 			if (path.isEmpty())
 				return;
 			QFile file(path);
@@ -5855,17 +5866,30 @@ void ZcFramingPanel::finishProfileExport()
 				     pendingExportError_);
 		pendingExportError_.clear();
 		pendingExportProfile_.clear();
+		pendingExportName_.clear();
 		return;
 	}
 	if (pendingExportProfile_.isEmpty())
 		return;
+	/* Default to the name the camera itself gave the file (P2-R1-18x.fprf),
+	   not an invented .json one: the profile is not JSON, the page's upload
+	   input only takes .fprf, and a .json name invited both the operator and
+	   the bug report to treat it as one (issue 7). */
+	QString suggested = pendingExportName_;
+	if (suggested.isEmpty())
+		suggested = QStringLiteral("framing-profile.fprf");
 	const QString path = QFileDialog::getSaveFileName(
-		this, ztr("ZCameraPlugin.Framing.Export"),
-		QStringLiteral("framing-profile.json"),
-		QStringLiteral("JSON (*.json)"));
+		this, ztr("ZCameraPlugin.Framing.Export"), suggested,
+		QStringLiteral("Framing profile (*.fprf)"));
 	if (path.isEmpty())
 		return;
-	QFile file(path);
+	/* The native dialog does not always append the filter's suffix when the
+	   operator types a bare name; an extension-less profile is what the
+	   camera's own picker then hides. */
+	QString target = path;
+	if (QFileInfo(target).suffix().isEmpty())
+		target += QStringLiteral(".fprf");
+	QFile file(target);
 	if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
 		QMessageBox::warning(this, ztr("ZCameraPlugin.Framing.Export"),
 				     file.errorString());
@@ -5873,6 +5897,7 @@ void ZcFramingPanel::finishProfileExport()
 	}
 	file.write(pendingExportProfile_);
 	pendingExportProfile_.clear();
+	pendingExportName_.clear();
 }
 
 void ZcFramingPanel::setMaskFromCamera(bool enabled, float l, float t, float r,
