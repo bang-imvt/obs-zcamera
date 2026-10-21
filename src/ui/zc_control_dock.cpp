@@ -7134,17 +7134,22 @@ void ZcFramingPanel::updateGating()
 		   the segment is only the fallback for a firmware whose status does
 		   not carry the key (reading the segment first is the latch behind
 		   bugs #30/#74/#88/#182). */
-		const bool autoTargetOk =
-		    !fw15_ ||
-		    (autoTargetKnown_
-			 ? autoTargetOn_
-			 : (autoTargetSeg_ &&
-			    autoTargetSeg_->currentIndex() == 1));
+		const bool autoTargetOn =
+		    autoTargetKnown_
+			? autoTargetOn_
+			: (autoTargetSeg_ && autoTargetSeg_->currentIndex() == 1);
 		const bool indicatorOn =
 		    indicatorSeg_ && indicatorSeg_->currentIndex() == 1;
+		/* Bugs 209/210: the two generations have *different* rules, and the
+		   old `!fw15_ || ...` short-circuited the 1.0.3 half away — on a
+		   1.0.3 body Auto Target therefore took no part at all, while a
+		   1.0.5 body was asked for it. Inverted, both ways:
+		   >=1.0.5 keeps the page's own rule (detection running, not
+		   tracking); 1.0.3 additionally wants Auto Target *and* the
+		   detected indicator on (bug 193). */
 		faceRegBtn_->setEnabled(haveSnapshot_ && detectOn_ && !traceOn_ &&
-					autoTargetOk &&
-					(fw15_ || indicatorOn));
+					(fw15_ ||
+					 (autoTargetOn && indicatorOn)));
 	}
 
 	/* Whether framing currently drives the head, which is what the PTZ tab's
