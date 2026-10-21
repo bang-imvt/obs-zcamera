@@ -7260,24 +7260,96 @@ QString ZcFramingPanel::monitorWindowName(bool &isSource)
 	return name;
 }
 
-/* The monitor window if one is up, else null. The handle kept from last time is
-   tried first (exact, and it covers a window whose title OBS has since
-   retitled), then a scan by title — which also finds a projector the operator
-   opened from OBS's own View menu, so the button reflects it too. */
-/* This camera's window, whatever kind it is: the source's Interaction window
-   (the one the dock opens, and the one that can be dragged in), or a projector
-   the operator opened from OBS's own View menu. */
+/* The source name an Interaction window is showing.
+
+   OBS titles that window with Basic.InteractionWindow — "Interacting with
+   '<source>'" in English, "与'<source>'交互" in Chinese — so the source is
+   whatever sits between the two single quotes. Only the wording around them is
+   translated; the quotes and the name are not, which is what makes this usable
+   for matching in any UI language. */
+static QString zcInteractionSourceName(QWidget *w)
+{
+	if (!w)
+		return QString();
+	const QString title = w->windowTitle();
+	const int open = title.indexOf(QLatin1Char('\''));
+	const int close = title.lastIndexOf(QLatin1Char('\''));
+	if (open < 0 || close <= open)
+		return QString();
+	return title.mid(open + 1, close - open - 1);
+}
+
+/* The Interaction window OBS holds for a camera, remembered for the life of the
+   process rather than for the life of the dock.
+
+   Bug 206: the monitor window is deliberately *not* closed with the control
+   page — the operator keeps watching the shot while the panel is away — so
+   when the page opens again it has to recognise the window that is still up
+   instead of opening a second one. The dock's own QPointer cannot do that: it
+   dies with the dock, and a window the operator opened himself (the source's
+   own "Interact" entry) carries no tag. OBS keeps exactly one of these windows
+   per process (OBSBasic::interaction is a single QPointer, and its creator
+   closes whatever was there before building a replacement), so a handle kept
+   per camera plus the source name in the title covers both, and the expensive
+   path — obs_frontend_open_source_interaction rebuilding the window, which
+   throws away its size and position and blinks the picture — is never taken
+   for a window that is already showing this camera. */
+static QHash<QString, QPointer<QWidget>> g_cameraInteractWnd;
+
+static QWidget *zcInteractionWindowFor(const QString &host,
+				       const QString &sourceName)
+{
+	/* The handle kept from last time, while it is still that window. */
+	QPointer<QWidget> kept = g_cameraInteractWnd.value(host);
+	if (kept && kept->isVisible() && kept->inherits("OBSBasicInteraction"))
+		return kept;
+
+	QWidget *byTitle = nullptr;
+	for (QWidget *w : zcAllWindows()) {
+		if (!w || !w->isVisible() ||
+		    !w->inherits("OBSBasicInteraction"))
+			continue;
+		if (w->property(kInteractHostProp).toString() == host) {
+			g_cameraInteractWnd.insert(host, w);
+			return w;
+		}
+		/* An untagged window: one opened by OBS itself, or by a dock that
+		   has since been destroyed. The title still names its source. */
+		if (!byTitle && !sourceName.isEmpty() &&
+		    zcInteractionSourceName(w) == sourceName)
+			byTitle = w;
+	}
+	if (byTitle) {
+		byTitle->setProperty(kInteractHostProp, host);
+		g_cameraInteractWnd.insert(host, byTitle);
+		return byTitle;
+	}
+	g_cameraInteractWnd.remove(host);
+	return nullptr;
+}
+
+/* The OBS source name behind a camera ("ZCamera <ip>"), which is what an
+   Interaction window's title carries. Empty when OBS holds no source for it. */
+static QString zcSourceNameForHost(const QString &host)
+{
+	if (host.isEmpty())
+		return QString();
+	ZcCameraSourceLookup lookup;
+	lookup.want = host;
+	obs_enum_sources(zcFindCameraSourceProc, &lookup);
+	return lookup.found ? QString::fromUtf8(obs_source_get_name(lookup.found))
+			    : QString();
+}
+
+/* This camera's window: the source's Interaction window (the one the dock
+   opens, and the one that can be dragged in). A projector the operator opened
+   from OBS's own View menu is found separately, by title — see
+   zcFindMonitorWindow(). */
 static QWidget *zcCameraWindowFor(const QString &host)
 {
 	if (host.isEmpty())
 		return nullptr;
-	for (QWidget *w : zcAllWindows()) {
-		if (!w->isVisible() || !w->inherits("OBSBasicInteraction"))
-			continue;
-		if (w->property(kInteractHostProp).toString() == host)
-			return w;
-	}
-	return nullptr;
+	return zcInteractionWindowFor(host, zcSourceNameForHost(host));
 }
 
 QWidget *ZcFramingPanel::monitorWindow()
@@ -8453,6 +8525,12 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 			scanTimer_->start();
 		else
 			scanTimer_->stop();
+		/* Bug 206: the monitor window is left alone on purpose. It is a
+		   separate window on the camera's source, and the operator closes the
+		   control page to get it out of the way, not to stop watching the
+		   shot. Nothing here may close it — and the handle that lets the next
+		   page find it again lives in g_cameraInteractWnd, outside this
+		   object, so it survives the page being closed. */
 	});
 
 	/* A setting the camera applies by restarting its web service (HTTPS,
@@ -8465,6 +8543,65 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 	restartTimer_ = new QTimer(this);
 	restartTimer_->setInterval(4000);
 	connect(restartTimer_, &QTimer::timeout, this, &ZcControlDock::tryReconnect);
+
+	/* Bug 206: the title bar takes a double click as maximize / restore. The
+	   dock is created docked and floated a moment later by
+	   show_zcamera_control_dock(), and the two states answer that click from
+	   different places — a floating dock is a real window with a native
+	   caption (nativeEvent), a docked one is Qt's own title strip inside the
+	   dock widget (this filter). Both are armed here. */
+	installEventFilter(this);
+}
+
+/* Bug 206: what the operator asked for is "double click the top of the panel",
+   and two different clicks answer to that, because the panel is two different
+   things depending on where it sits:
+
+   - floating, it is a real window with a native caption (WS_CAPTION, and no
+     maximize box — a QDockWidget never gets one), so the click arrives as
+     WM_NCLBUTTONDBLCLK and Windows has nothing to do with it. nativeEvent()
+     takes it there;
+   - docked, the title strip is drawn by Qt inside the dock widget — Qt 6 does
+     that without a title-bar child (the dock's widget tree holds only the two
+     buttons, no QDockWidgetTitle) — so the click lands on the dock itself and
+     arrives at eventFilter().
+
+   Either way it means maximize / restore. */
+void ZcControlDock::toggleMaximized()
+{
+	if (!isFloating())
+		setFloating(true);
+	if (isMaximized())
+		showNormal();
+	else
+		showMaximized();
+}
+
+bool ZcControlDock::nativeEvent(const QByteArray &eventType, void *message,
+				qintptr *result)
+{
+	if (eventType == QByteArrayLiteral("windows_generic_MSG")) {
+		MSG *msg = static_cast<MSG *>(message);
+		/* HTCAPTION only: the frame's edges are a resize gesture, and
+		   taking them over would break it. */
+		if (msg && msg->message == WM_NCLBUTTONDBLCLK &&
+		    int(msg->wParam) == HTCAPTION) {
+			toggleMaximized();
+			if (result)
+				*result = 0;
+			return true;
+		}
+	}
+	return QDockWidget::nativeEvent(eventType, message, result);
+}
+
+bool ZcControlDock::eventFilter(QObject *watched, QEvent *event)
+{
+	if (event->type() == QEvent::MouseButtonDblClick && watched == this) {
+		toggleMaximized();
+		return true;
+	}
+	return QDockWidget::eventFilter(watched, event);
 }
 
 /* Query the mDNS discovery records for the currently advertised cameras and
@@ -8850,18 +8987,6 @@ void ZcControlDock::openSourceInteraction()
 	const QString host = currentHost_;
 	if (host.isEmpty())
 		return;
-	/* Already up for this camera: raise it instead of rebuilding it. OBS's own
-	   creator closes whatever window is there and constructs a new one, which
-	   throws the window's size and position away and makes the picture blink on
-	   every press. The tag is what tells one camera's window from another's —
-	   the class itself carries no such notion, and its OBSSource member is
-	   private. */
-	if (QWidget *w = zcFindInteractionWindow();
-	    w && w->property(kInteractHostProp).toString() == host) {
-		w->raise();
-		w->activateWindow();
-		return;
-	}
 	ZcCameraSourceLookup lookup;
 	lookup.want = host;
 	obs_enum_sources(zcFindCameraSourceProc, &lookup);
@@ -8871,13 +8996,29 @@ void ZcControlDock::openSourceInteraction()
 			    ztr("ZCameraPlugin.Dock.InteractNoSource").arg(host));
 		return;
 	}
+	/* Already up for this camera: raise it instead of rebuilding it. OBS's own
+	   creator closes whatever window is there and constructs a new one, which
+	   throws the window's size and position away and makes the picture blink on
+	   every press. zcInteractionWindowFor() answers for a window this dock
+	   opened, one it left open when the control page was closed (bug 206) and
+	   one OBS opened itself — the class carries no notion of a camera, and its
+	   OBSSource member is private. */
+	const QString sourceName =
+	    QString::fromUtf8(obs_source_get_name(lookup.found));
+	if (QWidget *w = zcInteractionWindowFor(host, sourceName)) {
+		w->raise();
+		w->activateWindow();
+		return;
+	}
 	blog(LOG_INFO, "[obs-zcamera] opening interaction window for %s",
 	     host.toUtf8().constData());
 	obs_frontend_open_source_interaction(lookup.found);
 	/* The window is built and shown inside that call, so it is already in the
 	   widget tree here — no need to wait for an event-loop turn to tag it. */
-	if (QWidget *w = zcFindInteractionWindow())
+	if (QWidget *w = zcFindInteractionWindow()) {
 		w->setProperty(kInteractHostProp, host);
+		g_cameraInteractWnd.insert(host, w);
+	}
 }
 
 /* The other half of openSourceInteraction(), driven by the click-to-move

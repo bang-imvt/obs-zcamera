@@ -979,6 +979,16 @@ public:
 	explicit ZcControlDock(QWidget *parent = nullptr);
 	~ZcControlDock() override;
 
+	/* Bug 206: a double click on the title bar maximizes / restores, the way it
+	   does on any other window. A floating QDockWidget is a real window with a
+	   native caption (and no maximize box), so that click never reaches Qt's
+	   event system at all — it is taken in nativeEvent(). The docked state has
+	   no caption of its own; its double click is a client event on the dock
+	   widget and is taken in eventFilter(). Both end in toggleMaximized(). */
+	bool eventFilter(QObject *watched, QEvent *event) override;
+	bool nativeEvent(const QByteArray &eventType, void *message,
+			 qintptr *result) override;
+
 	/* Connect the control client to `host`. Returns false — and leaves no
 	   client behind, so nothing can be operated — when the camera does not
 	   answer (spec §1, L11). */
@@ -1026,6 +1036,10 @@ private:
 	/* Closes it again. There is no frontend call for this, so the window is
 	   found through the widget tree; see the comment on the definition. */
 	void closeSourceInteraction();
+	/* Maximize the panel if it is not maximized, restore it otherwise (bug
+	   206). Both double-click paths (nativeEvent for the floating window,
+	   eventFilter for the docked one) end here. */
+	void toggleMaximized();
 	/* Create/reuse an obs-zcamera source pointing at `host` and add it to the
 	   current scene. Runs on the OBS frontend (Qt main) thread. */
 	void addCameraToSource(const QString &host);
