@@ -523,6 +523,11 @@ public:
 	void setFirmwareNew(bool atLeast15);
 	/* The "edit detection area" tick, for the dock's mode sync. */
 	QPushButton *maskEditButton() const { return maskEditBtn_; }
+	/* Re-ask the monitor button what is up. The dock does it when a tab is
+	   switched (bug 219): the page can be left and come back while the window
+	   stays on screen, and the tick has to be right the moment the page is
+	   shown instead of up to a poll later. */
+	void resyncMonitorButton() { syncMonitorButton(); }
 	/* Self-test only (ZC_TEST_FLOW): click the detection-area switch and its
 	   editor the way an operator does, so a run can prove the whole path —
 	   write, read-back, rectangle, drag — without a mouse. */

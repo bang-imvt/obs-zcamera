@@ -7495,7 +7495,13 @@ void ZcFramingPanel::syncMonitorButton()
 {
 	if (!monitorBtn_)
 		return;
-	const bool open = monitorWindow() != nullptr;
+	QWidget *w = monitorWindow();
+	/* Bug 219: a minimised window is not "open" as far as the operator is
+	   concerned — there is nothing on screen to watch — so the tick must not
+	   claim it. Leaving it ticked is what made the button need two clicks: the
+	   first one only un-ticked a window the operator could not see, and the
+	   second one opened a real one. */
+	const bool open = w && !w->isMinimized();
 	if (monitorBtn_->isChecked() == open)
 		return;
 	/* Setting the face must not run the handler: this is the handler's own
@@ -7527,6 +7533,12 @@ void ZcFramingPanel::openMonitorWindow()
 	/* Already up for this camera: raise it. There is only ever one, and it is
 	   the same window the detection-area editor draws into. */
 	if (QWidget *existing = monitorWindow()) {
+		/* Bug 219: a window that is still alive but minimised has nothing on
+		   screen, and raise() alone does not bring it back — restore it
+		   first, so one click on the button always ends with the window
+		   visible. */
+		if (existing->isMinimized())
+			existing->showNormal();
 		existing->raise();
 		existing->activateWindow();
 		return;
@@ -8502,6 +8514,16 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 	framing_ = new ZcFramingPanel(framingTab_);
 	framing_->setOverlayLink(overlay_);
 	framingLayout->addWidget(framing_, 1);
+
+	/* Bug 219: a page switch neither opens nor closes the monitor window — it
+	   is a window of its own, and the operator keeps watching the shot while
+	   another page is up (the same product decision as bug 206). What the
+	   switch does do is re-ask the button, so its face is right the moment the
+	   page appears rather than up to a poll later. */
+	connect(tabs_, &QTabWidget::currentChanged, this, [this](int) {
+		if (framing_)
+			framing_->resyncMonitorButton();
+	});
 
 	/* One armed mode at a time: the PTZ tab's "click to move" and the framing
 	   tab's "edit detection area" are the same slot on the source, so arming
