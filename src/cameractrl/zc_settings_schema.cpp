@@ -482,6 +482,69 @@ QString hostFromSourceName(const QString &sourceName)
 	return sourceName.mid(prefix.size());
 }
 
+bool isValidCameraHost(const QString &host)
+{
+	if (host.isEmpty() || host.size() > 253)
+		return false;
+
+	/* Dotted-quad IPv4: exactly four 0..255 octets. */
+	bool quad = true;
+	{
+		int i = 0;
+		int octets = 0;
+		while (i <= host.size()) {
+			int j = host.indexOf(QLatin1Char('.'), i);
+			if (j < 0)
+				j = host.size();
+			if (j == i || j - i > 3) {
+				quad = false;
+				break;
+			}
+			int v = 0;
+			for (int k = i; k < j; ++k) {
+				const QChar c = host.at(k);
+				if (c < QLatin1Char('0') || c > QLatin1Char('9')) {
+					quad = false;
+					break;
+				}
+				v = v * 10 + (c.unicode() - '0');
+			}
+			if (!quad || v > 255)
+				break;
+			++octets;
+			if (j == host.size())
+				break;
+			i = j + 1;
+		}
+		if (quad && octets == 4)
+			return true;
+	}
+
+	/* Host name: letters, digits, '-' and '.', no empty label and no leading or
+	   trailing separator. */
+	const QChar first = host.front();
+	const QChar last = host.back();
+	if (first == QLatin1Char('.') || last == QLatin1Char('.') ||
+	    first == QLatin1Char('-') || last == QLatin1Char('-'))
+		return false;
+	bool prevDot = false;
+	for (const QChar c : host) {
+		if (c == QLatin1Char('.')) {
+			if (prevDot)
+				return false;
+			prevDot = true;
+			continue;
+		}
+		const bool alnum = (c >= QLatin1Char('a') && c <= QLatin1Char('z')) ||
+				   (c >= QLatin1Char('A') && c <= QLatin1Char('Z')) ||
+				   (c >= QLatin1Char('0') && c <= QLatin1Char('9'));
+		if (!alnum && c != QLatin1Char('-'))
+			return false;
+		prevDot = false;
+	}
+	return true;
+}
+
 bool catalogRequiresPtz(const QString &catalogId)
 {
 	/* Only the `ptz` catalog holds PTZ configuration. The PTZ *pane* (presets

@@ -318,6 +318,13 @@ QString cameraSourceName(const QString &host);
    a camera. */
 QString hostFromSourceName(const QString &sourceName);
 
+/* Whether a string can be a camera address at all: a dotted-quad IPv4 address
+   or a DNS-style host name. Shared by the source's own IP box, the source's
+   update() (which refuses to build a pipeline on anything else) and the dock's
+   source enumeration — a source saved with a rejected address keeps it in its
+   NAME, and the rail used to list that non-existent camera (bug 173). */
+bool isValidCameraHost(const QString &host);
+
 /* The full set of settings catalogs presented in the control dock, mirroring
    ZCamGuiOpen. */
 std::vector<CatalogDef> &catalogs();

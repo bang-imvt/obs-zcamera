@@ -603,65 +603,12 @@ ZcSspSource::~ZcSspSource()
 /* Source-IP validation (bug list "no IP format validation on the source-IP
    box"). Accepts a dotted-quad IPv4 address or a DNS-style host name; anything
    else (empty labels, spaces, a pasted URL) is rejected so a typo cannot be
-   applied and left behind as a permanently black source. */
+   applied and left behind as a permanently black source. The rule itself lives
+   in zc_settings_schema so the dock can apply the same test to the sources it
+   enumerates (bug 173). */
 static bool isValidHostAddress(const std::string &host)
 {
-	if (host.empty() || host.size() > 253)
-		return false;
-
-	/* Dotted-quad IPv4: exactly four 0..255 octets. */
-	bool quad = true;
-	{
-		size_t i = 0;
-		int octets = 0;
-		while (i <= host.size()) {
-			size_t j = host.find('.', i);
-			if (j == std::string::npos)
-				j = host.size();
-			if (j == i || j - i > 3) {
-				quad = false;
-				break;
-			}
-			int v = 0;
-			for (size_t k = i; k < j; ++k) {
-				if (host[k] < '0' || host[k] > '9') {
-					quad = false;
-					break;
-				}
-				v = v * 10 + (host[k] - '0');
-			}
-			if (!quad || v > 255)
-				break;
-			++octets;
-			if (j == host.size())
-				break;
-			i = j + 1;
-		}
-		if (quad && octets == 4)
-			return true;
-	}
-
-	/* Host name: letters, digits, '-' and '.', no empty label and no leading or
-	   trailing separator. */
-	if (host.front() == '.' || host.back() == '.' || host.front() == '-' ||
-	    host.back() == '-')
-		return false;
-	bool prevDot = false;
-	for (char c : host) {
-		if (c == '.') {
-			if (prevDot)
-				return false;
-			prevDot = true;
-			continue;
-		}
-		const bool alnum = (c >= 'a' && c <= 'z') ||
-				   (c >= 'A' && c <= 'Z') ||
-				   (c >= '0' && c <= '9');
-		if (!alnum && c != '-')
-			return false;
-		prevDot = false;
-	}
-	return true;
+	return zc::isValidCameraHost(QString::fromStdString(host));
 }
 
 /* Sources added from the dock keep their address only in their own name

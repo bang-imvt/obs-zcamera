@@ -9209,9 +9209,28 @@ QString ZcControlDock::sourceNameForHost(const QString &host)
 static bool collectSourceHost(void *data, obs_source_t *source)
 {
 	auto *hosts = static_cast<QSet<QString> *>(data);
-	const QString host =
-	    zc::hostFromSourceName(QString::fromUtf8(obs_source_get_name(source)));
-	if (!host.isEmpty())
+	/* Only this plugin's sources can stand for a camera. A scene or a text
+	   source named "ZCamera …" was listed as a camera too. */
+	if (strcmp(obs_source_get_id(source), "zcamera_source") != 0)
+		return true;
+	/* The stored address is the authority; the name is only the fallback for a
+	   collection saved before the source kept one (ipFromSourceName heals
+	   those). Bug 173: the name keeps whatever the operator typed even when
+	   update() rejected it, so a source added with 192.168.999.1 was listed as a
+	   camera that does not exist — and, worse, could be clicked into a
+	   permanent connect loop. Anything that is not a legal address is skipped
+	   here; the source itself stays in OBS, unconnected. */
+	QString host;
+	obs_data_t *settings = obs_source_get_settings(source);
+	if (settings) {
+		host = QString::fromUtf8(obs_data_get_string(settings, "zc_source_ip"))
+			   .trimmed();
+		obs_data_release(settings);
+	}
+	if (!zc::isValidCameraHost(host))
+		host = zc::hostFromSourceName(
+		    QString::fromUtf8(obs_source_get_name(source)));
+	if (zc::isValidCameraHost(host))
 		hosts->insert(host);
 	return true;
 }
