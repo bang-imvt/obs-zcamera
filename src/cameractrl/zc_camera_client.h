@@ -120,6 +120,13 @@ public:
 	void lensFocusFar(int speed);
 	void lensFocusStop();
 	void afOnePush();
+	/* The live horizontal field of view, in degrees (it already includes the
+	   zoom and the camera's stabilisation). `zoomFactor` selects the pose to
+	   answer for: 0 asks for the current one, any other value for that focal
+	   ratio — which is how the lock-angle region's own field of view is read
+	   back (its reply carries `hfov`). */
+	void lensHfov(double zoomFactor,
+		      std::function<void(const QJsonObject &)> cb);
 
 	/* PTZ. Preset indexes are 0-based, matching the camera's own web UI.
 	   Movement takes a direction action (up/down/left/right/rightup/...) and a

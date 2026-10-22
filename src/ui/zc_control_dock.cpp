@@ -2234,6 +2234,12 @@ public:
 	   its overlay draws the region line the web preview shows (bug 17). */
 	void setTrackBox(bool enabled, float left, float top, float width,
 			 float height);
+	/* The camera's lock-angle ("fix angle") region (bug 53): the pose the box
+	   was saved at and the pose the picture is being taken from, both with
+	   their horizontal field of view. The source projects the pair at draw
+	   time, because only it knows the picture's aspect ratio. */
+	void setAngleBox(bool enabled, float boxPan, float boxTilt, float boxHfov,
+			 float viewPan, float viewTilt, float viewHfov);
 	void onOverlayPointer(int phase, int button, float nx, float ny) override;
 
 	/* Opens the source's Interact window. Set by the dock, which owns the
@@ -2307,6 +2313,10 @@ void ZcOverlayLink::setClient(ZcCameraClient *client, const QString &host)
 	if (zc::OverlayTarget *t = zc::overlayFindTarget(host_))
 		t->setOverlayTrackBox(false, 0.0f, 0.0f, 0.0f, 0.0f);
 	trackOn_ = false;
+	/* Nor its lock-angle frame (bug 53). */
+	if (zc::OverlayTarget *t = zc::overlayFindTarget(host_))
+		t->setOverlayAngleBox(false, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+				      0.0f);
 	client_ = client;
 	host_ = host;
 	hasMask_ = false;
@@ -2324,6 +2334,16 @@ void ZcOverlayLink::setTrackBox(bool enabled, float left, float top,
 	zc::OverlayTarget *t = zc::overlayFindTarget(host_);
 	if (t)
 		t->setOverlayTrackBox(enabled, left, top, width, height);
+}
+
+void ZcOverlayLink::setAngleBox(bool enabled, float boxPan, float boxTilt,
+				float boxHfov, float viewPan, float viewTilt,
+				float viewHfov)
+{
+	zc::OverlayTarget *t = zc::overlayFindTarget(host_);
+	if (t)
+		t->setOverlayAngleBox(enabled, boxPan, boxTilt, boxHfov, viewPan,
+				      viewTilt, viewHfov);
 }
 
 void ZcOverlayLink::setPtzSpeed(float speed)
@@ -5675,6 +5695,48 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		&ZcFramingPanel::syncMonitorButton);
 	monitorPoll_->start();
 
+	/* Lock-angle frame (bug 53): the head's pose and its field of view, sampled
+	   while the region is switched on and this page is on screen. Both are
+	   small queries; the box's own pose arrives with the framing snapshot. */
+	angleBoxPoll_ = new QTimer(this);
+	angleBoxPoll_->setInterval(700);
+	connect(angleBoxPoll_, &QTimer::timeout, this, [this]() {
+		if (!client_ || !fixAngleBoxOn_)
+			return;
+		++anglePollTick_;
+		client_->ptzQuery(true, [this](const QJsonObject &o) {
+			if (!client_)
+				return;
+			const QJsonValue pan = o.value(QLatin1String("pan_pos"));
+			const QJsonValue tilt = o.value(QLatin1String("tilt_pos"));
+			if (pan.isDouble())
+				angleViewPan_ = (float)pan.toDouble();
+			if (tilt.isDouble())
+				angleViewTilt_ = (float)tilt.toDouble();
+			pushAngleBox();
+		});
+		client_->lensHfov(0.0, [this](const QJsonObject &o) {
+			if (!client_)
+				return;
+			const QJsonValue h = o.value(QLatin1String("hfov"));
+			if (!h.isDouble() || h.toDouble() <= 0.0)
+				return;
+			angleViewHfov_ = (float)h.toDouble();
+			pushAngleBox();
+		});
+		/* Every fifth tick the box's own pose is re-read as well: it changes
+		   only when somebody re-saves the box (from here or from the camera's
+		   page), and the framing snapshot does not arrive on a timer. */
+		if (anglePollTick_ % 5 == 0)
+			client_->framingFixAngleBoxQuery([this](const QJsonObject &o) {
+				if (!client_)
+					return;
+				QJsonObject wrap;
+				wrap.insert(QLatin1String("fix_angle_box"), o);
+				updateAngleBoxFromSnapshot(wrap);
+			});
+	});
+
 	/* ---- Composition presets: the tile row at the foot of the page. ----
 	   The page keeps its preset block in the left column of the live grid,
 	   between Auto Target and Lock Zoom, and section 3 of the dock's own
@@ -6165,6 +6227,10 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 			   does not come back as a settings-changed event. */
 			if (onBoxStateChanged)
 				onBoxStateChanged();
+			/* The lock-angle frame starts (or stops) being sampled with
+			   the switch itself, so it is on the picture at the next
+			   pass instead of after the read-back. */
+			syncAngleBoxPoll();
 		};
 
 		boxGroup_ = box;
@@ -6461,8 +6527,18 @@ void ZcFramingPanel::setClient(ZcCameraClient *client)
 		}
 		updateStatusLabel();
 		updateGating();
+		/* No camera, so no lock-angle region: take the frame off the previous
+		   camera's picture and stop sampling (bug 53). */
+		fixAngleBoxOn_ = false;
+		angleBoxZoom_ = 0.0f;
+		angleBoxHfov_ = 0.0f;
+		angleViewHfov_ = 0.0f;
+		syncAngleBoxPoll();
 		return;
 	}
+	/* A camera that already has its lock-angle region switched on: sample its
+	   pose from the start rather than waiting for the first snapshot. */
+	syncAngleBoxPoll();
 	refresh();
 }
 
@@ -6911,6 +6987,106 @@ void ZcFramingPanel::refreshMaskRect()
 	});
 }
 
+/* ------------------------------------------------------------------ */
+/* Lock-angle frame (bug 53)                                           */
+/* ------------------------------------------------------------------ */
+
+/* The camera stores the lock-angle region as a POSE — the pan/tilt it was
+   saved at plus the focal ratio then in use — and its own page draws it as a
+   rectangle by projecting that pose from wherever the head is now. Nothing in
+   the plugin did that, so switching the lock on changed the head's behaviour
+   and put nothing on the picture (bug 53: "开启锁定角度后，还是没有框线").
+
+   Reading the pose is free: all_status carries it. The two fields of view are
+   not in there (`fix_angle_box` answers pan/tilt/zoom_factor only), so they
+   come from /ctrl/lens?action=hfov — the same request the page makes. */
+void ZcFramingPanel::updateAngleBoxFromSnapshot(const QJsonObject &doc)
+{
+	const QJsonValue box = doc.value(QLatin1String("fix_angle_box"));
+	if (!box.isObject())
+		return;
+	const QJsonObject o = box.toObject();
+	const QJsonValue pan = o.value(QLatin1String("pan"));
+	const QJsonValue tilt = o.value(QLatin1String("tilt"));
+	if (pan.isDouble())
+		angleBoxPan_ = (float)pan.toDouble();
+	if (tilt.isDouble())
+		angleBoxTilt_ = (float)tilt.toDouble();
+	const double zoom = o.value(QLatin1String("zoom_factor")).toDouble(1.0);
+	/* Re-read the box's own field of view only when the ratio it was saved at
+	   has changed: it is a lens query, and the answer cannot change while the
+	   ratio does not. */
+	if (!qFuzzyCompare(zoom + 1.0, angleBoxZoom_ + 1.0)) {
+		angleBoxZoom_ = (float)zoom;
+		fetchAngleBoxHfov(zoom);
+	}
+	pushAngleBox();
+}
+
+void ZcFramingPanel::fetchAngleBoxHfov(double zoomFactor)
+{
+	if (!client_ || angleHfovPending_)
+		return;
+	angleHfovPending_ = true;
+	client_->lensHfov(zoomFactor, [this](const QJsonObject &doc) {
+		angleHfovPending_ = false;
+		if (!client_)
+			return;
+		const QJsonValue h = doc.value(QLatin1String("hfov"));
+		if (!h.isDouble() || h.toDouble() <= 0.0)
+			return;
+		angleBoxHfov_ = (float)h.toDouble();
+		pushAngleBox();
+	});
+}
+
+void ZcFramingPanel::pushAngleBox()
+{
+	if (!link_)
+		return;
+	/* Only a >=1.0.5 camera has a lock-angle box at all, and only while it is
+	   switched on does the region mean anything. Everything else takes the
+	   frame off the picture rather than leaving a stale one behind. */
+	const bool on = fw15_ && fixAngleBoxOn_ && angleBoxHfov_ > 0.1f &&
+			angleViewHfov_ > 0.1f;
+	link_->setAngleBox(on, angleBoxPan_, angleBoxTilt_, angleBoxHfov_,
+			   angleViewPan_, angleViewTilt_, angleViewHfov_);
+}
+
+void ZcFramingPanel::syncAngleBoxPoll()
+{
+	if (!angleBoxPoll_)
+		return;
+	/* Not gated on this page being the current tab: the frame is drawn into
+	   the monitor window, which the operator watches while the dock shows some
+	   other page. `window()` is the dock itself, so closing it stops the
+	   sampling. */
+	const bool want = client_ && fw15_ && fixAngleBoxOn_ && window() &&
+			  window()->isVisible();
+	if (want && !angleBoxPoll_->isActive())
+		angleBoxPoll_->start();
+	else if (!want && angleBoxPoll_->isActive())
+		angleBoxPoll_->stop();
+	if (!want)
+		pushAngleBox();
+}
+
+/* The two poses that go into the projection move independently: the head
+   travels (view) and, on the camera's own page, the box can be re-saved
+   (box). Sampling the head a few times per box read keeps the frame attached
+   to the picture while it pans — which is the whole point of drawing it. */
+void ZcFramingPanel::showEvent(QShowEvent *event)
+{
+	QWidget::showEvent(event);
+	syncAngleBoxPoll();
+}
+
+void ZcFramingPanel::hideEvent(QHideEvent *event)
+{
+	QWidget::hideEvent(event);
+	syncAngleBoxPoll();
+}
+
 void ZcFramingPanel::refreshPresets()
 {
 	if (!client_ || !client_->isConnected())
@@ -7234,6 +7410,11 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 		fixAngleBoxOn_ = boxFlag("fix_angle_box", fixAngleBoxOn_);
 	if (doc.contains(QLatin1String("tracking_box")))
 		trackingBoxOn_ = boxFlag("tracking_box", trackingBoxOn_);
+	/* Bug 53: the same object carries the pose the lock-angle region was saved
+	   at, which is all the camera stores — the frame on the picture has to be
+	   projected from it. */
+	updateAngleBoxFromSnapshot(doc);
+	syncAngleBoxPoll();
 	/* The camera never says which box its page is showing; it keeps one enable
 	   flag per box. When exactly one of them is on, that is the mode — infer
 	   it, so the status switch and the Lock Zoom/Tilt interlock follow the

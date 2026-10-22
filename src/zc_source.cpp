@@ -207,6 +207,9 @@ public:
 	void setOverlayMarker(bool on, float nx, float ny) override;
 	void setOverlayTrackBox(bool enabled, float left, float top,
 				float width, float height) override;
+	void setOverlayAngleBox(bool enabled, float boxPan, float boxTilt,
+				float boxHfov, float viewPan, float viewTilt,
+				float viewHfov) override;
 
 	/* Delivered from the Interact window's mouse callbacks (zc_source.cpp's
 	   zc_source_mouse_click/mouse_move). Runs on the OBS UI thread. */
@@ -466,6 +469,15 @@ private:
 	bool overlayTrackOn_ = false;
 	float overlayTrackL_ = 0.0f, overlayTrackT_ = 0.0f;
 	float overlayTrackW_ = 0.0f, overlayTrackH_ = 0.0f;
+	/* The lock-angle region (bug 53): the pose the box was saved at and the
+	   pose the picture is being taken from. Both go through the same 3-D
+	   projection at draw time — the picture's aspect ratio is only known here
+	   — see projectAngleBox(). */
+	bool overlayAngleOn_ = false;
+	float overlayAnglePan_ = 0.0f, overlayAngleTilt_ = 0.0f;
+	float overlayAngleHfov_ = 0.0f;
+	float overlayAngleViewPan_ = 0.0f, overlayAngleViewTilt_ = 0.0f;
+	float overlayAngleViewHfov_ = 0.0f;
 	/* The left-button drag in progress, if any: press records the anchor,
 	   move follows, release ends it. The rectangle that was on the picture
 	   before the press is kept so a click without a drag can put it back. */
@@ -489,6 +501,7 @@ private:
 	uint64_t overlayRenderNextNs_ = 0;
 	uint64_t overlayEnterNextNs_ = 0;
 	uint64_t overlayCallNextNs_ = 0;
+	uint64_t overlayAngleNextNs_ = 0;
 	float overlayDragAnchorX_ = 0.0f, overlayDragAnchorY_ = 0.0f;
 	/* 1x1 solid texture the rectangle and crosshair are stretched from, in
 	   the interaction colour (the box texture is red). Graphics thread only. */
@@ -504,6 +517,10 @@ private:
 	/* The page's edit accent (#ff4e05, the colour of its corner handles),
 	   used for the rectangle while it is being placed. Graphics thread only. */
 	gs_texture_t *overlayAccent_ = nullptr;
+	/* The lock-angle frame's colour (bug 53): the page's FIX_ANGLE_COLOR,
+	   #40b0fa — a lighter blue than the interaction cyan, so a lock-angle
+	   region is never read as a detection-area edge. Graphics thread only. */
+	gs_texture_t *overlayAngleSolid_ = nullptr;
 	/* Same for the tracking-box frame, in amber. Graphics thread only. */
 	gs_texture_t *trackSolid_ = nullptr;
 	/* The camera address the source is registered under, so a re-registration
@@ -600,6 +617,10 @@ ZcSspSource::~ZcSspSource()
 	if (overlayAccent_) {
 		gs_texture_destroy(overlayAccent_);
 		overlayAccent_ = nullptr;
+	}
+	if (overlayAngleSolid_) {
+		gs_texture_destroy(overlayAngleSolid_);
+		overlayAngleSolid_ = nullptr;
 	}
 	if (trackSolid_) {
 		gs_texture_destroy(trackSolid_);
@@ -1272,6 +1293,20 @@ void ZcSspSource::setOverlayTrackBox(bool enabled, float left, float top,
 	overlayTrackH_ = height;
 }
 
+void ZcSspSource::setOverlayAngleBox(bool enabled, float boxPan, float boxTilt,
+				     float boxHfov, float viewPan, float viewTilt,
+				     float viewHfov)
+{
+	std::lock_guard<std::mutex> lock(overlayMutex_);
+	overlayAngleOn_ = enabled;
+	overlayAnglePan_ = boxPan;
+	overlayAngleTilt_ = boxTilt;
+	overlayAngleHfov_ = boxHfov;
+	overlayAngleViewPan_ = viewPan;
+	overlayAngleViewTilt_ = viewTilt;
+	overlayAngleViewHfov_ = viewHfov;
+}
+
 /* From the Interact window's mouse callbacks. `px`/`py` are in the source's
    own pixel space (libobs maps them for us), which is the same space the
    overlay draws in, so normalising by getWidth()/getHeight() lines the two
@@ -1364,6 +1399,167 @@ void ZcSspSource::onPointerEvent(int phase, int button, int px, int py)
 	zc::overlayDispatchPointer(phase, button, nx, ny);
 }
 
+/* ------------------------------------------------------------------ */
+/* Lock-angle region projection (bug 53)                               */
+/* ------------------------------------------------------------------ */
+
+/* The camera does not store the lock-angle region as a rectangle in the
+   picture. It stores the pan/tilt the box was saved at plus the focal ratio
+   in use then — and only turns that into a rectangle once somebody looks at it
+   from wherever the head is now. Its own web preview does exactly that in
+   WebGL (controller.js: ptzToWorldBox() + viewProjectionFromPtz()), so this is
+   that arithmetic, ported rather than approximated: an approximation would put
+   the frame in the wrong place as soon as the head is panned away from the
+   box, which is precisely when the frame matters.
+
+   Conventions, kept identical to the page's:
+
+   - pan +1° turns toward +X, tilt up is +Y, the camera looks down -Z;
+   - world corners are built with the box pose's INVERSE rotation applied to
+     the tangent offsets at the box centre, so they live in one world frame;
+   - the view applies the CURRENT pose, and the corners are projected with a
+     pinhole whose horizontal field of view is the live one (it already
+     includes zoom and stabilisation, so nothing else may be applied). */
+namespace {
+
+constexpr float kPiF = 3.14159265358979f;
+constexpr float kNearPlane = 0.05f;
+
+inline float deg2rad(float d)
+{
+	return d * (kPiF / 180.0f);
+}
+
+/* Column-major 4x4, the same layout the page's Float32Arrays use. */
+struct Mat4 {
+	float m[16];
+};
+
+Mat4 mat4Identity()
+{
+	Mat4 out{};
+	out.m[0] = 1.0f;
+	out.m[5] = 1.0f;
+	out.m[10] = 1.0f;
+	out.m[15] = 1.0f;
+	return out;
+}
+
+Mat4 mat4Multiply(const Mat4 &a, const Mat4 &b)
+{
+	Mat4 out{};
+	for (int col = 0; col < 4; ++col) {
+		for (int row = 0; row < 4; ++row) {
+			float sum = 0.0f;
+			for (int k = 0; k < 4; ++k)
+				sum += a.m[k * 4 + row] * b.m[col * 4 + k];
+			out.m[col * 4 + row] = sum;
+		}
+	}
+	return out;
+}
+
+Mat4 mat4RotateX(float rad)
+{
+	Mat4 out = mat4Identity();
+	const float c = std::cos(rad);
+	const float s = std::sin(rad);
+	out.m[5] = c;
+	out.m[6] = s;
+	out.m[9] = -s;
+	out.m[10] = c;
+	return out;
+}
+
+Mat4 mat4RotateY(float rad)
+{
+	Mat4 out = mat4Identity();
+	const float c = std::cos(rad);
+	const float s = std::sin(rad);
+	out.m[0] = c;
+	out.m[2] = -s;
+	out.m[8] = s;
+	out.m[10] = c;
+	return out;
+}
+
+/* Rx(-tilt) * Ry(+pan): the pose -> view rotation. */
+Mat4 mat4FromPanTilt(float panDeg, float tiltDeg)
+{
+	return mat4Multiply(mat4RotateX(deg2rad(-tiltDeg)),
+			    mat4RotateY(deg2rad(panDeg)));
+}
+
+/* Ry(-pan) * Rx(+tilt): its true inverse, in that order. */
+Mat4 mat4FromPanTiltInverse(float panDeg, float tiltDeg)
+{
+	return mat4Multiply(mat4RotateY(deg2rad(-panDeg)),
+			    mat4RotateX(deg2rad(tiltDeg)));
+}
+
+struct Vec3 {
+	float x, y, z;
+};
+
+Vec3 transformVec3(const Mat4 &m, float x, float y, float z)
+{
+	return {m.m[0] * x + m.m[4] * y + m.m[8] * z,
+		m.m[1] * x + m.m[5] * y + m.m[9] * z,
+		m.m[2] * x + m.m[6] * y + m.m[10] * z};
+}
+
+/* One corner of the box: the tangent offsets at the box centre, rotated into
+   the world frame the view matrix works in. */
+Vec3 worldCornerFromDelta(float boxPan, float boxTilt, float dPan, float dTilt)
+{
+	const Mat4 inv = mat4FromPanTiltInverse(boxPan, boxTilt);
+	return transformVec3(inv, std::tan(deg2rad(dPan)),
+			     std::tan(deg2rad(dTilt)), -1.0f);
+}
+
+/* A projected edge, in picture pixels. */
+struct ScreenSeg {
+	bool ok = false;
+	float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
+};
+
+/* Liang-Barsky: trim a segment to the picture. A projected corner can sit far
+   outside the frame (it does whenever the head is panned away from the box),
+   and a sprite that large would be drawn at a silly size for nothing. */
+bool clipSegment(float &x0, float &y0, float &x1, float &y1, float w, float h)
+{
+	float t0 = 0.0f, t1 = 1.0f;
+	const float dx = x1 - x0;
+	const float dy = y1 - y0;
+	const float p[4] = {-dx, dx, -dy, dy};
+	const float q[4] = {x0, w - x0, y0, h - y0};
+	for (int i = 0; i < 4; ++i) {
+		if (std::fabs(p[i]) < 1e-6f)
+			continue;
+		const float r = q[i] / p[i];
+		if (p[i] < 0.0f) {
+			if (r > t1)
+				return false;
+			if (r > t0)
+				t0 = r;
+		} else {
+			if (r < t0)
+				return false;
+			if (r < t1)
+				t1 = r;
+		}
+	}
+	const float nx0 = x0 + t0 * dx, ny0 = y0 + t0 * dy;
+	const float nx1 = x0 + t1 * dx, ny1 = y0 + t1 * dy;
+	x0 = nx0;
+	y0 = ny0;
+	x1 = nx1;
+	y1 = ny1;
+	return t1 > t0;
+}
+
+} // namespace
+
 void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 {
 	const auto mode = (zc::OverlayInteraction)overlayMode_.load(
@@ -1378,7 +1574,7 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 	{
 		std::lock_guard<std::mutex> lock(overlayMutex_);
 		anyOperatorOverlay = overlayMaskOn_ || overlayMarkerOn_ ||
-				     overlayTrackOn_;
+				     overlayTrackOn_ || overlayAngleOn_;
 	}
 	{
 		/* Self-test aid (opt-in: only with the harness that also seeds a
@@ -1459,6 +1655,11 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 		uint8_t guide[4] = {0, 229, 255, 115};
 		const uint8_t *guideData = guide;
 		overlayGuide_ = gs_texture_create(1, 1, GS_RGBA, 1, &guideData, 0);
+		/* The lock-angle frame, in the page's own FIX_ANGLE_COLOR. */
+		uint8_t angleBlue[4] = {0x40, 0xb0, 0xfa, 0xff};
+		const uint8_t *angleData = angleBlue;
+		overlayAngleSolid_ =
+		    gs_texture_create(1, 1, GS_RGBA, 1, &angleData, 0);
 	}
 
 	uint32_t thick_px = (fw < fh ? fw : fh) / 360;
@@ -1483,6 +1684,9 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 	bool maskOn = false, markerOn = false, trackOn = false;
 	float ml = 0.0f, mt = 0.0f, mr = 1.0f, mb = 1.0f, mx = 0.5f, my = 0.5f;
 	float tl = 0.0f, tt = 0.0f, tw = 0.0f, th = 0.0f;
+	bool angleOn = false;
+	float aBoxPan = 0.0f, aBoxTilt = 0.0f, aBoxHfov = 0.0f;
+	float aViewPan = 0.0f, aViewTilt = 0.0f, aViewHfov = 0.0f;
 	{
 		std::lock_guard<std::mutex> lock(overlayMutex_);
 		maskOn = overlayMaskOn_;
@@ -1498,6 +1702,13 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 		tt = overlayTrackT_;
 		tw = overlayTrackW_;
 		th = overlayTrackH_;
+		angleOn = overlayAngleOn_;
+		aBoxPan = overlayAnglePan_;
+		aBoxTilt = overlayAngleTilt_;
+		aBoxHfov = overlayAngleHfov_;
+		aViewPan = overlayAngleViewPan_;
+		aViewTilt = overlayAngleViewTilt_;
+		aViewHfov = overlayAngleViewHfov_;
 	}
 
 	gs_blend_state_push();
@@ -1522,6 +1733,28 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 	};
 	const auto fill = [&](float x, float y, float w, float h) {
 		fillWith(overlaySolid_, x, y, w, h);
+	};
+	/* A straight segment at an arbitrary angle, as a rotated thin quad: every
+	   other overlay shape here is axis-aligned, and a projected box edge is
+	   not (bug 53). gs_draw_sprite draws from the current origin, so the
+	   matrix is translated to the segment's midpoint, turned, then offset by
+	   half its own length. */
+	const auto line = [&](gs_texture_t *tex, float x0, float y0, float x1,
+			      float y1, float width) {
+		const float dx = x1 - x0;
+		const float dy = y1 - y0;
+		const float len = std::sqrt(dx * dx + dy * dy);
+		if (!tex || len < 0.75f || width <= 0.0f)
+			return;
+		const float ang = std::atan2(dy, dx) * (180.0f / kPiF);
+		gs_effect_set_texture(img, tex);
+		gs_matrix_push();
+		gs_matrix_translate3f((x0 + x1) * 0.5f, (y0 + y1) * 0.5f, 0.0f);
+		gs_matrix_rotaa4f(0.0f, 0.0f, 1.0f, ang);
+		gs_matrix_translate3f(-len * 0.5f, -width * 0.5f, 0.0f);
+		gs_draw_sprite(tex, 0, (uint32_t)(len + 0.5f),
+			       (uint32_t)(width + 0.5f));
+		gs_matrix_pop();
 	};
 
 	if (maskOn && mr > ml && mb > mt) {
@@ -1631,6 +1864,84 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 			fillWith(trackSolid_, x, y, thick, th * (float)fh);
 			fillWith(trackSolid_, x + tw * (float)fw - thick, y, thick,
 				 th * (float)fh);
+		}
+	}
+
+	/* The lock-angle region (bug 53). Solid, like the page's own
+	   _drawBox(_fixAngleBox, FIX_ANGLE_COLOR, false): the range box it draws
+	   dashed is the one the operator may own; this one is a boundary they only
+	   read. */
+	if (angleOn && overlayAngleSolid_ && aBoxHfov > 0.1f &&
+	    aViewHfov > 0.1f) {
+		const float aspect = (float)fw / (float)fh;
+		const float halfH = aBoxHfov * 0.5f;
+		const float halfV = (float)(
+		    std::atan(std::tan(deg2rad(halfH)) / aspect) *
+		    (180.0 / kPiF));
+		const Vec3 corners[4] = {
+		    worldCornerFromDelta(aBoxPan, aBoxTilt, -halfH, -halfV),
+		    worldCornerFromDelta(aBoxPan, aBoxTilt, halfH, -halfV),
+		    worldCornerFromDelta(aBoxPan, aBoxTilt, halfH, halfV),
+		    worldCornerFromDelta(aBoxPan, aBoxTilt, -halfH, halfV),
+		};
+		const Mat4 view = mat4FromPanTilt(aViewPan, aViewTilt);
+		const float tanHalfH = std::tan(deg2rad(aViewHfov) * 0.5f);
+		const float tanHalfV = tanHalfH / aspect;
+		Vec3 vv[4];
+		for (int i = 0; i < 4; ++i)
+			vv[i] = transformVec3(view, corners[i].x, corners[i].y,
+					      corners[i].z);
+
+		const auto project = [&](const Vec3 &v, float &sx, float &sy) {
+			const float invZ = 1.0f / (-v.z);
+			const float ndcX = (v.x * invZ) / tanHalfH;
+			const float ndcY = (v.y * invZ) / tanHalfV;
+			sx = (ndcX * 0.5f + 0.5f) * (float)fw;
+			sy = (0.5f - ndcY * 0.5f) * (float)fh;
+		};
+		const auto lerp3 = [](const Vec3 &a, const Vec3 &b, float t) {
+			return Vec3{a.x + (b.x - a.x) * t,
+				    a.y + (b.y - a.y) * t,
+				    a.z + (b.z - a.z) * t};
+		};
+
+		int drawn = 0;
+		for (int i = 0; i < 4; ++i) {
+			Vec3 a = vv[i];
+			Vec3 b = vv[(i + 1) % 4];
+			const bool aIn = a.z <= -kNearPlane;
+			const bool bIn = b.z <= -kNearPlane;
+			/* An edge with both ends behind the camera is not on
+			   screen at all; one that crosses it is cut at the plane,
+			   or the projection would flip it to the far side. */
+			if (!aIn && !bIn)
+				continue;
+			if (!aIn)
+				a = lerp3(a, b, (-kNearPlane - a.z) / (b.z - a.z));
+			else if (!bIn)
+				b = lerp3(b, a, (-kNearPlane - b.z) / (a.z - b.z));
+			float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
+			project(a, x0, y0);
+			project(b, x1, y1);
+			if (!clipSegment(x0, y0, x1, y1, (float)fw, (float)fh))
+				continue;
+			line(overlayAngleSolid_, x0, y0, x1, y1, thick);
+			++drawn;
+		}
+
+		/* Self-test aid (opt-in): the poses the frame was computed from and
+		   where its corners landed, so a run can tell "the pose never
+		   arrived" from "the frame is behind the camera". */
+		const uint64_t now = os_gettime_ns();
+		if (qEnvironmentVariableIsSet("ZC_TEST_ANGLE") &&
+		    now >= overlayAngleNextNs_) {
+			overlayAngleNextNs_ = now + 2000000000ULL;
+			blog(LOG_INFO,
+			     "[obs-zcamera] overlay angle box: box %.2f/%.2f hfov "
+			     "%.2f | view %.2f/%.2f hfov %.2f | %d of 4 edges on "
+			     "%ux%u",
+			     aBoxPan, aBoxTilt, aBoxHfov, aViewPan, aViewTilt,
+			     aViewHfov, drawn, fw, fh);
 		}
 	}
 

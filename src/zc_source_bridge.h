@@ -99,6 +99,16 @@ public:
 	   the web preview shows (bug list 17). */
 	virtual void setOverlayTrackBox(bool enabled, float left, float top,
 					float width, float height) = 0;
+	/* The lock-angle ("fix angle") region (bug 53). The camera keeps it as the
+	   pan/tilt it was saved at plus the focal ratio then in use, NOT as a
+	   rectangle in the picture: it only becomes a rectangle once it is looked
+	   at from wherever the head is now. So the dock sends the two poses and
+	   their horizontal fields of view, and the source projects them onto the
+	   picture it is drawing into (which is what the camera's own page does
+	   with its WebGL canvas — ptzToWorldBox + viewProjectionFromPtz). */
+	virtual void setOverlayAngleBox(bool enabled, float boxPan, float boxTilt,
+					float boxHfov, float viewPan,
+					float viewTilt, float viewHfov) = 0;
 };
 
 /* Register / replace the dock's sink. Pass nullptr to detach. */

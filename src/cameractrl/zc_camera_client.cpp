@@ -379,6 +379,18 @@ void ZcCameraClient::lensFocusStop()
 	sendQuery(transport_, http::kLens, "", q);
 }
 
+/* /ctrl/lens?action=hfov[&zoom_factor=N] — the same request the camera's page
+   makes before it projects a framing box (its queryHFov). */
+void ZcCameraClient::lensHfov(double zoomFactor,
+			      std::function<void(const QJsonObject &)> cb)
+{
+	QUrlQuery q;
+	q.addQueryItem("action", "hfov");
+	if (zoomFactor > 0.0)
+		q.addQueryItem("zoom_factor", QString::number(zoomFactor, 'f', 3));
+	transport_.getQuery(http::kLens, q, jsonObjectCb(cb), 20000);
+}
+
 void ZcCameraClient::afOnePush()
 {
 	sendQuery(transport_, http::kAf, "", QUrlQuery());

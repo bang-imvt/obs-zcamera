@@ -574,6 +574,12 @@ public slots:
 	   FramingStatusChanged payload: only the fields present are applied. */
 	void applyStatus(const QJsonObject &doc);
 
+protected:
+	/* The lock-angle overlay follows the head, so it is only sampled while
+	   this page is on screen (see syncAngleBoxPoll). */
+	void showEvent(QShowEvent *event) override;
+	void hideEvent(QHideEvent *event) override;
+
 private:
 	/* Read the detection-area rectangle from /ctrl/framing/mask_area and hand
 	   it to the source. all_status does not carry mask_left/... on every
@@ -729,6 +735,25 @@ private:
 	   rather than one shared state (bug lists 23/24/25/26/27). */
 	bool fixAngleBoxOn_ = false;
 	bool trackingBoxOn_ = false;
+	/* Lock-angle region as a frame on the picture (bug 53). The camera stores
+	   a POSE for it, not a rectangle, so both poses and their horizontal
+	   fields of view are collected here and handed to the source, which does
+	   the projection (it is the only side that knows the picture's aspect).
+	   `angleBoxZoom_` is what `angleBoxHfov_` was read for, so a zoom the box
+	   stores differently is fetched once and not every tick. */
+	void updateAngleBoxFromSnapshot(const QJsonObject &doc);
+	void pushAngleBox();
+	void fetchAngleBoxHfov(double zoomFactor);
+	void syncAngleBoxPoll();
+	QTimer *angleBoxPoll_ = nullptr;
+	int anglePollTick_ = 0;
+	float angleBoxPan_ = 0.0f, angleBoxTilt_ = 0.0f;
+	float angleBoxZoom_ = 0.0f, angleBoxHfov_ = 0.0f;
+	float angleViewPan_ = 0.0f, angleViewTilt_ = 0.0f;
+	float angleViewHfov_ = 0.0f;
+	/* Set while a lens?action=hfov reply is in flight, so a slow camera does
+	   not queue one request per poll tick. */
+	bool angleHfovPending_ = false;
 	/* Lock Zoom as the camera last reported it. Kept here rather than read off
 	   zoomLockSeg_ because the interlock below forces that segment to Off when
 	   the fix-angle box takes the head over, and a gating rule that reads the
