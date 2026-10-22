@@ -2698,6 +2698,19 @@ ZcPtzPad::ZcPtzPad(QWidget *parent) : QWidget(parent)
 	});
 	interactTimer_->start();
 
+	/* Range-limit poll (bug 187): the firmware reports the box on request only,
+	   so a change made in the camera's web UI never reached these sliders until
+	   the camera was reconnected. Reading it back while the pad is on screen is
+	   what the page itself does; four seconds keeps one small query per tick
+	   against a single-threaded httpd. */
+	limitPollTimer_ = new QTimer(this);
+	limitPollTimer_->setInterval(4000);
+	connect(limitPollTimer_, &QTimer::timeout, this, [this]() {
+		if (!client_ || !limitLoaded_ || limitDragging_)
+			return;
+		refreshState();
+	});
+
 	/* A drag must zoom continuously, so the pointer's pressure is what starts
 	   and stops the move: sliderPressed/sliderReleased bracket the drag, and
 	   only the values produced inside it are sent (a keyboard or programmatic
@@ -2848,8 +2861,11 @@ ZcPtzPad::ZcPtzPad(QWidget *parent) : QWidget(parent)
 		   same, and one request per notch floods the camera's single-threaded
 		   httpd and can store intermediate limits (bug list: range-limit
 		   sliders). */
+		connect(limitSlider_[e], &QSlider::sliderPressed, this,
+			[this]() { limitDragging_ = true; });
 		connect(limitSlider_[e], &QSlider::sliderReleased, this,
 			[this, e]() {
+				limitDragging_ = false;
 				if (!limitLoaded_)
 					return;
 				pushLimit((Edge)e);
@@ -3472,6 +3488,23 @@ void ZcPtzPad::mouseReleaseEvent(QMouseEvent *event)
 		update();
 	}
 	event->accept();
+}
+
+/* The range-limit poll runs only while the pad is on screen: Qt hides a
+   QTabWidget page that is not current, and a camera with the PTZ tab closed
+   must not be asked every four seconds for a box nobody is looking at. */
+void ZcPtzPad::showEvent(QShowEvent *event)
+{
+	QWidget::showEvent(event);
+	if (limitPollTimer_ && client_)
+		limitPollTimer_->start();
+}
+
+void ZcPtzPad::hideEvent(QHideEvent *event)
+{
+	QWidget::hideEvent(event);
+	if (limitPollTimer_)
+		limitPollTimer_->stop();
 }
 
 /* ---------------------------------------------------------------- */
@@ -8862,6 +8895,12 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 	connect(tabs_, &QTabWidget::currentChanged, this, [this](int) {
 		if (framing_)
 			framing_->resyncMonitorButton();
+		/* Coming back to the PTZ tab: re-read the range-limit box at once
+		   instead of waiting for the next poll tick, so a box changed in the
+		   camera's web UI while this tab was closed is already there
+		   (bug 187). */
+		if (ptz_ && client_ && ptzTab_ && tabs_->currentWidget() == ptzTab_)
+			ptz_->refreshState();
 	});
 
 	/* One armed mode at a time: the PTZ tab's "click to move" and the framing

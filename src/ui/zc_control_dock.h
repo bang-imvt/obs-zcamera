@@ -363,6 +363,10 @@ protected:
 	void mousePressEvent(QMouseEvent *event) override;
 	void mouseMoveEvent(QMouseEvent *event) override;
 	void mouseReleaseEvent(QMouseEvent *event) override;
+	/* Start / stop the range-limit poll with visibility (see
+	   limitPollTimer_). */
+	void showEvent(QShowEvent *event) override;
+	void hideEvent(QHideEvent *event) override;
 
 private:
 	enum class JoystickMode { None, Sector, FreeDrag };
@@ -428,6 +432,14 @@ private:
 	   own X, or OBS closing it with the source), so the tick cannot claim a
 	   window that is gone. */
 	QTimer *interactTimer_ = nullptr;
+	/* The camera's page holds the range-limit box in memory and the firmware
+	   pushes nothing when it changes, so a box edited from the web UI (or from
+	   another client) used to reach these sliders only after a reconnect — the
+	   reported "change it on the web, the plugin does not follow". Re-read while
+	   the pad is on screen, and only while the operator is not dragging one of
+	   the sliders (a reply landing mid-drag would snap the handle away). */
+	QTimer *limitPollTimer_ = nullptr;
+	bool limitDragging_ = false;
 
 	/* Lens zoom rocker (see pushZoom). */
 	QSlider *zoomSlider_ = nullptr;
