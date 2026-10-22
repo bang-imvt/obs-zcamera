@@ -4399,12 +4399,6 @@ private:
 			nextPriority_ =
 			    doc.value(QLatin1String("next_priority"))
 				.toInt(0);
-			/* Bug 190: the spinner went to 99 and the camera stores
-			   whatever it is handed (a priority of 99 was accepted
-			   verbatim on the P2-R1-18x), so the bound has to live
-			   here — one priority per slot, never past the camera's
-			   own max. */
-			priority_->setRange(1, qMax(1, max_));
 			uids_.clear();
 			names_.clear();
 			priorities_.clear();
@@ -4506,8 +4500,11 @@ private:
 					for (int p : priorities_)
 						next = qMax(next, p + 1);
 				}
+				clampPriorityRange(false);
 				priority_->setValue(
 				    qBound(1, next, priority_->maximum()));
+			} else {
+				clampPriorityRange(true);
 			}
 			/* Bug 192: opening the dialog must not land on the first
 			   entry with its name and priority filled in — that reads
@@ -4564,6 +4561,25 @@ private:
 		    });
 	}
 
+	/* Bug 190: the camera stores any priority it is handed (99 was accepted
+	   verbatim on the P2-R1-18x), so the bound is a dialog rule — a priority
+	   never exceeds the number of registered faces, and an entry that is
+	   about to be added may take the one after the last. A record that
+	   already holds something larger keeps its own value in range, so
+	   opening the dialog never silently rewrites stored data. */
+	void clampPriorityRange(bool haveSelection)
+	{
+		int cap = qMax(1, uids_.size() + (haveSelection ? 0 : 1));
+		if (haveSelection) {
+			const int row = list_->currentRow();
+			if (row >= 0 && row < priorities_.size())
+				cap = qMax(cap, priorities_.at(row));
+		}
+		priority_->setRange(1, cap);
+		if (priority_->value() > cap)
+			priority_->setValue(cap);
+	}
+
 	/* The limits this firmware actually has, set by the caller before show():
 	   1.0.5 registers and tracks 20 faces, the 1.0.3 generation's UI says 10
 	   and 8 (bug 13). A face-database reply that carries max / max_active
@@ -4580,7 +4596,7 @@ public:
 					   .arg(uids_.size())
 					   .arg(max_)
 					   .arg(maxActive_));
-		priority_->setRange(1, qMax(1, max_));
+		clampPriorityRange(false);
 	}
 
 	void fillFromRow(int row)
@@ -4596,6 +4612,7 @@ public:
 			add_->setEnabled(false);
 		}
 		const bool wasFilling = filling_;
+		clampPriorityRange(true);
 		filling_ = true;
 		name_->setText(names_.at(row));
 		priority_->setValue(qBound(1, priorities_.at(row),
