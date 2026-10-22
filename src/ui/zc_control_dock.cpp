@@ -5625,9 +5625,49 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		};
 
 		trackingRecordSeg_ = offSegment(box);
-		trackingRecordRow_ = setRow(
-			box, ztr("ZCameraPlugin.Framing.TrackingRecord"),
-			trackingRecordSeg_);
+		/* Bug 221: this row's caption used to grow to "…（录制中）" while the
+		   camera recorded, so inside a fixed-width column the line wrapped,
+		   the row grew taller than its two neighbours and the buttons moved
+		   down — the layout QA saw. Two things keep it in step now: the
+		   caption is constant, and the state word sits to the right of the
+		   switch.
+		   The caption is built with word wrap OFF on purpose. `makeRow()`
+		   turns it on for the other fields, and a wrapped QLabel's size hint
+		   for this caption comes back two lines tall even though the text
+		   fits — which lifted the whole column's content by a line, the
+		   offset already visible on 0.15.4 (its buttons sat lower than its
+		   neighbours'). */
+		{
+			trackingRecordRow_ = new QWidget(box);
+			trackingRecordRow_->setFixedWidth(230);
+			auto *rowLay = new QVBoxLayout(trackingRecordRow_);
+			rowLay->setContentsMargins(0, 0, 0, 0);
+			rowLay->setSpacing(3);
+			auto *caption = new QLabel(
+			    ztr("ZCameraPlugin.Framing.TrackingRecord"),
+			    trackingRecordRow_);
+			caption->setObjectName("FramingFieldLabel");
+			caption->setWordWrap(false);
+			rowLay->addWidget(caption);
+
+			auto *body = new QWidget(trackingRecordRow_);
+			auto *bodyLay = new QHBoxLayout(body);
+			bodyLay->setContentsMargins(0, 0, 0, 0);
+			bodyLay->setSpacing(6);
+			bodyLay->addWidget(trackingRecordSeg_, 0,
+					   Qt::AlignVCenter);
+			trackingRecBadge_ = new QLabel(body);
+			trackingRecBadge_->setObjectName("FramingFieldLabel");
+			trackingRecBadge_->setStyleSheet(
+			    QStringLiteral("color:#e5484d;"));
+			trackingRecBadge_->setText(
+			    ztr("ZCameraPlugin.Framing.TrackingRecordBadge"));
+			trackingRecBadge_->hide();
+			bodyLay->addWidget(trackingRecBadge_, 0,
+					   Qt::AlignVCenter);
+			bodyLay->addStretch(1);
+			rowLay->addWidget(body);
+		}
 		lay->addWidget(trackingRecordRow_);
 		trackingRecordSeg_->onActivated = [this](int index) {
 			if (painting_ || !client_)
@@ -6991,21 +7031,15 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
    only place the consequence of that switch is visible. */
 void ZcFramingPanel::setRecording(bool on)
 {
-	/* No early return on an unchanged flag: this is also called when the
-	   switch itself moves, and the row still has to be repainted then. */
 	recording_ = on;
-	if (!trackingRecordRow_)
+	if (!trackingRecBadge_)
 		return;
-	auto *label = trackingRecordRow_->findChild<QLabel *>();
-	if (!label)
-		return;
-	const bool active =
-	    recording_ && trackingRecordSeg_ &&
-	    trackingRecordSeg_->currentIndex() == 1;
-	label->setText(active ? ztr("ZCameraPlugin.Framing.TrackingRecordActive")
-			      : ztr("ZCameraPlugin.Framing.TrackingRecord"));
-	label->setStyleSheet(active ? QStringLiteral("color:#e5484d;")
-				    : QString());
+	/* Bug 221: the state is a word beside the switch, not a longer caption
+	   above it — the caption must never change length in a fixed-width
+	   column. */
+	const bool active = recording_ && trackingRecordSeg_ &&
+			    trackingRecordSeg_->currentIndex() == 1;
+	trackingRecBadge_->setVisible(active);
 }
 
 void ZcFramingPanel::updateStatusLabel()

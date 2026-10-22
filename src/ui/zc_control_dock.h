@@ -740,6 +740,11 @@ private:
 	/* Their group box, hidden when the firmware has neither row (bug 186). */
 	QWidget *speedGroup_ = nullptr;
 	QWidget *trackingRecordRow_ = nullptr;
+	/* The "(recording)" word that sits to the right of that row's switch
+	   (bug 221): the caption itself stays constant, so a camera that starts
+	   recording cannot re-wrap a fixed-width column and shove the buttons
+	   down the group. */
+	QLabel *trackingRecBadge_ = nullptr;
 	/* The >=1.0.5 firmware's "Size" row (fov_size 0..100), shown only when
 	   all_status carries the key (bug list #10). */
 	QWidget *fovSizeField_ = nullptr;
