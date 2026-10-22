@@ -493,6 +493,11 @@ private:
 	/* 1x1 solid texture the rectangle and crosshair are stretched from, in
 	   the interaction colour (the box texture is red). Graphics thread only. */
 	gs_texture_t *overlaySolid_ = nullptr;
+	/* 1x1 cyan at ~45%: the full-frame guide lines that mark the click-to-centre
+	   point's X and Y (bug 197). Dimmer than the crosshair on purpose — the
+	   cross is the target, the two lines are its coordinates. Graphics thread
+	   only. */
+	gs_texture_t *overlayGuide_ = nullptr;
 	/* 1x1 50% black, for the band the editor dims everything outside the
 	   rectangle with (the page does the same). Graphics thread only. */
 	gs_texture_t *overlayDim_ = nullptr;
@@ -583,6 +588,10 @@ ZcSspSource::~ZcSspSource()
 	if (overlaySolid_) {
 		gs_texture_destroy(overlaySolid_);
 		overlaySolid_ = nullptr;
+	}
+	if (overlayGuide_) {
+		gs_texture_destroy(overlayGuide_);
+		overlayGuide_ = nullptr;
 	}
 	if (overlayDim_) {
 		gs_texture_destroy(overlayDim_);
@@ -1444,6 +1453,12 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 		const uint8_t *accentData = accent;
 		overlayAccent_ = gs_texture_create(1, 1, GS_RGBA, 1, &accentData,
 						   0);
+		/* The click-to-centre guide lines (bug 197): the same cyan at 45%,
+		   so the two axis lines read as the target's coordinates and the
+		   crosshair stays the thing the operator aimed at. */
+		uint8_t guide[4] = {0, 229, 255, 115};
+		const uint8_t *guideData = guide;
+		overlayGuide_ = gs_texture_create(1, 1, GS_RGBA, 1, &guideData, 0);
 	}
 
 	uint32_t thick_px = (fw < fh ? fw : fh) / 360;
@@ -1588,6 +1603,12 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 
 	if (markerOn) {
 		const float cx = mx * (float)fw, cy = my * (float)fh;
+		/* Bug 197: the point alone did not say where in the picture it was, so
+		   the click-to-centre target was only a mark. Two full-frame guide
+		   lines carry the X and Y of that point (the "XY coordinates" the
+		   issue asks for); the cross on top stays the bright focal mark. */
+		fillWith(overlayGuide_, 0.0f, cy - thick / 2.0f, (float)fw, thick);
+		fillWith(overlayGuide_, cx - thick / 2.0f, 0.0f, thick, (float)fh);
 		const float arm = thick * 6.0f;
 		fill(cx - arm, cy - thick / 2.0f, arm * 2.0f, thick);
 		fill(cx - thick / 2.0f, cy - arm, thick, arm * 2.0f);
