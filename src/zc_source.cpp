@@ -2962,8 +2962,13 @@ static void zc_source_getdefaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, PROP_LED_TALLY, false);
 	obs_data_set_default_bool(settings, PROP_LOW_NOISE, false);
 #ifdef ENABLE_CAMERA_CONTROL
-	/* Off by default: it opens a second connection to the camera per source. */
-	obs_data_set_default_bool(settings, PROP_AI_OVERLAY, false);
+	/* On by default, matching the camera's own page: from 1.0.5 the firmware
+	   draws its detection marker without being asked, so a plugin that draws
+	   nothing until a checkbox is found reads as "the boxes never show"
+	   (bug 195). Monitor-only mode below keeps them out of the recording.
+	   A source saved before this change carries an explicit false; ticking
+	   the box once is all it needs. */
+	obs_data_set_default_bool(settings, PROP_AI_OVERLAY, true);
 	/* Monitor-only by default. A box drawn into the program is also a box in
 	   the recording and the stream, and that mistake is not undoable after the
 	   fact -- the boxes exist to help frame a shot, not to be published -- so
