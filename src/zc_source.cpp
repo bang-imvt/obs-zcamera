@@ -213,6 +213,9 @@ public:
 	void onPointerEvent(int phase, int button, int px, int py);
 
 	void update(obs_data_t *settings);
+	/* Called once zc_source_create() has returned: from that moment on the
+	   source is registered with OBS and may be renamed. */
+	void markCreated() { created_ = true; }
 	void activate();
 	void deactivate();
 	void videoRender(gs_effect_t *effect);
@@ -279,6 +282,11 @@ private:
 	void outputVideo(struct zc_decoded_frame *frame);
 
 	obs_source_t *source_ = nullptr;
+	/* False until zc_source_create() returns. The rename in update() must not
+	   run before that: OBS has not registered this source's context yet and
+	   obs_source_set_name() locks an uninitialised mutex (crash of
+	   2026-10-22, obs_context_data_setname_ht from syncSourceNameToIp). */
+	bool created_ = false;
 	std::string ip_;
 	/* Output mode (see constructor): false = render-driven GPU source,
 	   true = async obs_source_output_video2 source. Immutable per instance. */
@@ -735,7 +743,11 @@ void ZcSspSource::update(obs_data_t *settings)
 	/* Adopt the "ZCamera <ip>" convention when the address was typed into the
 	   Properties dialog (see the helper). Done before the early return so the
 	   name is fixed even when the pipeline settings did not change. */
-	syncSourceNameToIp(source_, ip);
+	/* The rename only happens once OBS owns the source (see created_). The
+	   name a collection carries is already correct — nothing needs renaming
+	   while it is being loaded, and doing it then crashed OBS. */
+	if (created_)
+		syncSourceNameToIp(source_, ip);
 	enum zc_hw_backend backend = (enum zc_hw_backend)obs_data_get_int(
 		settings, PROP_DECODE_BACKEND);
 	/* CUDA/NVDEC is no longer offered in the UI (it renders green in OBS), but
@@ -2977,6 +2989,9 @@ static void *zc_source_create(obs_data_t *settings, obs_source_t *source)
 	if (!s)
 		return nullptr;
 	s->update(settings);
+	/* Registration happens after this returns, so the rename could not run
+	   inside update() — see created_. */
+	s->markCreated();
 	return s;
 }
 
