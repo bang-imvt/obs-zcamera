@@ -103,6 +103,15 @@ public:
 	   list — the row was just clicked and must keep its selection. */
 	void setHostOffline(const QString &host, bool offline);
 
+	/* Put the highlight on one camera without emitting cameraClicked(). The
+	   camera an OBS source represents is picked from outside the rail (the
+	   source's Properties dialog), and the row used to stay on whatever was
+	   selected in the previous session — the control page then read as "the
+	   other camera" (bug 149). A host that has no row yet is remembered and
+	   selected by the next setCameras(): a source is listed only after the
+	   following scan. */
+	void selectHost(const QString &host);
+
 	/* The subset of the listed hosts that already exist in OBS as a source.
 	   Rows for those hosts get the "added" badge and their chip turns into a
 	   gold check instead of "＋" (spec §1, L4/L5). */
@@ -152,6 +161,8 @@ private:
 	QTimer *spinTimer_ = nullptr;
 	int spinAngle_ = 0;
 	QSet<QString> added_;
+	/* The host selectHost() was asked for but the list does not hold yet. */
+	QString pendingSelectHost_;
 	/* Starts busy: the dock is built before the first scan can run, and a rail
 	   that reads "no camera" during that first tick would be wrong. */
 	bool busy_ = true;

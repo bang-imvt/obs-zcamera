@@ -856,11 +856,15 @@ void ZcCameraRail::setCameras(const QVector<ZcRailCamera> &cameras)
 	/* Remember the highlighted row and put it back after the rebuild: clear()
 	   replaces every item and would otherwise drop the operator's selection even
 	   though the same camera is still in the list. setCurrentItem() does not
-	   emit itemClicked, so this cannot re-open the camera. */
+	   emit itemClicked, so this cannot re-open the camera. A selectHost() that
+	   arrived before the row existed (a freshly added source is listed by the
+	   next scan) wins over the remembered row. */
 	const QString selectedHost =
-	    list_->currentItem()
-		? list_->currentItem()->data(kHostRole).toString()
-		: QString();
+	    !pendingSelectHost_.isEmpty()
+		? pendingSelectHost_
+		: (list_->currentItem()
+		       ? list_->currentItem()->data(kHostRole).toString()
+		       : QString());
 
 	QListWidgetItem *toSelect = nullptr;
 	list_->clear();
@@ -878,9 +882,35 @@ void ZcCameraRail::setCameras(const QVector<ZcRailCamera> &cameras)
 	}
 	if (toSelect)
 		list_->setCurrentItem(toSelect);
+	/* A pending pick is satisfied by this rebuild; anything still missing stays
+	   pending for the next one (a source that the scan has not listed yet). */
+	if (toSelect && !pendingSelectHost_.isEmpty() &&
+	    toSelect->data(kHostRole).toString() == pendingSelectHost_)
+		pendingSelectHost_.clear();
 
 	hasRows_ = !next.isEmpty();
 	updateEmptyState();
+}
+
+/* Move the highlight to one camera. Does not emit cameraClicked(): the caller
+   already opened that camera itself, and emitting would open it twice (bug
+   149 — the row stayed on the previous camera, so the control page read as the
+   wrong one even though the connection had gone to the right one). */
+void ZcCameraRail::selectHost(const QString &host)
+{
+	if (host.isEmpty())
+		return;
+	for (int i = 0; i < list_->count(); ++i) {
+		QListWidgetItem *item = list_->item(i);
+		if (item->data(kHostRole).toString() != host)
+			continue;
+		pendingSelectHost_.clear();
+		if (list_->currentItem() != item)
+			list_->setCurrentItem(item);
+		return;
+	}
+	/* Not listed yet: a source is only added to the rail by the next scan. */
+	pendingSelectHost_ = host;
 }
 
 /* Spec §1, L11: a row's offline state can change on a click, and rebuilding the
@@ -10065,6 +10095,13 @@ void ZcControlDock::selectCamera(const QString &host)
 {
 	if (host.isEmpty())
 		return;
+	/* The rail is the operator's "which camera am I controlling" read-out, so it
+	   has to follow a selection that came from outside it (the source's
+	   Properties dialog). Called before the early return below: re-opening
+	   Properties on the camera already shown must still fix a stale highlight
+	   left behind by an earlier pick (bug 149). */
+	if (rail_)
+		rail_->selectHost(host);
 	if (host == currentHost_ && client_)
 		return;
 	onCameraClicked(host);
