@@ -232,6 +232,13 @@ public:
 	void framingFaceUpdate(int uid, const QString &name, int priority,
 			       bool activate = true);
 	void framingFaceDelete(int uid);
+	/* The face's own picture. Every /query record carries `thm`, an absolute
+	   path on the camera ("/app_data/facedb/uid.6.thm.jpg"), and a plain GET
+	   of that path answers the JPEG (verified on the P2-R1-18x: 200,
+	   image/jpeg, ~6 KB). Empty path or a non-200 answer delivers an empty
+	   array, which the dialog draws as "no picture". */
+	void framingFaceThumb(const QString &path,
+			      std::function<void(const QByteArray &)> cb);
 	void setFramingWaitTime(int seconds);     /* /manual_target?wait_time= */
 	void setFramingWaving(bool enabled);      /* /gesture?waving= */
 	/* The web UI's "View Angle Adjustment" writes all three gesture FOV

@@ -711,6 +711,22 @@ void ZcCameraClient::framingFaceDelete(int uid)
 			    20000);
 }
 
+void ZcCameraClient::framingFaceThumb(const QString &path,
+				      std::function<void(const QByteArray &)> cb)
+{
+	if (path.isEmpty()) {
+		cb(QByteArray());
+		return;
+	}
+	/* `thm` is already an absolute path on the camera, so it goes out as-is;
+	   no prefix, no query. */
+	transport_.get(path,
+		       [cb](const ZcHttpResponse &r) {
+			       cb(r.statusCode == 200 ? r.body : QByteArray());
+		       },
+		       20000);
+}
+
 void ZcCameraClient::setFramingWaitTime(int seconds)
 {
 	framingIndex(transport_, "/manual_target", "wait_time", seconds);

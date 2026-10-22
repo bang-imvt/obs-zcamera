@@ -4232,7 +4232,7 @@ public:
 		: QDialog(parent), client_(client)
 	{
 		setWindowTitle(ztr("ZCameraPlugin.Framing.FaceRegTitle"));
-		setMinimumWidth(420);
+		setMinimumWidth(560);
 		auto *lay = new QVBoxLayout(this);
 
 		info_ = new QLabel(this);
@@ -4240,9 +4240,27 @@ public:
 		info_->setStyleSheet("color:#8a9bb2;");
 		lay->addWidget(info_);
 
+		/* Picture left, list right. The camera hands back a crop of the
+		   registered face for every entry (`thm`), and a bare name list
+		   cannot answer "which face is this" — bug 9 asked for exactly this
+		   block. The same box shows the face a capture has just taken,
+		   *before* it is stored, so the operator confirms the person on
+		   screen instead of finding out afterwards (bug 3: the page picks
+		   the face you can see, this dialog used to store whatever the
+		   camera grabbed). */
+		auto *mid = new QHBoxLayout;
+		preview_ = new QLabel(this);
+		preview_->setFixedSize(120, 120);
+		preview_->setAlignment(Qt::AlignCenter);
+		preview_->setFrameShape(QFrame::StyledPanel);
+		preview_->setText(ztr("ZCameraPlugin.Framing.FaceRegNoPicture"));
+		mid->addWidget(preview_, 0, Qt::AlignTop);
+
 		list_ = new QListWidget(this);
-		list_->setMinimumHeight(160);
-		lay->addWidget(list_, 1);
+		list_->setMinimumHeight(180);
+		list_->setIconSize(QSize(40, 40));
+		mid->addWidget(list_, 1);
+		lay->addLayout(mid, 1);
 
 		auto *form = new QGridLayout;
 		form->addWidget(new QLabel(ztr("ZCameraPlugin.Framing.FaceRegName"), this),
@@ -4254,7 +4272,7 @@ public:
 		    new QLabel(ztr("ZCameraPlugin.Framing.FaceRegPriority"), this),
 		    1, 0);
 		priority_ = new QSpinBox(this);
-		priority_->setRange(1, 99);
+		priority_->setRange(1, 10);
 		priority_->setValue(1);
 		form->addWidget(priority_, 1, 1);
 		/* Bug list #8: the page's entry form carries the "activate" flag
@@ -4274,6 +4292,12 @@ public:
 		capture_ = new QPushButton(
 		    ztr("ZCameraPlugin.Framing.FaceRegCapture"), this);
 		capture_->setToolTip(ztr("ZCameraPlugin.Framing.FaceRegCaptureTip"));
+		/* Bug 3: capture and store used to be one click, with the camera
+		   deciding which face it took. They are two now — the capture fills
+		   the picture box, and Add is what writes the entry. */
+		add_ = new QPushButton(ztr("ZCameraPlugin.Framing.FaceRegAdd"), this);
+		add_->setToolTip(ztr("ZCameraPlugin.Framing.FaceRegAddTip"));
+		add_->setEnabled(false);
 		apply_ = new QPushButton(
 		    ztr("ZCameraPlugin.Framing.FaceRegApply"), this);
 		del_ = new QPushButton(ztr("ZCameraPlugin.Framing.FaceRegDelete"),
@@ -4281,6 +4305,7 @@ public:
 		refresh_ = new QPushButton(
 		    ztr("ZCameraPlugin.Framing.FaceRegRefresh"), this);
 		row->addWidget(capture_);
+		row->addWidget(add_);
 		row->addWidget(apply_);
 		row->addWidget(del_);
 		row->addWidget(refresh_);
@@ -4289,12 +4314,34 @@ public:
 		connect(refresh_, &QPushButton::clicked, this,
 			[this]() { refresh(); });
 		connect(capture_, &QPushButton::clicked, this,
-			[this]() { captureAndAdd(); });
+			[this]() { capture(); });
+		connect(add_, &QPushButton::clicked, this,
+			[this]() { addStaged(); });
 		connect(apply_, &QPushButton::clicked, this,
 			[this]() { applyEdit(); });
 		connect(del_, &QPushButton::clicked, this, [this]() { remove(); });
 		connect(list_, &QListWidget::currentRowChanged, this,
 			[this](int row) { fillFromRow(row); });
+
+		/* Bug 190: the page treats name, priority and the activate switch as
+		   three independent writes — changing one takes effect on its own.
+		   Here they all used to sit in the form until "apply name" was
+		   pressed, which is why a priority edit looked ignored until some
+		   unrelated click happened. The spin box is debounced: holding an
+		   arrow would otherwise fire one update per step. */
+		connect(name_, &QLineEdit::editingFinished, this,
+			[this]() { scheduleApply(); });
+		connect(priority_,
+			QOverload<int>::of(&QSpinBox::valueChanged), this,
+			[this](int) { scheduleApply(); });
+		connect(active_, &QCheckBox::toggled, this,
+			[this]() { applyNow(); });
+
+		applyTimer_ = new QTimer(this);
+		applyTimer_->setSingleShot(true);
+		applyTimer_->setInterval(450);
+		connect(applyTimer_, &QTimer::timeout, this,
+			[this]() { applyNow(); });
 
 		/* The camera's own page turns the store on before it captures;
 		   parity, and harmless where the firmware ignores it. */
@@ -4311,6 +4358,8 @@ private:
 		priority_->setEnabled(on);
 		active_->setEnabled(on);
 		capture_->setEnabled(on);
+		/* Add stays dead until a capture has actually produced a face. */
+		add_->setEnabled(on && stagedUid_ >= 0);
 		apply_->setEnabled(on);
 		del_->setEnabled(on);
 	}
@@ -4319,8 +4368,17 @@ private:
 	{
 		if (!client_)
 			return;
+		/* Bumped per rebuild: a thumbnail that arrives after the list was
+		   rebuilt belongs to a row that no longer exists, and the item
+		   pointer it captured is dangling (bug 9). */
+		++generation_;
+		const int keepUid = (list_->currentRow() >= 0 &&
+				     list_->currentRow() < uids_.size())
+					? uids_.at(list_->currentRow())
+					: -1;
 		QPointer<QObject> alive(alive_);
-		client_->framingFaceQuery([this, alive](const QJsonObject &doc) {
+		client_->framingFaceQuery([this, alive, keepUid](
+						  const QJsonObject &doc) {
 			if (!alive)
 				return;
 			if (doc.contains(QLatin1String("code")) &&
@@ -4336,13 +4394,27 @@ private:
 			max_ = doc.value(QLatin1String("max")).toInt(max_);
 			maxActive_ = doc.value(QLatin1String("max_active"))
 					 .toInt(maxActive_);
+			/* The camera tracks this itself; using it beats guessing
+			   "highest + 1" (bug 190). */
+			nextPriority_ =
+			    doc.value(QLatin1String("next_priority"))
+				.toInt(0);
+			/* Bug 190: the spinner went to 99 and the camera stores
+			   whatever it is handed (a priority of 99 was accepted
+			   verbatim on the P2-R1-18x), so the bound has to live
+			   here — one priority per slot, never past the camera's
+			   own max. */
+			priority_->setRange(1, qMax(1, max_));
 			uids_.clear();
 			names_.clear();
 			priorities_.clear();
 			actives_.clear();
+			thumbs_.clear();
 			const QJsonArray faces =
 			    doc.value(QLatin1String("faces")).toArray();
 			list_->clear();
+			const bool wasFilling = filling_;
+			filling_ = true;
 			for (const QJsonValue &v : faces) {
 				const QJsonObject f = v.toObject();
 				uids_ << f.value(QLatin1String("uid")).toInt();
@@ -4350,16 +4422,17 @@ private:
 					      .toString();
 				priorities_ << f.value(QLatin1String("priority"))
 						   .toInt();
-				/* The flag arrives as a bool on some builds and as
-				   1/0 on others; a record that carries neither is
-				   taken as active, which is what the camera does
-				   with a stored face. */
-				/* The flag is `activate` on the firmware whose page
-				   was read, but a differently-worded reply would have
-				   fallen through to "always active" — which is
-				   exactly what "the activate switch does nothing"
-				   looked like (bug 191). Accept the spellings. */
-				QJsonValue act = f.value(QLatin1String("activate"));
+				/* Bug 191: the flag is `activated` on this
+				   firmware (verified against 192.168.10.121,
+				   /ctrl/facedb/query). Reading only `activate`
+				   meant the lookup never matched, every entry
+				   took the "assume active" fallback, and the
+				   checkbox snapped back on — which is what "the
+				   switch does nothing" looked like. Accept the
+				   spellings, newest first. */
+				QJsonValue act = f.value(QLatin1String("activated"));
+				if (act.isUndefined())
+					act = f.value(QLatin1String("activate"));
 				if (act.isUndefined())
 					act = f.value(QLatin1String("active"));
 				if (act.isUndefined())
@@ -4373,11 +4446,38 @@ private:
 						     QLatin1String("0"));
 				else
 					actives_ << true;
-				list_->addItem(names_.last());
+				const QString thm =
+				    f.value(QLatin1String("thm")).toString();
+				thumbs_ << thm;
+				/* Bug 9/#10: the row carries the face itself, the
+				   way the camera's page draws it. */
+				auto *item =
+				    new QListWidgetItem(names_.last(), list_);
+				item->setToolTip(
+				    ztr("ZCameraPlugin.Framing.FaceRegRowTip")
+					.arg(names_.last())
+					.arg(priorities_.last())
+					.arg(actives_.last()
+						 ? ztr("ZCameraPlugin."
+						       "Framing.FaceRegOn")
+						 : ztr("ZCameraPlugin."
+						       "Framing.FaceRegOff")));
+				loadThumb(item, thm, generation_);
 			}
-			/* Bug 191: the camera is the truth. If the entry it just sent
-			   back is not what was written, say so instead of leaving the
-			   operator to wonder whether the switch worked. */
+			/* Keep the operator's selection across the rebuild. Live
+			   apply (bug 190) refreshes after every field change, and
+			   losing the row each time would turn the next keystroke
+			   into "pick a face first". */
+			if (keepUid >= 0) {
+				const int at = uids_.indexOf(keepUid);
+				if (at >= 0)
+					list_->setCurrentRow(at);
+			}
+			filling_ = wasFilling;
+			/* Bug 191: the camera is the truth. If the entry it just
+			   sent back is not what was written, say so instead of
+			   leaving the operator to wonder whether the switch
+			   worked. */
 			if (pendingUid_ >= 0) {
 				const int at = uids_.indexOf(pendingUid_);
 				const bool held =
@@ -4389,30 +4489,79 @@ private:
 					    "ZCameraPlugin.Framing.FaceRegRejected"));
 				pendingUid_ = -1;
 			}
-			if (pendingUid_ < 0 &&
-			    info_->text().isEmpty())
+			if (pendingUid_ < 0 && stagedUid_ < 0)
 				info_->setText(
 				    ztr("ZCameraPlugin.Framing.FaceRegInfo")
 					.arg(uids_.size())
 					.arg(max_)
 					.arg(maxActive_));
-			/* Bug 190: a new entry gets the next free priority instead of
-			   repeating 1. Priority is what decides between two faces in
-			   frame, so two entries sharing one leaves that choice to the
-			   camera. */
-			if (list_->currentRow() < 0) {
-				int next = 1;
-				for (int p : priorities_)
-					next = qMax(next, p + 1);
+			/* Bug 190: a new entry gets the priority the camera says is
+			   next, not a repeated 1. Priority decides between two
+			   faces in frame, so two entries sharing one leaves that
+			   choice to the camera. */
+			if (list_->currentRow() < 0 && stagedUid_ < 0) {
+				int next = nextPriority_;
+				if (next <= 0) {
+					next = 1;
+					for (int p : priorities_)
+						next = qMax(next, p + 1);
+				}
 				priority_->setValue(
 				    qBound(1, next, priority_->maximum()));
 			}
-			/* Bug 192: opening the dialog must not land on the first entry
-			   with its name and priority filled in — that reads as "these are
-			   the values for the face I am about to add". Start unselected
-			   (the fields belong to an explicit selection or to a new
-			   capture). */
+			/* Bug 192: opening the dialog must not land on the first
+			   entry with its name and priority filled in — that reads
+			   as "these are the values for the face I am about to
+			   add". Start unselected. */
 		});
+	}
+
+	/* Put `path`'s picture into the preview box. `path` is the camera's own
+	   `thm` field, either from a list record or from a capture reply. */
+	void showPicture(const QString &path)
+	{
+		if (!client_ || path.isEmpty()) {
+			preview_->setPixmap(QPixmap());
+			preview_->setText(
+			    ztr("ZCameraPlugin.Framing.FaceRegNoPicture"));
+			return;
+		}
+		const int gen = generation_;
+		QPointer<QObject> alive(alive_);
+		client_->framingFaceThumb(
+		    path, [this, alive, gen](const QByteArray &bytes) {
+			    if (!alive || gen != generation_)
+				    return;
+			    QPixmap pm;
+			    if (!pm.loadFromData(bytes)) {
+				    preview_->setText(ztr("ZCameraPlugin."
+							  "Framing."
+							  "FaceRegNoPicture"));
+				    return;
+			    }
+			    preview_->setPixmap(pm.scaled(
+				preview_->size(), Qt::KeepAspectRatio,
+				Qt::SmoothTransformation));
+		    });
+	}
+
+	/* Icon for one list row. Same generation rule as showPicture(). */
+	void loadThumb(QListWidgetItem *item, const QString &path, int gen)
+	{
+		if (!client_ || path.isEmpty())
+			return;
+		QPointer<QObject> alive(alive_);
+		client_->framingFaceThumb(
+		    path, [this, alive, item, gen](const QByteArray &bytes) {
+			    if (!alive || gen != generation_ || !item)
+				    return;
+			    QPixmap pm;
+			    if (!pm.loadFromData(bytes))
+				    return;
+			    item->setIcon(QIcon(pm.scaled(
+				list_->iconSize(), Qt::KeepAspectRatio,
+				Qt::SmoothTransformation)));
+		    });
 	}
 
 	/* The limits this firmware actually has, set by the caller before show():
@@ -4426,62 +4575,45 @@ public:
 			max_ = max;
 		if (maxActive > 0)
 			maxActive_ = maxActive;
-		if (info_)
-			/* Bug 191: the camera is the truth. If the entry it just sent
-			   back is not what was written, say so instead of leaving the
-			   operator to wonder whether the switch worked. */
-			if (pendingUid_ >= 0) {
-				const int at = uids_.indexOf(pendingUid_);
-				const bool held =
-				    at >= 0 && names_.at(at) == pendingName_ &&
-				    priorities_.at(at) == pendingPriority_ &&
-				    actives_.at(at) == pendingActive_;
-				if (!held)
-					info_->setText(ztr(
-					    "ZCameraPlugin.Framing.FaceRegRejected"));
-				pendingUid_ = -1;
-			}
-			if (pendingUid_ < 0 &&
-			    info_->text().isEmpty())
-				info_->setText(
-				    ztr("ZCameraPlugin.Framing.FaceRegInfo")
-					.arg(uids_.size())
-					.arg(max_)
-					.arg(maxActive_));
-			/* Bug 190: a new entry gets the next free priority instead of
-			   repeating 1. Priority is what decides between two faces in
-			   frame, so two entries sharing one leaves that choice to the
-			   camera. */
-			if (list_->currentRow() < 0) {
-				int next = 1;
-				for (int p : priorities_)
-					next = qMax(next, p + 1);
-				priority_->setValue(
-				    qBound(1, next, priority_->maximum()));
-			}
+		if (info_ && info_->text().isEmpty())
+			info_->setText(ztr("ZCameraPlugin.Framing.FaceRegInfo")
+					   .arg(uids_.size())
+					   .arg(max_)
+					   .arg(maxActive_));
+		priority_->setRange(1, qMax(1, max_));
 	}
 
 	void fillFromRow(int row)
 	{
 		if (row < 0 || row >= names_.size())
 			return;
+		/* A click in the list ends whatever capture was staged: the fields
+		   now describe this entry, and Add would have stored the picture
+		   from before. */
+		if (!filling_) {
+			stagedUid_ = -1;
+			stagedThumb_.clear();
+			add_->setEnabled(false);
+		}
+		const bool wasFilling = filling_;
+		filling_ = true;
 		name_->setText(names_.at(row));
-		priority_->setValue(qMax(1, priorities_.at(row)));
-		active_->setChecked(row < actives_.size() ? actives_.at(row)
-							  : true);
+		priority_->setValue(qBound(1, priorities_.at(row),
+					   priority_->maximum()));
+		active_->setChecked(row < actives_.size() ? actives_.at(row) : true);
+		filling_ = wasFilling;
+		if (row < thumbs_.size())
+			showPicture(thumbs_.at(row));
 	}
 
-	void captureAndAdd()
+	/* Bug 3: capture and store are two steps now. This one only takes the
+	   picture — the face lands in the preview box and Add is what writes it,
+	   so the operator confirms *which* face was taken (the page works the
+	   same way) instead of discovering it after the entry exists. */
+	void capture()
 	{
 		if (!client_ || !supported_)
 			return;
-		const QString name = name_->text().trimmed();
-		if (name.isEmpty()) {
-			info_->setText(
-			    ztr("ZCameraPlugin.Framing.FaceRegNeedName"));
-			return;
-		}
-		const int priority = priority_->value();
 		/* The first slot the list does not already hold; the camera
 		   captures INTO a slot, so add() and prepare() have to agree on
 		   one (bug list #3: without a slot the camera said "face not
@@ -4492,41 +4624,142 @@ public:
 			++slot;
 		if (slot >= max_)
 			slot = 0;
+		stagedUid_ = -1;
+		stagedThumb_.clear();
+		add_->setEnabled(false);
 		info_->setText(ztr("ZCameraPlugin.Framing.FaceRegCapturing"));
 		QPointer<QObject> alive(alive_);
-		client_->framingFacePrepare(slot, [this, alive, name, priority](
-							const QJsonObject &doc) {
+		/* Bug 3: /prepare only looks for a registrable face while
+		   detection is running. The camera's page always has it on, this
+		   dialog never turned it on, and the failure is identical whether
+		   detection is off or nobody is in frame ("face not found") —
+		   which is why the capture looked broken on one side and fine on
+		   the other. Read the state, switch it on if needed, and give the
+		   detector a moment before asking for the face. */
+		client_->framingQuery([this, alive, slot](const QJsonObject &st) {
 			if (!alive)
 				return;
-			const int status =
-			    doc.value(QLatin1String("status")).toInt(-1);
-			const int uid =
-			    doc.value(QLatin1String("uid")).toInt(-1);
-			if (status != 0 || uid < 0) {
-				/* The camera's own wording ("face not found",
-				   "face too small") is the useful part. */
-				QString why = doc.value(QLatin1String("detail"))
-						  .toString();
-				if (why.isEmpty())
-					why = ztr("ZCameraPlugin.Framing."
-						  "FaceRegCaptureFailed");
-				info_->setText(why);
+			if (st.value(QLatin1String("detect")).toBool(false)) {
+				prepareInto(slot);
 				return;
 			}
-			if (client_) {
-				/* `which` is the uid prepare just handed back;
-				   activate makes the camera adopt the new entry
-				   at once, as the page does. The thumbnail in
-				   the reply is the camera's own preview and is
-				   not needed again by `add`. */
-				client_->framingFaceAdd(uid, name, priority,
-							active_->isChecked());
-				/* The store is asynchronous; give the camera a
-				   beat before reading the list back. */
-				QTimer::singleShot(400, this,
-						   [this]() { refresh(); });
-			}
+			if (client_)
+				client_->setFramingEnabled(true);
+			QTimer::singleShot(1500, this,
+					   [this, slot]() { prepareInto(slot); });
 		});
+	}
+
+	void prepareInto(int slot)
+	{
+		if (!client_)
+			return;
+		QPointer<QObject> alive(alive_);
+		client_->framingFacePrepare(
+		    slot, [this, alive](const QJsonObject &doc) {
+			    if (!alive)
+				    return;
+			    const int status =
+				doc.value(QLatin1String("status")).toInt(-1);
+			    const int uid =
+				doc.value(QLatin1String("uid")).toInt(-1);
+			    if (status != 0 || uid < 0) {
+				    /* The camera's own wording ("face not found",
+				       "face too small") is the useful part. */
+				    QString why =
+					doc.value(QLatin1String("detail"))
+					    .toString();
+				    if (why.isEmpty())
+					    why = ztr("ZCameraPlugin.Framing."
+						      "FaceRegCaptureFailed");
+				    info_->setText(why);
+				    explainStoreState(why);
+				    return;
+			    }
+			    stagedUid_ = uid;
+			    stagedThumb_ =
+				doc.value(QLatin1String("thm")).toString();
+			    add_->setEnabled(true);
+			    info_->setText(ztr(
+				"ZCameraPlugin.Framing.FaceRegCaptured"));
+			    showPicture(stagedThumb_);
+		    });
+	}
+
+	/* Bug 3: "face not found" covers two very different situations, and the
+	   operator cannot tell them apart from the dialog. Say what the store
+	   reports so a disabled database is not blamed on the person standing
+	   in front of the camera. */
+	void explainStoreState(const QString &why)
+	{
+		if (!client_)
+			return;
+		QPointer<QObject> alive(alive_);
+		client_->framingFaceStatus([this, alive, why](
+					       const QJsonObject &doc) {
+			if (!alive)
+				return;
+			if (doc.contains(QLatin1String("code")) &&
+			    doc.value(QLatin1String("code")).toInt() < 0)
+				return;
+			const bool enable =
+			    doc.value(QLatin1String("enable")).toBool(false);
+			const bool ready = doc.value(
+			    QLatin1String("prepare_ready")).toBool(false);
+			if (enable && ready)
+				return;
+			info_->setText(
+			    why + QLatin1Char(' ') +
+			    ztr("ZCameraPlugin.Framing.FaceRegStoreState")
+				.arg(enable ? ztr("ZCameraPlugin.Framing."
+						  "FaceRegOn")
+					    : ztr("ZCameraPlugin.Framing."
+						  "FaceRegOff"))
+				.arg(ready ? ztr("ZCameraPlugin.Framing."
+						 "FaceRegOn")
+					   : ztr("ZCameraPlugin.Framing."
+						 "FaceRegOff")));
+		});
+	}
+
+	void addStaged()
+	{
+		if (!client_ || !supported_ || stagedUid_ < 0)
+			return;
+		const QString name = name_->text().trimmed();
+		if (name.isEmpty()) {
+			info_->setText(
+			    ztr("ZCameraPlugin.Framing.FaceRegNeedName"));
+			return;
+		}
+		/* `which` is the uid prepare just handed back; activate makes the
+		   camera adopt the new entry at once, as the page does. */
+		client_->framingFaceAdd(stagedUid_, name, priority_->value(),
+					active_->isChecked());
+		stagedUid_ = -1;
+		stagedThumb_.clear();
+		add_->setEnabled(false);
+		/* The store is asynchronous; give the camera a beat before
+		   reading the list back. */
+		QTimer::singleShot(400, this, [this]() { refresh(); });
+	}
+
+	/* Bug 190: one field changed, one write. The debounce exists for the spin
+	   box only — a held arrow would otherwise send one update per step and
+	   race its own read-back. */
+	void scheduleApply()
+	{
+		if (filling_ || !supported_ || list_->currentRow() < 0)
+			return;
+		applyTimer_->start();
+	}
+
+	void applyNow()
+	{
+		if (filling_ || !supported_ || list_->currentRow() < 0)
+			return;
+		applyTimer_->stop();
+		applyEdit();
 	}
 
 	void applyEdit()
@@ -4568,16 +4801,31 @@ public:
 
 	ZcCameraClient *client_ = nullptr;
 	QLabel *info_ = nullptr;
+	/* The face a capture has taken but not yet stored, -1 when none is
+	   staged. Add is what writes it (bug 3). */
+	int stagedUid_ = -1;
+	QString stagedThumb_;
 	/* The entry an applyEdit() asked for, -1 when nothing is pending. */
 	int pendingUid_ = -1;
 	QString pendingName_;
 	int pendingPriority_ = 0;
 	bool pendingActive_ = false;
+	/* The camera's own next free priority (/query next_priority). */
+	int nextPriority_ = 0;
+	/* Set while the form is being filled from a row: the writes that filling
+	   triggers are not operator edits and must not turn into updates. */
+	bool filling_ = false;
+	/* Bumped on every list rebuild; a thumbnail reply carries the value it
+	   was asked for and is dropped when they differ. */
+	int generation_ = 0;
+	QTimer *applyTimer_ = nullptr;
+	QLabel *preview_ = nullptr;
 	QListWidget *list_ = nullptr;
 	QLineEdit *name_ = nullptr;
 	QSpinBox *priority_ = nullptr;
 	QCheckBox *active_ = nullptr;
 	QPushButton *capture_ = nullptr;
+	QPushButton *add_ = nullptr;
 	QPushButton *apply_ = nullptr;
 	QPushButton *del_ = nullptr;
 	QPushButton *refresh_ = nullptr;
@@ -4595,6 +4843,8 @@ public:
 	QVector<int> priorities_;
 	/* Per-face `activate` flag, in the same order as uids_. */
 	QVector<bool> actives_;
+	/* Per-face thumbnail path (`thm`), same order. */
+	QStringList thumbs_;
 	int max_ = 10;
 	int maxActive_ = 8;
 	bool supported_ = true;
