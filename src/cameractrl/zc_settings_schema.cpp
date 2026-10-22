@@ -247,8 +247,12 @@ const SettingGate kSettingGates[] = {
 	{"af_area", "mfOnly", true},
 	{"live_caf", "mfOnly", true},
 	{"af_speed", "mfOnly", true},
-	{"mf_mag", "mfOnly", true},
-	{"mf_recording", "mfOnly", true},
+	/* The two MF-assist rows are NOT part of that gate: a body can have
+	   autofocus and still have no "MF assist while standby / recording"
+	   setting at all, which is exactly what the e2ptz does — its `lens`
+	   catalog answers both keys `ro=1` whatever the focus mode is (bug 115).
+	   They are hidden on a read-only answer instead, in the dock's row
+	   builder, so flipping the flag above cannot bring them back greyed. */
 	/* The focus family rides the negative `noFocus` flag: a body without a
 	   focus motor reports it, and every focus row is meaningless there
 	   (bug 115 — MF-assist rows offered on a body that has no such setting). */

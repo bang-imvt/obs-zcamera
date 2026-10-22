@@ -1678,8 +1678,16 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		   answers these keys read-only. So a read-only answer hides the row
 		   instead of greying it (bug 40: the E2_F6_Pro has no expert mode,
 		   yet the R/G/B gains were drawn, greyed and useless). The rows come
-		   back on the next catalog read when the mode offers them again. */
-		if (def.readOnly && isExpertWbKey(key))
+		   back on the next catalog read when the mode offers them again.
+
+		   The two MF-assist rows are the same story: an e2ptz has autofocus
+		   but no "MF assist while standby / recording" setting, and says so
+		   with `ro=1` (bug 115). Their capability gate was removed when the
+		   AF family's flag was inverted (bug 218), so this is what keeps them
+		   off a body that cannot set them. */
+		if (def.readOnly &&
+		    (isExpertWbKey(key) || key == QLatin1String("mf_mag") ||
+		     key == QLatin1String("mf_recording")))
 			continue;
 		const bool readOnly = def.readOnly ||
 				      /* A time-lapse interval only matters when the camera
