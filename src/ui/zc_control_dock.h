@@ -401,6 +401,11 @@ private:
 	   with the limit on they sit on the stored boundary, with it off on the
 	   camera's full travel. */
 	void applyLimitBox(bool enabled);
+	/* Grey/ungrey the four edge rows (slider + "Current" + "Reset"). Split
+	   out of applyLimitBox so the checkbox alone can drive it: the box's
+	   ranges are only known after the first read, but whether the rows are
+	   clickable follows the switch from the very first click (bug 241). */
+	void setLimitControlsEnabled(bool enabled);
 	/* Send the corner an edge belongs to (up/right -> "upright", down/left ->
 	   "downleft"), taking the other axis from the neighbouring slider. */
 	void pushLimit(Edge edge);

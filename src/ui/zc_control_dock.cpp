@@ -2311,6 +2311,15 @@ const QString kPtzPanelStyle =
     "#3c514e; border-radius:4px; padding:6px 10px; font-size:11px; }"
     "QPushButton:hover { background:#354845; }"
     "QPushButton:pressed { background:#d8b878; color:#1f2927; }"
+    /* A greyed control has to LOOK greyed. Without these rules a disabled
+       button kept the enabled colours (#eef2ed on #2b3a38) and its gold
+       slider handle, so the four range-limit rows under an unchecked switch
+       read as clickable — which is exactly what QA reported (bug 241). The
+       framing pane has had the button rule all along; this pane never did. */
+    "QPushButton:disabled { color:#5d6b7d; background:#242f2d; "
+    "border-color:#2b3a38; }"
+    "QSlider::handle:horizontal:disabled { background:#5d6b7d; }"
+    "QSlider::handle:vertical:disabled { background:#5d6b7d; }"
     "QSlider::groove:horizontal { height:4px; background:#3c514e; "
     "border-radius:2px; }"
     "QSlider::handle:horizontal { width:14px; height:14px; margin:-5px 0; "
@@ -3041,6 +3050,11 @@ ZcPtzPad::ZcPtzPad(QWidget *parent) : QWidget(parent)
 	}
 
 	connect(limitCheck_, &QCheckBox::toggled, this, [this](bool on) {
+		/* The four rows follow the switch from the very first click, whether
+		   or not the box has been read back yet — otherwise the rows stayed
+		   gold and clickable under an unchecked switch until the next poll
+		   (bug 241). */
+		setLimitControlsEnabled(on);
 		/* Repaint the four sliders from the limit / unlimit box right away, the
 		   way the camera's web UI does when its Range Limit status changes: with
 		   the limit on an edge sits on the stored boundary, with it off on the
@@ -3132,10 +3146,12 @@ static void setLimitRange(QSlider *s, int lo, int hi, int value)
 	s->setValue(value);
 }
 
-void ZcPtzPad::applyLimitBox(bool enabled)
+/* Bug list 56: with the Range Limit switch off the camera ignores the four
+   edges, so they grey; switching it on restores them. Kept separate from
+   applyLimitBox because the switch alone has to be able to drive it — the
+   box's ranges are only known after the first read of /ctrl/pt (bug 241). */
+void ZcPtzPad::setLimitControlsEnabled(bool enabled)
 {
-	/* Bug list 56: with the Range Limit switch off the camera ignores the
-	   four edges, so they grey; switching it on restores them. */
 	for (int e = 0; e < EdgeCount; ++e) {
 		if (limitSlider_[e])
 			limitSlider_[e]->setEnabled(enabled);
@@ -3144,6 +3160,11 @@ void ZcPtzPad::applyLimitBox(bool enabled)
 		if (limitReset_[e])
 			limitReset_[e]->setEnabled(enabled);
 	}
+}
+
+void ZcPtzPad::applyLimitBox(bool enabled)
+{
+	setLimitControlsEnabled(enabled);
 
 	/* Ranges and values mirror the web UI's updatePtzLimit(): with the limit on
 	   an edge sits on the stored boundary, with it off on the camera's full
@@ -4417,7 +4438,11 @@ const QString kFramingPanelStyle =
     "QSlider::handle:horizontal { width:10px; margin:-5px 0; "
     "background:#d8b878; border-radius:5px; }"
     "QSlider::sub-page:horizontal { background:#8a9bb2; border-radius:2px; }"
-    "QSlider:disabled::handle:horizontal { background:#5d6b7d; }";
+    /* Sub-control pseudo-states come in subcontrol-then-state order
+       (`::handle:horizontal:disabled`); the old `:disabled::handle` form never
+       matched anything, so a greyed slider kept its gold handle (bug 241). */
+    "QSlider::handle:horizontal:disabled { background:#5d6b7d; }"
+    "QSlider::handle:vertical:disabled { background:#5d6b7d; }";
 
 /* Auto-framing controls in their own tab, laid out like the camera's own page
    so an operator who knows that page can read this one without relearning it.
