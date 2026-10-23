@@ -1757,9 +1757,24 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 		gs_matrix_pop();
 	};
 
-	if (maskOn && mr > ml && mb > mt) {
-		const float x = ml * (float)fw, y = mt * (float)fh;
-		const float w = (mr - ml) * (float)fw, h = (mb - mt) * (float)fh;
+	/* The detection area, on whole pixels, from one place. `gs_draw_sprite`
+	   takes integer sizes and the quad it draws starts on a float, so a
+	   rectangle and the dimming bands derived from the raw fractions landed
+	   on different rows — which is what put a seam on the frame (bugs
+	   213/227). Rounding the rectangle once and deriving every band and edge
+	   from the rounded numbers removes the whole class of off-by-a-pixel
+	   seams. */
+	const auto roundPx = [](float v, uint32_t limit) {
+		return (float)qBound(0, (int)std::lround(v), (int)limit);
+	};
+	const float maskX = roundPx(ml * (float)fw, fw);
+	const float maskY = roundPx(mt * (float)fh, fh);
+	const float maskW = roundPx(mr * (float)fw, fw) - maskX;
+	const float maskH = roundPx(mb * (float)fh, fh) - maskY;
+
+	if (maskOn && maskW > 0.0f && maskH > 0.0f) {
+		const float x = maskX, y = maskY;
+		const float w = maskW, h = maskH;
 		/* Proof for a live check that the frame really reaches the picture:
 		   emitted when the rectangle or the mode changes, and it names the
 		   surface being drawn into (a display, or a mix nobody would ever
@@ -1797,23 +1812,29 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 		   Four bands, because the solid draw here has no "clear" op. The
 		   frame itself switches to the page's edit accent (#ff4e05) while it
 		   is being placed — the cyan read-only colour reads as "this is the
-		   area", the accent reads as "this is the thing you are dragging". */
+		   area", the accent reads as "this is the thing you are dragging".
+
+		   The bands never overlap each other. The dim texture is 50% black
+		   and the blend is premultiplied, so drawing it twice yields a
+		   near-black patch: the top band used to run the full width and the
+		   side bands started at the same row, and the double-dimmed strip
+		   outside the frame read as a black line across the picture that
+		   moved with the rectangle's top and bottom edges (bug 227 — the
+		   previous fix for the bright line, bug 213, is what created the
+		   overlap). They do overlap the *frame* by its own thickness, which
+		   is what keeps bug 213's bright line away, and the frame is opaque
+		   and drawn afterwards, so that costs nothing. */
 		const bool editing = (mode == zc::OverlayInteraction::MaskEdit);
 		if (editing) {
-			/* The bands overlap the frame by its own thickness. They
-			   meet its edge on a fractional pixel, and `gs_draw_sprite`
-			   takes whole pixels, so a band sized to end exactly at the
-			   edge can leave the row between it and the frame
-			   undimmed — a one-pixel bright line across the picture at
-			   the top of the rectangle (bug 213). The frame is drawn
-			   after the bands and is opaque, so the overlap costs
-			   nothing. */
-			fillWith(overlayDim_, 0.0f, 0.0f, (float)fw, y + thick);
-			fillWith(overlayDim_, 0.0f, y + h - thick, (float)fw,
-				 (float)fh - (y + h - thick));
-			fillWith(overlayDim_, 0.0f, y, x + thick, h);
-			fillWith(overlayDim_, x + w - thick, y,
-				 (float)fw - (x + w - thick), h);
+			const float tk = qMin(thick, qMin(w, h) * 0.5f);
+			fillWith(overlayDim_, 0.0f, 0.0f, (float)fw, y + tk);
+			fillWith(overlayDim_, 0.0f, y + h - tk, (float)fw,
+				 (float)fh - (y + h - tk));
+			/* Between the two horizontal bands only, so the corners are
+			   dimmed once. */
+			fillWith(overlayDim_, 0.0f, y + tk, x + tk, h - 2.0f * tk);
+			fillWith(overlayDim_, x + w - tk, y + tk,
+				 (float)fw - (x + w - tk), h - 2.0f * tk);
 		}
 		gs_texture_t *frame =
 		    (editing && overlayAccent_) ? overlayAccent_ : overlaySolid_;

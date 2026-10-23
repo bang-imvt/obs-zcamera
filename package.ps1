@@ -30,7 +30,12 @@ $Root  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Build  = Join-Path $Root "build_x64"
 $DepsBin = Join-Path $Root ".deps\obs-deps-2024-09-12-x64\bin"
 $LibSsp = Join-Path $Build "_deps\libssp-src\lib\win_x64_vs2017\libssp.dll"
-$Version = "0.15.4"
+# Read the version from buildspec.json instead of keeping a second copy here:
+# the hardcoded literal had gone stale (it still said 0.15.4 while the build was
+# 0.15.6), so the zip name disagreed with the installer and the DLL.
+$Version = (Get-Content -Raw (Join-Path $Root "buildspec.json") |
+            ConvertFrom-Json).version
+if (-not $Version) { throw "no version in buildspec.json" }
 
 function Assert-Path($p, $what) {
     if (-not (Test-Path -LiteralPath $p)) { throw "$what not found: $p" }

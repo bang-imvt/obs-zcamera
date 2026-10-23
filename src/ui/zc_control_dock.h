@@ -253,6 +253,13 @@ private slots:
 private:
 	void populateGroups();
 	void buildRows(const QString &catalog);
+	/* Repaint the rows already on screen from the cached definitions, without
+	   deleting a single widget. A reply that lands on the group being shown
+	   (the `wb` catalog is re-read after every white-balance write) must not
+	   rebuild the pane: the rebuild deletes the combo box the operator has
+	   open, which closes it the moment it is clicked (bug 236). Only valid
+	   while the row set is unchanged — buildRows decides that. */
+	void refreshRowValues();
 	/* Write one setting and, when the camera applies it by restarting, tell the
 	   dock so it can wait for the camera and reconnect (bug 8). */
 	void writeKey(const QString &key, const QString &value);
@@ -279,8 +286,14 @@ private:
 	QWidget *rowsContainer_ = nullptr;
 	/* The label + control widgets of each rendered row, keyed by setting id, so
 	   a row can be hidden/shown without rebuilding the pane (used by the PTZ
-	   common-speed-unit linkage). Rebuilt on every buildRows(). */
+	   common-speed-unit linkage). Rebuilt only when the row set changes, and
+	   otherwise refreshed in place by refreshRowValues(). */
 	QHash<QString, QList<QWidget *>> rowWidgets_;
+	/* The keys of the rows on screen, in order. A refresh that produces the
+	   same list repaints instead of rebuilding; a different one rebuilds. */
+	QStringList rowKeys_;
+	/* The catalog those rows were built for. */
+	QString rowsCatalog_;
 	/* The catalog currently rendered, so a late getbatch reply knows whether
 	   it still owns the rows pane. */
 	QString catalog_;

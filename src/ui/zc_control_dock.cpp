@@ -46,12 +46,14 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 #include <QPushButton>
 #include <QToolButton>
 #include <QComboBox>
+#include <QAbstractItemView>
 #include <QSlider>
 #include <QSpinBox>
 #include <QCheckBox>
 #include <QLineEdit>
 #include <QStackedWidget>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QFrame>
@@ -1560,6 +1562,39 @@ static void clearRows(QLayout *layout)
 	}
 }
 
+/* A row is drawn greyed when the camera marks the key read-only, and for the
+   one interlock the camera's metadata does not carry. Kept as one function so
+   the builder and the in-place repaint cannot disagree about it. */
+static bool settingRowReadOnly(ZcCameraClient *client, const QString &key,
+			       const ZcSettingValue &def)
+{
+	if (def.readOnly)
+		return true;
+	/* A time-lapse interval only matters when the camera is actually
+	   time-lapsing; in the normal record mode the field is meaningless and
+	   must be greyed (bug list "Video_tl_interval grey when record_mode =
+	   Normal"). */
+	return client && key == QLatin1String("video_tl_interval") &&
+	       client->settingValue(QLatin1String("record_mode")) ==
+		       QLatin1String("Normal");
+}
+
+/* Whether any choice box under `root` has its list open right now. Deleting a
+   combo box closes its list, and a rebuild deletes all of them — so a pane
+   must not be rebuilt under an open one (bug 236). */
+static bool settingsComboOpen(QWidget *root)
+{
+	if (!root)
+		return false;
+	const auto boxes = root->findChildren<QComboBox *>();
+	for (QComboBox *box : boxes) {
+		QAbstractItemView *view = box ? box->view() : nullptr;
+		if (view && view->isVisible())
+			return true;
+	}
+	return false;
+}
+
 void ZcSettingsPanel::buildRows(const QString &catalog)
 {
 	/* Clear existing rows: delete every direct child widget and their
@@ -1568,10 +1603,12 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		qobject_cast<QBoxLayout *>(rowsContainer_->layout());
 	if (!rowLayout)
 		return;
-	clearRows(rowLayout);
-	rowWidgets_.clear();
 
 	auto addHint = [&](const QString &text) {
+		clearRows(rowLayout);
+		rowWidgets_.clear();
+		rowKeys_.clear();
+		rowsCatalog_.clear();
 		auto *hint = new QLabel(text, rowsContainer_);
 		hint->setWordWrap(true);
 		hint->setStyleSheet("color:#8a9bb2;padding:8px;");
@@ -1633,6 +1670,17 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 		}
 		return false;
 	};
+
+	/* Everything the pane is going to show is decided in this first pass, and
+	   nothing is created yet. Splitting the decision from the construction is
+	   what lets a refreshed group be repainted without being rebuilt (see the
+	   guard after the loop). */
+	struct RowDef {
+		QString key;
+		ZcSettingValue def;
+		bool readOnly = false;
+	};
+	QVector<RowDef> rows;
 
 	for (const QString &key : keys) {
 		/* The WDR setting is not offered by the camera's web UI (it is reported
@@ -1712,21 +1760,59 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 
 		   The two MF-assist rows are the same story: an e2ptz has autofocus
 		   but no "MF assist while standby / recording" setting, and says so
-		   with `ro=1` (bug 115). Their capability gate was removed when the
-		   AF family's flag was inverted (bug 218), so this is what keeps them
-		   off a body that cannot set them. */
+		   with `ro=1` (bug 115). They carry no capability gate at all (the
+		   AF family's `mfOnly` gate was dropped for bug 238), so this is what
+		   keeps them off a body that cannot set them. */
 		if (def.readOnly &&
 		    (isExpertWbKey(key) || key == QLatin1String("mf_mag") ||
 		     key == QLatin1String("mf_recording")))
 			continue;
-		const bool readOnly = def.readOnly ||
-				      /* A time-lapse interval only matters when the camera
-					 is actually time-lapsing; in the normal record mode the
-					 field is meaningless and must be greyed (bug list
-					 "Video_tl_interval grey when record_mode = Normal"). */
-				      (key == QLatin1String("video_tl_interval") &&
-				       client_->settingValue(QLatin1String("record_mode")) ==
-					       QLatin1String("Normal"));
+		/* Whether this row is drawn greyed — the rule is one function, because
+		   the in-place repaint below has to reach exactly the same verdict as
+		   the builder. */
+		rows.append({key, def, settingRowReadOnly(client_, key, def)});
+	}
+
+	QStringList shownKeys;
+	shownKeys.reserve(rows.size());
+	for (const RowDef &r : rows)
+		shownKeys << r.key;
+
+	/* Bug 236: a reply that lands on the group already on screen must not
+	   rebuild it. Selecting a white-balance mode writes `wb`, and the engine
+	   re-reads the whole catalog as a dependency of that write; the reply
+	   arrives a moment later, and the rebuild used to delete the combo box
+	   under the operator's cursor. The list closed the instant it was opened,
+	   so a mode could be switched once and never again. Repainting the
+	   controls in place leaves the pane (and any open list) alone; the OBS
+	   scroll position survives too. */
+	if (catalog == rowsCatalog_ && shownKeys == rowKeys_) {
+		refreshRowValues();
+		updatePtzCommonRows();
+		return;
+	}
+	/* The row set really did change (a white-balance mode gained or lost its
+	   expert rows, say), so the pane has to be rebuilt — but not while a list
+	   is open: deleting the combo box closes it, which is the same symptom.
+	   Try again shortly, by which time the operator has picked a value or
+	   clicked away. */
+	if (settingsComboOpen(rowsContainer_)) {
+		QTimer::singleShot(150, this, [this, catalog]() {
+			if (catalog == catalog_)
+				buildRows(catalog);
+		});
+		return;
+	}
+
+	clearRows(rowLayout);
+	rowWidgets_.clear();
+	rowKeys_ = shownKeys;
+	rowsCatalog_ = catalog;
+
+	for (const RowDef &rowDef : rows) {
+		const QString &key = rowDef.key;
+		const ZcSettingValue &def = rowDef.def;
+		const bool readOnly = rowDef.readOnly;
 
 		auto *row = new QHBoxLayout;
 		/* `ptz_common_time` carries milliseconds on the wire but the camera's own
@@ -1826,6 +1912,64 @@ void ZcSettingsPanel::buildRows(const QString &catalog)
 
 	/* Apply the PTZ common-speed-unit linkage to the rows just built. */
 	updatePtzCommonRows();
+}
+
+/* Repaint the rows already on screen from the cached definitions. Nothing is
+   deleted and nothing is emitted, so an open choice list, a slider being
+   dragged and a half-typed line edit all survive the reply that triggered
+   this — which is the whole point (bug 236: the pane used to be rebuilt, and
+   the rebuild closed the white-balance list the moment it was opened). */
+void ZcSettingsPanel::refreshRowValues()
+{
+	if (!client_)
+		return;
+	for (const QString &key : rowKeys_) {
+		const QList<QWidget *> widgets = rowWidgets_.value(key);
+		if (widgets.size() < 2)
+			continue;
+		ZcSettingValue def;
+		if (!client_->settingDefinition(key, &def) || !def.supported)
+			continue;
+		QWidget *control = widgets.at(1);
+		const bool readOnly = settingRowReadOnly(client_, key, def);
+
+		if (auto *combo = qobject_cast<QComboBox *>(control)) {
+			QAbstractItemView *view = combo->view();
+			/* An open list is left completely alone: replacing the items
+			   or moving the current index closes it. */
+			if (view && view->isVisible())
+				continue;
+			QStringList itemValues;
+			itemValues.reserve(combo->count());
+			for (int i = 0; i < combo->count(); ++i)
+				itemValues << combo->itemData(i).toString();
+			if (itemValues != def.choices && !def.choices.isEmpty()) {
+				QSignalBlocker block(combo);
+				combo->clear();
+				for (const QString &choice : def.choices)
+					combo->addItem(zcValueLabel(choice),
+						       choice);
+			}
+			const int current = combo->findData(def.value);
+			if (current >= 0 && current != combo->currentIndex()) {
+				QSignalBlocker block(combo);
+				combo->setCurrentIndex(current);
+			}
+		} else if (auto *slider = control->findChild<QSlider *>()) {
+			/* The PTZ common time is shown in seconds; the rest of the
+			   ranges are their own unit (see buildRows). */
+			const double scale = key == QLatin1String("ptz_common_time")
+						 ? 1000.0
+						 : 1.0;
+			const int want = static_cast<int>(def.value.toInt() / scale);
+			if (!slider->isSliderDown() && slider->value() != want)
+				slider->setValue(want);
+		} else if (auto *edit = qobject_cast<QLineEdit *>(control)) {
+			if (!edit->hasFocus() && edit->text() != def.value)
+				edit->setText(def.value);
+		}
+		control->setEnabled(!readOnly);
+	}
 }
 
 /* The PTZ group's "common speed unit" selects which of the two common values
@@ -4489,6 +4633,12 @@ private:
 			thumbs_.clear();
 			const QJsonArray faces =
 			    doc.value(QLatin1String("faces")).toArray();
+			/* Bug 225: renaming a face rebuilds this list, and a cleared
+			   QListWidget scrolls back to the top — every thumbnail moved
+			   under the operator's cursor for a change that never touched
+			   the order. Remember where the view was and put it back. */
+			const int keepScroll =
+			    list_->verticalScrollBar()->value();
 			list_->clear();
 			const bool wasFilling = filling_;
 			filling_ = true;
@@ -4530,6 +4680,13 @@ private:
 				   way the camera's page draws it. */
 				auto *item =
 				    new QListWidgetItem(names_.last(), list_);
+				/* Bug 223: an entry that is switched off is drawn grey,
+				   the way the camera's page does it, so "in the library
+				   but not tracked" is readable without selecting the row
+				   and reading the checkbox. */
+				if (!actives_.last())
+					item->setForeground(
+					    QColor(QStringLiteral("#6b7a80")));
 				item->setToolTip(
 				    ztr("ZCameraPlugin.Framing.FaceRegRowTip")
 					.arg(names_.last())
@@ -4539,7 +4696,8 @@ private:
 						       "Framing.FaceRegOn")
 						 : ztr("ZCameraPlugin."
 						       "Framing.FaceRegOff")));
-				loadThumb(item, thm, generation_);
+				loadThumb(item, thm, generation_,
+					  priorities_.last());
 			}
 			/* Keep the operator's selection across the rebuild. Live
 			   apply (bug 190) refreshes after every field change, and
@@ -4572,6 +4730,8 @@ private:
 					.arg(uids_.size())
 					.arg(max_)
 					.arg(maxActive_));
+			/* Bug 225: back to the row the operator was looking at. */
+			list_->verticalScrollBar()->setValue(keepScroll);
 			/* Bug 190: a new entry gets the priority the camera says is
 			   next, not a repeated 1. Priority decides between two
 			   faces in frame, so two entries sharing one leaves that
@@ -4626,21 +4786,48 @@ private:
 	}
 
 	/* Icon for one list row. Same generation rule as showPicture(). */
-	void loadThumb(QListWidgetItem *item, const QString &path, int gen)
+	void loadThumb(QListWidgetItem *item, const QString &path, int gen,
+		       int priority)
 	{
 		if (!client_ || path.isEmpty())
 			return;
 		QPointer<QObject> alive(alive_);
 		client_->framingFaceThumb(
-		    path, [this, alive, item, gen](const QByteArray &bytes) {
+		    path, [this, alive, item, gen, priority](
+			      const QByteArray &bytes) {
 			    if (!alive || gen != generation_ || !item)
 				    return;
 			    QPixmap pm;
 			    if (!pm.loadFromData(bytes))
 				    return;
-			    item->setIcon(QIcon(pm.scaled(
-				list_->iconSize(), Qt::KeepAspectRatio,
-				Qt::SmoothTransformation)));
+			    QPixmap thumb = pm.scaled(list_->iconSize(),
+						      Qt::KeepAspectRatio,
+						      Qt::SmoothTransformation);
+			    /* Bug 224: the priority only showed once the entry was
+			       selected, which forced the operator to click through
+			       the library to read it. It is drawn into the
+			       thumbnail's top-left corner the way the camera's own
+			       page badges a face, so the order is visible at a
+			       glance. */
+			    if (priority > 0 && !thumb.isNull()) {
+				    QPainter p(&thumb);
+				    p.setRenderHint(QPainter::Antialiasing,
+						    true);
+				    const int box =
+					qBound(10, thumb.width() / 3, 18);
+				    const QRect r(0, 0, box, box);
+				    p.setPen(Qt::NoPen);
+				    p.setBrush(QColor(0, 0, 0, 170));
+				    p.drawRoundedRect(r, 3, 3);
+				    QFont f = p.font();
+				    f.setPixelSize(qMax(9, box - 5));
+				    f.setBold(true);
+				    p.setFont(f);
+				    p.setPen(QColor(QStringLiteral("#ffd166")));
+				    p.drawText(r, Qt::AlignCenter,
+					       QString::number(priority));
+			    }
+			    item->setIcon(QIcon(thumb));
 		    });
 	}
 
@@ -6046,6 +6233,14 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 			auto *bodyLay = new QHBoxLayout(body);
 			bodyLay->setContentsMargins(0, 0, 0, 0);
 			bodyLay->setSpacing(6);
+			/* Bug 229: this switch sat in a wider row than its neighbours
+			   (230 px for the state word beside it) and, with the badge and a
+			   stretch sharing that width, took its natural size instead of
+			   the 150 px every other field gives its control — so its two
+			   cells were narrower than the 开机启动 / 计数灯 pair right above
+			   it. Pin it to the same width the other rows use; the badge gets
+			   what is left. */
+			trackingRecordSeg_->setFixedWidth(150);
 			bodyLay->addWidget(trackingRecordSeg_, 0,
 					   Qt::AlignVCenter);
 			trackingRecBadge_ = new QLabel(body);
@@ -7612,10 +7807,16 @@ void ZcFramingPanel::updateGating()
 	/* The preset block is gated on detection like the rest of the live page,
 	   but only while the camera has a preset table at all: with none it is
 	   hidden (rebuildPresets), and this keeps it dead in the moment between
-	   being shown and the first snapshot arriving. */
+	   being shown and the first snapshot arriving.
+
+	   Bug 232: the camera refuses a preset recall while it is tracking (the
+	   recall button answered nothing), so the block greys in that state as
+	   the page's does. Detecting is not tracking: with detection on but no
+	   subject locked the presets stay usable — only the trace controls grey
+	   there, and they are gated on their own state. */
 	if (presetGroup_)
 		presetGroup_->setEnabled(presetSupported_ && haveSnapshot_ &&
-					 detectOn_);
+					 detectOn_ && statusIndex_ != 2);
 	if (startBtn_)
 		startBtn_->setEnabled(detectOn_);
 	if (restartBtn_)
@@ -7671,13 +7872,16 @@ void ZcFramingPanel::updateGating()
 	if (boxModeSeg_)
 		boxModeSeg_->setEnabled(liveBase && !traceOn_);
 
-	/* Bug 34: Track Active Face on means the camera is following a face, so
-	   the box's own enable switch cannot be flipped either — the camera is
-	   already driving the framing from the face. */
-	const bool faceTrackOn =
-	    faceTrackSeg_ && faceTrackSeg_->currentIndex() == 1;
+	/* Bug 34 used to add a second condition here: with "Track Active Face" on
+	   the box's own status switch was greyed as well, on the reading that the
+	   camera was already driving the framing from the face. It is not a lock:
+	   the camera keeps `fix_angle_box.enable` independent of
+	   `track_active_face`, QA could not switch the box at all on a P2 running
+	   1.0.6 (which reports track_active_face:true by default), and importing a
+	   framing profile — which turns the flag on — greyed the status switch for
+	   good (bugs 228/230). Only an actual track greys it. */
 	if (boxEnableSeg_)
-		boxEnableSeg_->setEnabled(liveBase && !traceOn_ && !faceTrackOn);
+		boxEnableSeg_->setEnabled(liveBase && !traceOn_);
 
 	/* Bug list 13: Tilt Lock on — the pad's up/down arrows grey, left/right
 	   keeps working. */
@@ -9110,6 +9314,13 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 	splitter_->addWidget(right);
 	splitter_->setStretchFactor(0, 0);
 	splitter_->setStretchFactor(1, 1);
+	/* Bug 240: a splitter child is collapsible by default, so dragging the
+	   rail's right edge to zero hid the camera list — and with the handle
+	   collapsed there was nothing left to grab, so it never came back (the
+	   dock is rebuilt with the same zero width, so reopening the page did not
+	   help either). Keeping the children uncollapsible stops the drag at the
+	   rail's own minimum width instead, and the list always has a handle. */
+	splitter_->setChildrenCollapsible(false);
 	outer->addWidget(splitter_, 1);
 
 	/* Status bar. */
@@ -9163,6 +9374,13 @@ ZcControlDock::ZcControlDock(QWidget *parent) : QDockWidget(parent)
 		[this](const QString &host) {
 			addCameraToSource(host);
 			refreshRailPresence();
+			/* Bug 239: the operator added this camera, so the page follows
+			   it. The highlight used to stay on whatever camera was picked
+			   before, which read as "the + did nothing" — the control page
+			   kept showing the previous camera. selectCamera() moves the
+			   highlight and connects in one go (it is the same path the
+			   source's Properties dialog uses). */
+			selectCamera(host);
 		});
 	/* A gold check on an already-added row removes the source from OBS. */
 	connect(rail_, &ZcCameraRail::removeRequested, this,

@@ -213,46 +213,36 @@ const SettingGate kSettingGates[] = {
 	{"zoom_mode", "dzoomDigital", false},
 	/* $('#audio_phantom_pow').show() */
 	{"audio_phantom_power", "audioCodecXLR", false},
-	/* $('#audio_line_in').show() */
-	{"ain_gain_type", "aLineIn", false},
-	{"audio_input_level", "aLineIn", false},
-	{"audio_input_gain", "aLineIn", false},
-	{"audio_in_l_gain", "aLineIn", false},
-	{"audio_in_r_gain", "aLineIn", false},
+	/* The gain family (`ain_gain_type`, the input level and the two input
+	   gains) used to ride `aLineIn`, the page's `$('#audio_line_in').show()`
+	   flag. That flag only names the line-in *jack*: an E2 reports
+	   `audioCodecXLR:true` with no `aLineIn` at all and still answers all
+	   four keys code 0, ro 0 in its `audio` catalog — settable settings the
+	   operator was never shown (bug 234). The catalog is the authority: a
+	   key the camera does not have never reaches this pane, so the gate is
+	   gone rather than swapped for another flag. */
 	/* $('#eis').show() */
 	{"eis_on_off", "eisSupport", false},
 	/* $("#genlock_ctrl").show() */
 	{"genlock", "genlockSupport", false},
 	/* $('#adjust_with_ptz').show(), inside the lens_ctrl_ptz branch */
 	{"af_adjust_with_ptz", "lens_ctrl_ptz", false},
-	/* `mfOnly`: the body takes manual-focus lenses only, so the whole
-	   autofocus family is meaningless there (the Avatar reports it; its lens
-	   tab then has focus position but no AF rows). Manual focus itself stays.
-	   The MF-assist rows go with them: the bodies that report this flag are the
-	   cinema ones, whose firmware has no "MF assist while standby / while
-	   recording" setting at all (bug 115 — the plugin offered rows the body
-	   cannot set).
-
-	   `hiddenWhenOn` is TRUE here: the flag is a *negative* capability — it
-	   says the AF family must go away when it is on. It was written the other
-	   way round, which inverted the whole family: an e2ptz that does not
-	   report `mfOnly` at all (both test units) lost `Area`, Continuous AF,
-	   CAF sensitivity, Live CAF, the two MF-assist rows and AF Speed, while a
-	   body that really is manual-only would have kept them (bug 218 — QA
-	   compared the lens tab with the camera's own page, which shows AF Speed
-	   unconditionally). */
-	{"af_mode", "mfOnly", true},
-	{"caf", "mfOnly", true},
-	{"caf_sens", "mfOnly", true},
-	{"af_area", "mfOnly", true},
-	{"live_caf", "mfOnly", true},
-	{"af_speed", "mfOnly", true},
-	/* The two MF-assist rows are NOT part of that gate: a body can have
-	   autofocus and still have no "MF assist while standby / recording"
+	/* The autofocus family used to ride `mfOnly`, on the reading that a body
+	   which reports it takes manual-focus lenses only. It does not: the E2
+	   and the E2_F6 report `mfOnly:true` and their `lens` catalog answers
+	   `af_mode` / `af_area` / `caf` / `caf_sens` / `live_caf` / `af_speed`
+	   — the camera's own page draws all of those rows, and the plugin hid
+	   them (bug 238). The flag is not a "no autofocus" signal on this
+	   generation, so the family is gated by `noFocus` alone (below): that
+	   one says what it means, and the bodies without a focus motor report
+	   it. A key a body really lacks never reaches the pane anyway — it
+	   answers code -1 and is dropped while the rows are built. */
+	/* Bug 115's MF-assist rows are NOT part of any capability gate: a body can
+	   have autofocus and still have no "MF assist while standby / recording"
 	   setting at all, which is exactly what the e2ptz does — its `lens`
-	   catalog answers both keys `ro=1` whatever the focus mode is (bug 115).
+	   catalog answers both keys `ro=1` whatever the focus mode is.
 	   They are hidden on a read-only answer instead, in the dock's row
-	   builder, so flipping the flag above cannot bring them back greyed. */
+	   builder, so flipping a flag cannot bring them back greyed. */
 	/* The focus family rides the negative `noFocus` flag: a body without a
 	   focus motor reports it, and every focus row is meaningless there
 	   (bug 115 — MF-assist rows offered on a body that has no such setting). */
