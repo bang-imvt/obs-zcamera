@@ -205,11 +205,8 @@ public:
 	void setOverlayMask(bool enabled, float left, float top, float right,
 			    float bottom) override;
 	void setOverlayMarker(bool on, float nx, float ny) override;
-	void setOverlayTrackBox(bool enabled, float left, float top,
-				float width, float height) override;
-	void setOverlayAngleBox(bool enabled, float boxPan, float boxTilt,
-				float boxHfov, float viewPan, float viewTilt,
-				float viewHfov) override;
+	void setOverlayWorldBox(int kind, const zc::WorldBoxPose &box,
+				const zc::WorldBoxPose &view) override;
 
 	/* Delivered from the Interact window's mouse callbacks (zc_source.cpp's
 	   zc_source_mouse_click/mouse_move). Runs on the OBS UI thread. */
@@ -464,20 +461,14 @@ private:
 	float overlayMaskR_ = 1.0f, overlayMaskB_ = 1.0f;
 	bool overlayMarkerOn_ = false;
 	float overlayMarkerX_ = 0.5f, overlayMarkerY_ = 0.5f;
-	/* The tracking-box ("range") frame the dock mirrors from the camera
-	   (bug list 17): amber outline, drawn while the box is enabled. */
-	bool overlayTrackOn_ = false;
-	float overlayTrackL_ = 0.0f, overlayTrackT_ = 0.0f;
-	float overlayTrackW_ = 0.0f, overlayTrackH_ = 0.0f;
-	/* The lock-angle region (bug 53): the pose the box was saved at and the
-	   pose the picture is being taken from. Both go through the same 3-D
-	   projection at draw time — the picture's aspect ratio is only known here
-	   — see projectAngleBox(). */
-	bool overlayAngleOn_ = false;
-	float overlayAnglePan_ = 0.0f, overlayAngleTilt_ = 0.0f;
-	float overlayAngleHfov_ = 0.0f;
-	float overlayAngleViewPan_ = 0.0f, overlayAngleViewTilt_ = 0.0f;
-	float overlayAngleViewHfov_ = 0.0f;
+	/* The camera's two framing frames — the tracking-box ("range") region and
+	   the lock-angle region. Both are a pose plus a field of view, never a
+	   rectangle in the picture (bugs 53/243/244): the picture rectangle only
+	   exists once the pose is projected from wherever the head is now, and
+	   that needs this side's aspect ratio. `overlayView_` is that "now" pose
+	   and is shared, because one camera produces both frames. */
+	zc::WorldBoxPose overlayBox_[2];
+	zc::WorldBoxPose overlayView_;
 	/* The left-button drag in progress, if any: press records the anchor,
 	   move follows, release ends it. The rectangle that was on the picture
 	   before the press is kept so a click without a drag can put it back. */
@@ -501,7 +492,9 @@ private:
 	uint64_t overlayRenderNextNs_ = 0;
 	uint64_t overlayEnterNextNs_ = 0;
 	uint64_t overlayCallNextNs_ = 0;
-	uint64_t overlayAngleNextNs_ = 0;
+	/* One "last logged" stamp per frame: both are drawn every pass, and a
+	   shared stamp would let one starve the other's line. */
+	uint64_t overlayBoxNextNs_[2] = {0, 0};
 	float overlayDragAnchorX_ = 0.0f, overlayDragAnchorY_ = 0.0f;
 	/* 1x1 solid texture the rectangle and crosshair are stretched from, in
 	   the interaction colour (the box texture is red). Graphics thread only. */
@@ -1282,29 +1275,16 @@ void ZcSspSource::setOverlayMarker(bool on, float nx, float ny)
 	overlayMarkerY_ = ny;
 }
 
-void ZcSspSource::setOverlayTrackBox(bool enabled, float left, float top,
-				     float width, float height)
+void ZcSspSource::setOverlayWorldBox(int kind, const zc::WorldBoxPose &box,
+				     const zc::WorldBoxPose &view)
 {
+	if (kind != zc::WorldBoxRange && kind != zc::WorldBoxLockAngle)
+		return;
 	std::lock_guard<std::mutex> lock(overlayMutex_);
-	overlayTrackOn_ = enabled;
-	overlayTrackL_ = left;
-	overlayTrackT_ = top;
-	overlayTrackW_ = width;
-	overlayTrackH_ = height;
-}
-
-void ZcSspSource::setOverlayAngleBox(bool enabled, float boxPan, float boxTilt,
-				     float boxHfov, float viewPan, float viewTilt,
-				     float viewHfov)
-{
-	std::lock_guard<std::mutex> lock(overlayMutex_);
-	overlayAngleOn_ = enabled;
-	overlayAnglePan_ = boxPan;
-	overlayAngleTilt_ = boxTilt;
-	overlayAngleHfov_ = boxHfov;
-	overlayAngleViewPan_ = viewPan;
-	overlayAngleViewTilt_ = viewTilt;
-	overlayAngleViewHfov_ = viewHfov;
+	overlayBox_[kind] = box;
+	/* One camera, one head: whichever frame is pushed last brings the same
+	   view pose, so it is stored once. */
+	overlayView_ = view;
 }
 
 /* From the Interact window's mouse callbacks. `px`/`py` are in the source's
@@ -1574,7 +1554,8 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 	{
 		std::lock_guard<std::mutex> lock(overlayMutex_);
 		anyOperatorOverlay = overlayMaskOn_ || overlayMarkerOn_ ||
-				     overlayTrackOn_ || overlayAngleOn_;
+				     overlayBox_[zc::WorldBoxRange].valid ||
+				     overlayBox_[zc::WorldBoxLockAngle].valid;
 	}
 	{
 		/* Self-test aid (opt-in: only with the harness that also seeds a
@@ -1587,7 +1568,8 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 			     "[obs-zcamera] overlay call: ip=%s mode=%d mask=%d "
 			     "marker=%d track=%d",
 			     ip_.c_str(), (int)mode, overlayMaskOn_ ? 1 : 0,
-			     overlayMarkerOn_ ? 1 : 0, overlayTrackOn_ ? 1 : 0);
+			     overlayMarkerOn_ ? 1 : 0,
+			     overlayBox_[zc::WorldBoxRange].valid ? 1 : 0);
 		}
 	}
 	if (mode == zc::OverlayInteraction::None && !anyOperatorOverlay) {
@@ -1681,12 +1663,9 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 	}
 	const float thick = (float)thick_px;
 
-	bool maskOn = false, markerOn = false, trackOn = false;
+	bool maskOn = false, markerOn = false;
 	float ml = 0.0f, mt = 0.0f, mr = 1.0f, mb = 1.0f, mx = 0.5f, my = 0.5f;
-	float tl = 0.0f, tt = 0.0f, tw = 0.0f, th = 0.0f;
-	bool angleOn = false;
-	float aBoxPan = 0.0f, aBoxTilt = 0.0f, aBoxHfov = 0.0f;
-	float aViewPan = 0.0f, aViewTilt = 0.0f, aViewHfov = 0.0f;
+	zc::WorldBoxPose rangeBox, angleBox, viewBox;
 	{
 		std::lock_guard<std::mutex> lock(overlayMutex_);
 		maskOn = overlayMaskOn_;
@@ -1697,18 +1676,9 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 		markerOn = overlayMarkerOn_;
 		mx = overlayMarkerX_;
 		my = overlayMarkerY_;
-		trackOn = overlayTrackOn_;
-		tl = overlayTrackL_;
-		tt = overlayTrackT_;
-		tw = overlayTrackW_;
-		th = overlayTrackH_;
-		angleOn = overlayAngleOn_;
-		aBoxPan = overlayAnglePan_;
-		aBoxTilt = overlayAngleTilt_;
-		aBoxHfov = overlayAngleHfov_;
-		aViewPan = overlayAngleViewPan_;
-		aViewTilt = overlayAngleViewTilt_;
-		aViewHfov = overlayAngleViewHfov_;
+		rangeBox = overlayBox_[zc::WorldBoxRange];
+		angleBox = overlayBox_[zc::WorldBoxLockAngle];
+		viewBox = overlayView_;
 	}
 
 	gs_blend_state_push();
@@ -1868,49 +1838,67 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 		fill(cx - thick / 2.0f, cy - arm, thick, arm * 2.0f);
 	}
 
-	/* The tracking box's own texture, created lazily like the mask's: amber,
-	   so the range frame never reads as a red detection box or the cyan
-	   detection-area rectangle (bug list 17). */
-	if (trackOn && tw > 0.0f && th > 0.0f) {
-		if (!trackSolid_) {
-			uint8_t amber[4] = {255, 176, 32, 255};
-			const uint8_t *data = amber;
-			trackSolid_ = gs_texture_create(1, 1, GS_RGBA, 1, &data, 0);
-		}
-		if (trackSolid_) {
-			const float x = tl * (float)fw, y = tt * (float)fh;
-			fillWith(trackSolid_, x, y, tw * (float)fw, thick);
-			fillWith(trackSolid_, x, y + th * (float)fh - thick,
-				 tw * (float)fw, thick);
-			fillWith(trackSolid_, x, y, thick, th * (float)fh);
-			fillWith(trackSolid_, x + tw * (float)fw - thick, y, thick,
-				 th * (float)fh);
-		}
-	}
+	/* ---- The camera's two framing frames ----------------------------------
+	   Both are ONE thing, which is why bugs 243 and 244 were one defect: the
+	   camera stores each as the pan/tilt it was saved at plus the focal ratio
+	   then in use, and only the sub-rectangle (`roi*`) the operator drew
+	   inside it. Neither is a rectangle in the picture, so drawing the roi's
+	   own numbers as one (what this used to do) produced a frame pinned to the
+	   picture that never moved while the head did, and one that ignored the
+	   pose's size entirely (bug 244's "一直在同一个位置").
 
-	/* The lock-angle region (bug 53). Solid, like the page's own
-	   _drawBox(_fixAngleBox, FIX_ANGLE_COLOR, false): the range box it draws
-	   dashed is the one the operator may own; this one is a boundary they only
-	   read. */
-	if (angleOn && overlayAngleSolid_ && aBoxHfov > 0.1f &&
-	    aViewHfov > 0.1f) {
+	   The rectangle exists only once the pose is looked at from wherever the
+	   head is now, so it is projected here, at draw time — the same
+	   ptzToWorldBox + viewProjectionFromPtz pair the camera's page runs in its
+	   WebGL canvas. Returns how many of the four edges landed on the picture
+	   (a box the head has panned away from can lose all of them). */
+	const auto drawWorldBox = [&](int kind, gs_texture_t *tex,
+				      const zc::WorldBoxPose &box) {
+		const zc::WorldBoxPose &view = viewBox;
+		if (!tex || !box.valid || !view.valid || box.hfov <= 0.1f ||
+		    view.hfov <= 0.1f)
+			return 0;
+
 		const float aspect = (float)fw / (float)fh;
-		const float halfH = aBoxHfov * 0.5f;
+		const float halfH = box.hfov * 0.5f;
 		const float halfV = (float)(
 		    std::atan(std::tan(deg2rad(halfH)) / aspect) *
 		    (180.0 / kPiF));
-		const Vec3 corners[4] = {
-		    worldCornerFromDelta(aBoxPan, aBoxTilt, -halfH, -halfV),
-		    worldCornerFromDelta(aBoxPan, aBoxTilt, halfH, -halfV),
-		    worldCornerFromDelta(aBoxPan, aBoxTilt, halfH, halfV),
-		    worldCornerFromDelta(aBoxPan, aBoxTilt, -halfH, halfV),
+		const Vec3 c[4] = {
+		    worldCornerFromDelta(box.pan, box.tilt, -halfH, -halfV),
+		    worldCornerFromDelta(box.pan, box.tilt, halfH, -halfV),
+		    worldCornerFromDelta(box.pan, box.tilt, halfH, halfV),
+		    worldCornerFromDelta(box.pan, box.tilt, -halfH, halfV),
 		};
-		const Mat4 view = mat4FromPanTilt(aViewPan, aViewTilt);
-		const float tanHalfH = std::tan(deg2rad(aViewHfov) * 0.5f);
+
+		/* The roi crop, in the box's own (u, v) frame — the page's
+		   applyRoiToWorldBox: v=1 is the box's *upper* edge, and the
+		   interpolated corner is exact because the four corners lie on
+		   one tangent plane, where bilinear IS the sub-rectangle. */
+		const auto clamp01 = [](float v) {
+			return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+		};
+		const auto lerp3 = [](const Vec3 &a, const Vec3 &b, float t) {
+			return Vec3{a.x + (b.x - a.x) * t,
+				    a.y + (b.y - a.y) * t,
+				    a.z + (b.z - a.z) * t};
+		};
+		const auto at = [&](float u, float v) {
+			return lerp3(lerp3(c[0], c[1], u), lerp3(c[3], c[2], u), v);
+		};
+		const float u0 = clamp01(box.roiLeft);
+		const float u1 = clamp01(box.roiLeft + box.roiWidth);
+		const float v0 = 1.0f - clamp01(box.roiTop + box.roiHeight);
+		const float v1 = 1.0f - clamp01(box.roiTop);
+		const Vec3 corners[4] = {at(u0, v1), at(u1, v1), at(u1, v0),
+					 at(u0, v0)};
+
+		const Mat4 viewMat = mat4FromPanTilt(view.pan, view.tilt);
+		const float tanHalfH = std::tan(deg2rad(view.hfov) * 0.5f);
 		const float tanHalfV = tanHalfH / aspect;
 		Vec3 vv[4];
 		for (int i = 0; i < 4; ++i)
-			vv[i] = transformVec3(view, corners[i].x, corners[i].y,
+			vv[i] = transformVec3(viewMat, corners[i].x, corners[i].y,
 					      corners[i].z);
 
 		const auto project = [&](const Vec3 &v, float &sx, float &sy) {
@@ -1920,12 +1908,12 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 			sx = (ndcX * 0.5f + 0.5f) * (float)fw;
 			sy = (0.5f - ndcY * 0.5f) * (float)fh;
 		};
-		const auto lerp3 = [](const Vec3 &a, const Vec3 &b, float t) {
-			return Vec3{a.x + (b.x - a.x) * t,
-				    a.y + (b.y - a.y) * t,
-				    a.z + (b.z - a.z) * t};
-		};
 
+		/* The page dashes the range frame and draws the lock-angle boundary
+		   solid: the range is the region the operator may own, the lock is a
+		   limit they only read. A dash is 12 px of picture, or two line
+		   widths if the line is thicker than that. */
+		const float dash = thick * 4.0f > 12.0f ? thick * 4.0f : 12.0f;
 		int drawn = 0;
 		for (int i = 0; i < 4; ++i) {
 			Vec3 a = vv[i];
@@ -1946,25 +1934,58 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 			project(b, x1, y1);
 			if (!clipSegment(x0, y0, x1, y1, (float)fw, (float)fh))
 				continue;
-			line(overlayAngleSolid_, x0, y0, x1, y1, thick);
 			++drawn;
+			if (kind == zc::WorldBoxLockAngle) {
+				line(tex, x0, y0, x1, y1, thick);
+				continue;
+			}
+			const float dx = x1 - x0, dy = y1 - y0;
+			const float len = std::sqrt(dx * dx + dy * dy);
+			if (len < 0.75f)
+				continue;
+			/* Walk the edge in dash-length steps. The pattern is
+			   phase-locked to the edge's own start so it stays put
+			   while the head moves. */
+			for (float s = 0.0f; s < len; s += dash * 2.0f) {
+				const float e =
+				    s + dash < len ? s + dash : len;
+				line(tex, x0 + dx * (s / len), y0 + dy * (s / len),
+				     x0 + dx * (e / len), y0 + dy * (e / len),
+				     thick);
+			}
 		}
 
 		/* Self-test aid (opt-in): the poses the frame was computed from and
-		   where its corners landed, so a run can tell "the pose never
-		   arrived" from "the frame is behind the camera". */
+		   how much of it landed, so a run can tell "the pose never arrived"
+		   from "the frame is behind the camera". */
 		const uint64_t now = os_gettime_ns();
 		if (qEnvironmentVariableIsSet("ZC_TEST_ANGLE") &&
-		    now >= overlayAngleNextNs_) {
-			overlayAngleNextNs_ = now + 2000000000ULL;
+		    now >= overlayBoxNextNs_[kind]) {
+			overlayBoxNextNs_[kind] = now + 2000000000ULL;
 			blog(LOG_INFO,
-			     "[obs-zcamera] overlay angle box: box %.2f/%.2f hfov "
-			     "%.2f | view %.2f/%.2f hfov %.2f | %d of 4 edges on "
-			     "%ux%u",
-			     aBoxPan, aBoxTilt, aBoxHfov, aViewPan, aViewTilt,
-			     aViewHfov, drawn, fw, fh);
+			     "[obs-zcamera] overlay %s box: box %.2f/%.2f hfov "
+			     "%.2f roi %.3f,%.3f,%.3f,%.3f | view %.2f/%.2f hfov "
+			     "%.2f | %d of 4 edges on %ux%u",
+			     kind == zc::WorldBoxRange ? "range" : "angle",
+			     box.pan, box.tilt, box.hfov, box.roiLeft,
+			     box.roiTop, box.roiWidth, box.roiHeight, view.pan,
+			     view.tilt, view.hfov, drawn, fw, fh);
 		}
+		return drawn;
+	};
+
+	/* The range frame's own texture, created lazily like the mask's: amber,
+	   so it never reads as a red detection box or the cyan detection-area
+	   rectangle (bug list 17). */
+	if (rangeBox.valid) {
+		if (!trackSolid_) {
+			uint8_t amber[4] = {255, 176, 32, 255};
+			const uint8_t *data = amber;
+			trackSolid_ = gs_texture_create(1, 1, GS_RGBA, 1, &data, 0);
+		}
+		drawWorldBox(zc::WorldBoxRange, trackSolid_, rangeBox);
 	}
+	drawWorldBox(zc::WorldBoxLockAngle, overlayAngleSolid_, angleBox);
 
 	gs_blend_state_pop();
 }

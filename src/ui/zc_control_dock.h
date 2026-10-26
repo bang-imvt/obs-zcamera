@@ -550,6 +550,12 @@ public:
 	   one read at connect time, which is the only way to learn that a camera
 	   was already framing before the dock attached (bug lists 55/179). */
 	std::function<void(bool)> onFramingOwnsPtz;
+	/* Bug 232: whether the camera is actually TRACKING a subject right now.
+	   Distinct from `onFramingOwnsPtz`, which is also true while merely
+	   detecting: the camera refuses a preset recall only while a track is
+	   running (its own page greys the whole preset grid in that state and keeps
+	   it live while detecting or after the subject is lost). */
+	std::function<void(bool)> onFramingTracking;
 	/* The shared interaction link: the detection-area editor arms through it
 	   and the camera's rectangle is pushed back through it. */
 	void setOverlayLink(ZcOverlayLink *link) { link_ = link; }
@@ -574,12 +580,6 @@ public:
 	   write, read-back, rectangle, drag — without a mouse. */
 	void zcTestOperatorFlow();
 	void zcTestOperatorFlowClicks();
-	/* Told after the operator flips the framing box (mode or enable), so the
-	   dock re-reads its rectangle and repaints the overlay frame: the camera's
-	   settings-changed event is for changes made elsewhere and does not fire
-	   for our own write, which left the monitor window without a frame (bug
-	   53). */
-	std::function<void()> onBoxStateChanged;
 	/* Whether the camera is recording right now. The "tracking triggers
 	   recording" row shows it: the camera starts recording on its own, so the
 	   switch alone never told the operator it had done anything (bug 93). */
@@ -753,25 +753,37 @@ private:
 	   rather than one shared state (bug lists 23/24/25/26/27). */
 	bool fixAngleBoxOn_ = false;
 	bool trackingBoxOn_ = false;
-	/* Lock-angle region as a frame on the picture (bug 53). The camera stores
-	   a POSE for it, not a rectangle, so both poses and their horizontal
-	   fields of view are collected here and handed to the source, which does
-	   the projection (it is the only side that knows the picture's aspect).
-	   `angleBoxZoom_` is what `angleBoxHfov_` was read for, so a zoom the box
-	   stores differently is fetched once and not every tick. */
+	/* The camera's two framing frames on the picture (bugs 17/53/243/244): the
+	   tracking-box ("range") region and the lock-angle region. Both are a POSE
+	   plus a field of view plus the roi drawn inside it — never a rectangle in
+	   the picture — so both poses are collected here and handed to the source,
+	   which does the projection (it is the only side that knows the picture's
+	   aspect). `*Zoom_` is the ratio its `*Hfov_` was read for: a box stored at
+	   a different ratio is fetched once, not every tick. */
 	void updateAngleBoxFromSnapshot(const QJsonObject &doc);
-	void pushAngleBox();
-	void fetchAngleBoxHfov(double zoomFactor);
+	void refreshBoxFrames();
+	void pushWorldBoxes();
+	void fetchBoxHfov(int kind, double zoomFactor);
 	void syncAngleBoxPoll();
 	QTimer *angleBoxPoll_ = nullptr;
 	int anglePollTick_ = 0;
 	float angleBoxPan_ = 0.0f, angleBoxTilt_ = 0.0f;
 	float angleBoxZoom_ = 0.0f, angleBoxHfov_ = 0.0f;
+	float angleRoiL_ = 0.0f, angleRoiT_ = 0.0f;
+	float angleRoiW_ = 1.0f, angleRoiH_ = 1.0f;
+	float trackBoxPan_ = 0.0f, trackBoxTilt_ = 0.0f;
+	float trackBoxZoom_ = 0.0f, trackBoxHfov_ = 0.0f;
+	float trackRoiL_ = 0.0f, trackRoiT_ = 0.0f;
+	float trackRoiW_ = 1.0f, trackRoiH_ = 1.0f;
+	/* The head, as of the last push. Both frames hang on it. */
 	float angleViewPan_ = 0.0f, angleViewTilt_ = 0.0f;
 	float angleViewHfov_ = 0.0f;
 	/* Set while a lens?action=hfov reply is in flight, so a slow camera does
-	   not queue one request per poll tick. */
+	   not queue one request per poll tick. One per box: a shared flag let the
+	   second box's query answer for the first, and a query dropped while the
+	   other was in flight left it at a stale width (bug 243). */
 	bool angleHfovPending_ = false;
+	bool trackHfovPending_ = false;
 	/* Lock Zoom as the camera last reported it. Kept here rather than read off
 	   zoomLockSeg_ because the interlock below forces that segment to Off when
 	   the fix-angle box takes the head over, and a gating rule that reads the
@@ -963,6 +975,10 @@ public slots:
 	/* The camera's auto framing owns the PTZ, so trace actions are refused
 	   (code -2); the preset family keeps working (bug list 55). */
 	void setFramingOwned(bool owned);
+	/* Bug 232: the camera is tracking a subject, so it refuses a preset
+	   recall as well — the camera's own page greys the whole preset grid in
+	   that state and keeps it live while merely detecting. */
+	void setFramingTracking(bool tracking);
 
 private:
 	/* One slot: thumbnail + name field, click to select. */
@@ -1029,6 +1045,8 @@ private:
 	bool traceMode_ = false;
 	/* Auto framing currently drives the head: only the trace actions grey. */
 	bool framingOwned_ = false;
+	/* The camera is tracking a subject: the presets grey too (bug 232). */
+	bool framingTracking_ = false;
 	/* `ptz_speed_mode` as the camera last reported it. Latched rather than
 	   read off a widget for the same reason as zoomLockOn_: a gating rule that
 	   reads the control it just wrote latches (bug 74 — the per-preset speed

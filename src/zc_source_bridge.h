@@ -55,6 +55,33 @@ enum class MaskGesture {
 	ResizeRightBottom,
 };
 
+/* One of the camera's two framing frames: the tracking-box ("range") region and
+   the lock-angle ("fix angle") region.
+
+   Both are stored by the camera as the pan/tilt the box was saved at plus the
+   focal ratio then in use — never as a rectangle in the picture (bugs 53/243/
+   244). `roiLeft/Top/Width/Height` only narrows that pose to the sub-rectangle
+   the operator drew inside it, exactly as the page's `applyRoiToWorldBox` does;
+   an un-cropped box is 0,0,1,1. A rectangle in the picture only exists once the
+   pose is looked at from wherever the head is now, so the box pose and the view
+   pose both travel to the source, which projects them at draw time — it is the
+   only side that knows the picture's aspect ratio. */
+struct WorldBoxPose {
+	bool valid = false;      /* draw it at all (switched on, both poses known) */
+	float pan = 0.0f, tilt = 0.0f;
+	float hfov = 0.0f;       /* horizontal field of view at that pose, degrees */
+	float roiLeft = 0.0f, roiTop = 0.0f;
+	float roiWidth = 1.0f, roiHeight = 1.0f;
+};
+
+/* Which frame a setOverlayWorldBox() call is about. They differ only in how they
+   are painted: the page dashes the range (the operator may own it) and draws the
+   lock-angle boundary solid. */
+enum WorldBoxKind {
+	WorldBoxRange = 0,
+	WorldBoxLockAngle = 1,
+};
+
 /* How far from a corner (normalized units) a press still counts as "on that
    corner". Both sides of the bridge use this one number, so the rectangle the
    source draws and the one the dock writes cannot disagree. */
@@ -94,21 +121,11 @@ public:
 				    float right, float bottom) = 0;
 	/* Where the user last clicked, for the crosshair. */
 	virtual void setOverlayMarker(bool on, float nx, float ny) = 0;
-	/* The camera's tracking-box ("range") frame, normalized left/top plus
-	   size. Drawn in every non-program pass while enabled — the region line
-	   the web preview shows (bug list 17). */
-	virtual void setOverlayTrackBox(bool enabled, float left, float top,
-					float width, float height) = 0;
-	/* The lock-angle ("fix angle") region (bug 53). The camera keeps it as the
-	   pan/tilt it was saved at plus the focal ratio then in use, NOT as a
-	   rectangle in the picture: it only becomes a rectangle once it is looked
-	   at from wherever the head is now. So the dock sends the two poses and
-	   their horizontal fields of view, and the source projects them onto the
-	   picture it is drawing into (which is what the camera's own page does
-	   with its WebGL canvas — ptzToWorldBox + viewProjectionFromPtz). */
-	virtual void setOverlayAngleBox(bool enabled, float boxPan, float boxTilt,
-					float boxHfov, float viewPan,
-					float viewTilt, float viewHfov) = 0;
+	/* A framing frame, projected from its saved pose onto today's picture.
+	   `view` is where the head is now (its roi fields are ignored). Two calls,
+	   one per frame, each carrying the same view pose. */
+	virtual void setOverlayWorldBox(int kind, const WorldBoxPose &box,
+					const WorldBoxPose &view) = 0;
 };
 
 /* Register / replace the dock's sink. Pass nullptr to detach. */

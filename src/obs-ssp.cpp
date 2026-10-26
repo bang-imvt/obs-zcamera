@@ -215,10 +215,21 @@ static void on_frontend_event(enum obs_frontend_event event, void *)
 						    if (auto *t =
 							    zc::overlayFindTarget(
 								QString::fromUtf8(
-								    arg)))
-							    t->setOverlayTrackBox(
-								    true, 0.15f, 0.15f,
-								    0.7f, 0.55f);
+								    arg))) {
+							    zc::WorldBoxPose b;
+							    b.valid = true;
+							    b.pan = 0.0f;
+							    b.tilt = 0.0f;
+							    b.hfov = 30.0f;
+							    zc::WorldBoxPose v;
+							    v.valid = true;
+							    v.pan = 0.0f;
+							    v.tilt = 0.0f;
+							    v.hfov = 50.7f;
+							    t->setOverlayWorldBox(
+								    zc::WorldBoxRange,
+								    b, v);
+						    }
 					    });
 					push->start();
 				});

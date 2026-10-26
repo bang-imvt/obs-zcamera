@@ -2383,16 +2383,13 @@ public:
 	/* Put a rectangle on the picture without writing it to the camera, for an
 	   editor that would otherwise open with nothing to grab (bug 29). */
 	void seedMask(float left, float top, float right, float bottom);
-	/* The camera's tracking-box ("range") frame, mirrored into the source so
-	   its overlay draws the region line the web preview shows (bug 17). */
-	void setTrackBox(bool enabled, float left, float top, float width,
-			 float height);
-	/* The camera's lock-angle ("fix angle") region (bug 53): the pose the box
-	   was saved at and the pose the picture is being taken from, both with
-	   their horizontal field of view. The source projects the pair at draw
-	   time, because only it knows the picture's aspect ratio. */
-	void setAngleBox(bool enabled, float boxPan, float boxTilt, float boxHfov,
-			 float viewPan, float viewTilt, float viewHfov);
+	/* A framing frame — the camera's tracking-box ("range") region or its
+	   lock-angle region — projected onto the picture the source is drawing.
+	   Both are a pose plus a field of view plus the roi drawn inside it, never
+	   a rectangle in the picture (bug 244), so the source is handed the box
+	   pose and the view pose together. */
+	void setWorldBox(int kind, const zc::WorldBoxPose &box,
+			 const zc::WorldBoxPose &view);
 	void onOverlayPointer(int phase, int button, float nx, float ny) override;
 
 	/* Opens the source's Interact window. Set by the dock, which owns the
@@ -2442,8 +2439,10 @@ private:
 	   a drag does not touch. */
 	zc::MaskGesture gesture_ = zc::MaskGesture::None;
 
-	bool trackOn_ = false;
-	float tbL_ = 0.0f, tbT_ = 0.0f, tbW_ = 0.0f, tbH_ = 0.0f;
+	/* The last frame pushed for each kind, so re-drawing after a camera switch
+	   does not need the camera to answer again. */
+	zc::WorldBoxPose box_[2];
+	zc::WorldBoxPose view_;
 };
 
 ZcOverlayLink::ZcOverlayLink(QObject *owner) : QObject(owner) {}
@@ -2461,42 +2460,30 @@ void ZcOverlayLink::setClient(ZcCameraClient *client, const QString &host)
 	/* The old camera's source keeps no mode: disarm before switching so a
 	   stale crosshair cannot be left painted on the previous source. */
 	disarm();
-	/* Nor its range frame (bug 17's drawing must follow the camera that
-	   owns it). */
-	if (zc::OverlayTarget *t = zc::overlayFindTarget(host_))
-		t->setOverlayTrackBox(false, 0.0f, 0.0f, 0.0f, 0.0f);
-	trackOn_ = false;
-	/* Nor its lock-angle frame (bug 53). */
-	if (zc::OverlayTarget *t = zc::overlayFindTarget(host_))
-		t->setOverlayAngleBox(false, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-				      0.0f);
+	/* Nor its framing frames (bug 17's drawing must follow the camera that
+	   owns it, bug 53's lock-angle boundary likewise). */
+	if (zc::OverlayTarget *t = zc::overlayFindTarget(host_)) {
+		zc::WorldBoxPose off;
+		t->setOverlayWorldBox(zc::WorldBoxRange, off, off);
+		t->setOverlayWorldBox(zc::WorldBoxLockAngle, off, off);
+	}
+	box_[zc::WorldBoxRange] = zc::WorldBoxPose();
+	box_[zc::WorldBoxLockAngle] = zc::WorldBoxPose();
+	view_ = zc::WorldBoxPose();
 	client_ = client;
 	host_ = host;
 	hasMask_ = false;
 	localWriteNs_ = 0;
 }
 
-void ZcOverlayLink::setTrackBox(bool enabled, float left, float top,
-				float width, float height)
+void ZcOverlayLink::setWorldBox(int kind, const zc::WorldBoxPose &box,
+				const zc::WorldBoxPose &view)
 {
-	trackOn_ = enabled;
-	tbL_ = left;
-	tbT_ = top;
-	tbW_ = width;
-	tbH_ = height;
+	box_[kind] = box;
+	view_ = view;
 	zc::OverlayTarget *t = zc::overlayFindTarget(host_);
 	if (t)
-		t->setOverlayTrackBox(enabled, left, top, width, height);
-}
-
-void ZcOverlayLink::setAngleBox(bool enabled, float boxPan, float boxTilt,
-				float boxHfov, float viewPan, float viewTilt,
-				float viewHfov)
-{
-	zc::OverlayTarget *t = zc::overlayFindTarget(host_);
-	if (t)
-		t->setOverlayAngleBox(enabled, boxPan, boxTilt, boxHfov, viewPan,
-				      viewTilt, viewHfov);
+		t->setOverlayWorldBox(kind, box, view);
 }
 
 void ZcOverlayLink::setPtzSpeed(float speed)
@@ -4106,6 +4093,11 @@ public:
 		slider_ = new QSlider(Qt::Horizontal, this);
 		spin_ = new QSpinBox(this);
 		spin_->setKeyboardTracking(false);
+		/* Bug 226: a double click QSpinBox ignores — which is exactly what a
+		   second click on a step arrow pressed at the end of the range is —
+		   keeps travelling up the parent chain, and the dock reads a double
+		   click that reaches it as "maximize". Stop it at the spin box. */
+		spin_->setAttribute(Qt::WA_NoMousePropagation);
 		/* Width follows the widest value+suffix so a unit like " 秒" is not
 		   clipped (bug list "lost-timeout unit truncated"). */
 		spin_->setMinimumWidth(60);
@@ -4478,6 +4470,34 @@ const QString kFramingPanelStyle =
    Nothing here is drawn when the camera has no face database: the first
    /query that comes back with code < 0 turns the dialog into a one-line
    "not supported" notice instead of a dead set of controls. */
+/* Bug 223: whether a face entry is switched off, carried as item data so the
+   delegate below can paint it in both states. */
+constexpr int kFaceInactiveRole = Qt::UserRole + 11;
+
+/* An inactive entry's name has to read grey even while its row is SELECTED.
+   `QListWidgetItem::setForeground` only reaches Qt::Text, and a selected row
+   is painted with Qt::HighlightedText — so the row the operator was looking
+   at (the one they had just applied a change to, the dialog keeps it
+   selected across the rebuild) kept the bright colour, and "still not
+   greyed" came back twice. This delegate sets both brushes. */
+class ZcFaceItemDelegate : public QStyledItemDelegate {
+public:
+	using QStyledItemDelegate::QStyledItemDelegate;
+
+	void paint(QPainter *p, const QStyleOptionViewItem &option,
+		   const QModelIndex &index) const override
+	{
+		QStyleOptionViewItem opt = option;
+		initStyleOption(&opt, index);
+		if (index.data(kFaceInactiveRole).toBool()) {
+			const QColor grey(QStringLiteral("#6b7a80"));
+			opt.palette.setBrush(QPalette::Text, grey);
+			opt.palette.setBrush(QPalette::HighlightedText, grey);
+		}
+		QStyledItemDelegate::paint(p, opt, index);
+	}
+};
+
 class ZcFaceRegDialog : public QDialog {
 public:
 	explicit ZcFaceRegDialog(ZcCameraClient *client, QWidget *parent)
@@ -4511,6 +4531,9 @@ public:
 		list_ = new QListWidget(this);
 		list_->setMinimumHeight(180);
 		list_->setIconSize(QSize(40, 40));
+		/* Bug 223: the inactive-entry greying needs a delegate — see
+		   ZcFaceItemDelegate. */
+		list_->setItemDelegate(new ZcFaceItemDelegate(list_));
 		mid->addWidget(list_, 1);
 		lay->addLayout(mid, 1);
 
@@ -4708,7 +4731,11 @@ private:
 				/* Bug 223: an entry that is switched off is drawn grey,
 				   the way the camera's page does it, so "in the library
 				   but not tracked" is readable without selecting the row
-				   and reading the checkbox. */
+				   and reading the checkbox. The role feeds
+				   ZcFaceItemDelegate, which is what makes it stick on a
+				   selected row as well. */
+				item->setData(kFaceInactiveRole,
+					      !actives_.last());
 				if (!actives_.last())
 					item->setForeground(
 					    QColor(QStringLiteral("#6b7a80")));
@@ -4722,7 +4749,7 @@ private:
 						 : ztr("ZCameraPlugin."
 						       "Framing.FaceRegOff")));
 				loadThumb(item, thm, generation_,
-					  priorities_.last());
+					  priorities_.last(), actives_.last());
 			}
 			/* Keep the operator's selection across the rebuild. Live
 			   apply (bug 190) refreshes after every field change, and
@@ -4755,8 +4782,23 @@ private:
 					.arg(uids_.size())
 					.arg(max_)
 					.arg(maxActive_));
-			/* Bug 225: back to the row the operator was looking at. */
-			list_->verticalScrollBar()->setValue(keepScroll);
+			/* Bug 225: back to the row the operator was looking at.
+			   Deferred, because a QListWidget that was just refilled has
+			   not laid its rows out yet: its scroll range is still the old
+			   (or zero) one, so writing the value here was clamped and the
+			   list stayed at the top — which is what came back from QA
+			   after the first attempt. `setCurrentRow` above also scrolls
+			   the current item into view, and that has to be undone after
+			   the layout runs, not before. */
+			if (keepScroll > 0) {
+				QPointer<QListWidget> lw(list_);
+				QTimer::singleShot(0, this,
+						   [lw, keepScroll]() {
+							   if (lw && lw->verticalScrollBar())
+								   lw->verticalScrollBar()
+								       ->setValue(keepScroll);
+						   });
+			}
 			/* Bug 190: a new entry gets the priority the camera says is
 			   next, not a repeated 1. Priority decides between two
 			   faces in frame, so two entries sharing one leaves that
@@ -4812,13 +4854,13 @@ private:
 
 	/* Icon for one list row. Same generation rule as showPicture(). */
 	void loadThumb(QListWidgetItem *item, const QString &path, int gen,
-		       int priority)
+		       int priority, bool active)
 	{
 		if (!client_ || path.isEmpty())
 			return;
 		QPointer<QObject> alive(alive_);
 		client_->framingFaceThumb(
-		    path, [this, alive, item, gen, priority](
+		    path, [this, alive, item, gen, priority, active](
 			      const QByteArray &bytes) {
 			    if (!alive || gen != generation_ || !item)
 				    return;
@@ -4833,7 +4875,12 @@ private:
 			       the library to read it. It is drawn into the
 			       thumbnail's top-left corner the way the camera's own
 			       page badges a face, so the order is visible at a
-			       glance. */
+			       glance.
+
+			       Bug 223: an entry that is switched off greys its badge
+			       with the rest of the row — QA reads the badge as part
+			       of the entry's state, and a bright number on an
+			       inactive face said the opposite. */
 			    if (priority > 0 && !thumb.isNull()) {
 				    QPainter p(&thumb);
 				    p.setRenderHint(QPainter::Antialiasing,
@@ -4842,13 +4889,16 @@ private:
 					qBound(10, thumb.width() / 3, 18);
 				    const QRect r(0, 0, box, box);
 				    p.setPen(Qt::NoPen);
-				    p.setBrush(QColor(0, 0, 0, 170));
+				    p.setBrush(QColor(0, 0, 0,
+						      active ? 170 : 120));
 				    p.drawRoundedRect(r, 3, 3);
 				    QFont f = p.font();
 				    f.setPixelSize(qMax(9, box - 5));
 				    f.setBold(true);
 				    p.setFont(f);
-				    p.setPen(QColor(QStringLiteral("#ffd166")));
+				    p.setPen(active
+						 ? QColor(QStringLiteral("#ffd166"))
+						 : QColor(QStringLiteral("#6b7a80")));
 				    p.drawText(r, Qt::AlignCenter,
 					       QString::number(priority));
 			    }
@@ -5907,15 +5957,37 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 		&ZcFramingPanel::syncMonitorButton);
 	monitorPoll_->start();
 
-	/* Lock-angle frame (bug 53): the head's pose and its field of view, sampled
-	   while the region is switched on and this page is on screen. Both are
-	   small queries; the box's own pose arrives with the framing snapshot. */
+	/* The two framing frames (bugs 17/53/243/244). The head's pose arrives by
+	   push (`ptzfChange`, wired below), exactly like the camera's own page;
+	   this timer only carries what is not pushed — the current field of view,
+	   and a re-read of each box's stored pose. Those change only when
+	   somebody zooms or re-saves a box (from here or from the page), so they
+	   are cheap and paced well below the message rate. */
 	angleBoxPoll_ = new QTimer(this);
-	angleBoxPoll_->setInterval(700);
+	angleBoxPoll_->setInterval(1000);
 	connect(angleBoxPoll_, &QTimer::timeout, this, [this]() {
-		if (!client_ || !fixAngleBoxOn_)
+		if (!client_ || (!fixAngleBoxOn_ && !trackingBoxOn_))
 			return;
 		++anglePollTick_;
+		client_->lensHfov(0.0, [this](const QJsonObject &o) {
+			if (!client_)
+				return;
+			const QJsonValue h = o.value(QLatin1String("hfov"));
+			if (!h.isDouble() || h.toDouble() <= 0.0)
+				return;
+			/* Written only on a change: this is the same value the page
+			   calls the "current live-view HFOV — optical zoom + EIS, do
+			   not derive from zoom". */
+			if (qFuzzyCompare(h.toDouble() + 1.0,
+					  (double)angleViewHfov_ + 1.0))
+				return;
+			angleViewHfov_ = (float)h.toDouble();
+			pushWorldBoxes();
+		});
+		/* A pose read as a backstop for a lost push (the socket can drop
+		   without the camera's head stopping), and a re-read of the boxes
+		   themselves: they change only when somebody re-saves one, and
+		   neither arrives on a timer. */
 		client_->ptzQuery(true, [this](const QJsonObject &o) {
 			if (!client_)
 				return;
@@ -5925,21 +5997,9 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 				angleViewPan_ = (float)pan.toDouble();
 			if (tilt.isDouble())
 				angleViewTilt_ = (float)tilt.toDouble();
-			pushAngleBox();
+			pushWorldBoxes();
 		});
-		client_->lensHfov(0.0, [this](const QJsonObject &o) {
-			if (!client_)
-				return;
-			const QJsonValue h = o.value(QLatin1String("hfov"));
-			if (!h.isDouble() || h.toDouble() <= 0.0)
-				return;
-			angleViewHfov_ = (float)h.toDouble();
-			pushAngleBox();
-		});
-		/* Every fifth tick the box's own pose is re-read as well: it changes
-		   only when somebody re-saves the box (from here or from the camera's
-		   page), and the framing snapshot does not arrive on a timer. */
-		if (anglePollTick_ % 5 == 0)
+		if (anglePollTick_ % 5 == 0) {
 			client_->framingFixAngleBoxQuery([this](const QJsonObject &o) {
 				if (!client_)
 					return;
@@ -5947,6 +6007,14 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 				wrap.insert(QLatin1String("fix_angle_box"), o);
 				updateAngleBoxFromSnapshot(wrap);
 			});
+			client_->framingTrackingBoxQuery([this](const QJsonObject &o) {
+				if (!client_)
+					return;
+				QJsonObject wrap;
+				wrap.insert(QLatin1String("tracking_box"), o);
+				updateAngleBoxFromSnapshot(wrap);
+			});
+		}
 	});
 
 	/* ---- Composition presets: the tile row at the foot of the page. ----
@@ -6442,14 +6510,13 @@ ZcFramingPanel::ZcFramingPanel(QWidget *parent) : QWidget(parent)
 			/* Bug list #49: the box state drives the Lock Zoom /
 			   Lock Tilt interlock, which lives in updateGating(). */
 			updateGating();
-			/* Bug 53: the monitor window's frame comes from the camera's
-			   box rectangle, which is re-read here because our own write
-			   does not come back as a settings-changed event. */
-			if (onBoxStateChanged)
-				onBoxStateChanged();
-			/* The lock-angle frame starts (or stops) being sampled with
-			   the switch itself, so it is on the picture at the next
-			   pass instead of after the read-back. */
+			/* Bugs 53/243/244: the frame on the monitor window comes
+			   from the camera's stored pose, which is re-read here because
+			   our own write does not come back as a settings-changed
+			   event; and sampling starts (or stops) with the switch
+			   itself, so the frame is on the picture at the next pass
+			   instead of after the poll's next re-read. */
+			refreshBoxFrames();
 			syncAngleBoxPoll();
 		};
 
@@ -6747,19 +6814,56 @@ void ZcFramingPanel::setClient(ZcCameraClient *client)
 		}
 		updateStatusLabel();
 		updateGating();
-		/* No camera, so no lock-angle region: take the frame off the previous
-		   camera's picture and stop sampling (bug 53). */
+		/* No camera, so no framing frame: take both off the previous camera's
+		   picture and stop sampling (bugs 53/244). */
 		fixAngleBoxOn_ = false;
 		angleBoxZoom_ = 0.0f;
 		angleBoxHfov_ = 0.0f;
 		angleViewHfov_ = 0.0f;
+		trackBoxZoom_ = 0.0f;
+		trackBoxHfov_ = 0.0f;
 		syncAngleBoxPoll();
 		return;
 	}
-	/* A camera that already has its lock-angle region switched on: sample its
-	   pose from the start rather than waiting for the first snapshot. */
+	/* The head's pose arrives by push, exactly as on the camera's own page
+	   (its `ptzfChange` handler calls RenderPtzComposition() with the new
+	   pose). A frame projected from a polled pose trails the picture while the
+	   head moves — which is the "does not follow the camera" half of bug
+	   244, and half of what made bug 243's frame sit in the wrong place. */
+	connect(client, &ZcCameraClient::ptzPositionChanged, this,
+		[this](double pan, double tilt, double) {
+			angleViewPan_ = (float)pan;
+			angleViewTilt_ = (float)tilt;
+			pushWorldBoxes();
+		},
+		Qt::UniqueConnection);
+	/* A camera that already has its framing frames switched on: sample their
+	   poses from the start rather than waiting for the first snapshot. */
 	syncAngleBoxPoll();
 	refresh();
+}
+
+	/* Both boxes' stored poses, read now rather than at the poll's next
+	   re-read: a switch the operator just flipped should put the frame on the
+	   picture immediately, and from the camera's own pose (bugs 53/243/244). */
+void ZcFramingPanel::refreshBoxFrames()
+{
+	if (!client_)
+		return;
+	client_->framingFixAngleBoxQuery([this](const QJsonObject &o) {
+		if (!client_)
+			return;
+		QJsonObject wrap;
+		wrap.insert(QLatin1String("fix_angle_box"), o);
+		updateAngleBoxFromSnapshot(wrap);
+	});
+	client_->framingTrackingBoxQuery([this](const QJsonObject &o) {
+		if (!client_)
+			return;
+		QJsonObject wrap;
+		wrap.insert(QLatin1String("tracking_box"), o);
+		updateAngleBoxFromSnapshot(wrap);
+	});
 }
 
 void ZcFramingPanel::refresh()
@@ -6778,6 +6882,12 @@ void ZcFramingPanel::refresh()
 		statusIndex_ = qBound(0, doc.value("status").toInt(),
 				      kFramingStatusCount - 1);
 		updateStatusLabel();
+		/* Bug 232: the status word is what decides whether the presets and
+		   the trace face are usable, and this endpoint is the only place the
+		   transition into "Tracking" arrives when the websocket stays quiet.
+		   Repainting the word alone left the gates on their previous state
+		   until some unrelated snapshot happened to land. */
+		updateGating();
 	});
 	refreshFovOffsets();
 	/* Once per camera is enough: the camera is the only other writer, and the
@@ -7208,87 +7318,156 @@ void ZcFramingPanel::refreshMaskRect()
 }
 
 /* ------------------------------------------------------------------ */
-/* Lock-angle frame (bug 53)                                           */
+/* The camera's two framing frames: range (bug 17) and lock angle (53)  */
 /* ------------------------------------------------------------------ */
 
-/* The camera stores the lock-angle region as a POSE — the pan/tilt it was
-   saved at plus the focal ratio then in use — and its own page draws it as a
-   rectangle by projecting that pose from wherever the head is now. Nothing in
-   the plugin did that, so switching the lock on changed the head's behaviour
-   and put nothing on the picture (bug 53: "开启锁定角度后，还是没有框线").
+/* Both frames are one thing, which is why bugs 243 and 244 turned out to be
+   one defect. The camera stores each of them as a POSE — the pan/tilt the box
+   was saved at plus the focal ratio then in use — plus, for the range box, the
+   roi the operator drew inside it. Neither is a rectangle in the picture, and
+   its own page draws them by projecting the pose from wherever the head is now
+   (ptzToWorldBox + viewProjectionFromPtz over its WebGL canvas).
 
-   Reading the pose is free: all_status carries it. The two fields of view are
-   not in there (`fix_angle_box` answers pan/tilt/zoom_factor only), so they
-   come from /ctrl/lens?action=hfov — the same request the page makes. */
+   What the plugin used to do was hand the picture the roi's own numbers as if
+   they were picture coordinates (bug 244: a frame pinned to the picture that
+   never moved while the head did) and skip the roi entirely for the lock-angle
+   box (bug 243: the same pose drawn too large). So the pose, the roi AND the
+   view pose all travel to the source, which projects them at draw time — it is
+   the only side that knows the picture's aspect ratio.
+
+   Reading the poses is free: all_status carries both boxes. The fields of view
+   are not in there (each box answers pan/tilt/zoom_factor, plus top/left/
+   width/height for the range), so they come from /ctrl/lens?action=hfov — the
+   same request the page makes, once per box ratio, not once per tick. */
 void ZcFramingPanel::updateAngleBoxFromSnapshot(const QJsonObject &doc)
 {
-	const QJsonValue box = doc.value(QLatin1String("fix_angle_box"));
-	if (!box.isObject())
-		return;
-	const QJsonObject o = box.toObject();
-	const QJsonValue pan = o.value(QLatin1String("pan"));
-	const QJsonValue tilt = o.value(QLatin1String("tilt"));
-	if (pan.isDouble())
-		angleBoxPan_ = (float)pan.toDouble();
-	if (tilt.isDouble())
-		angleBoxTilt_ = (float)tilt.toDouble();
-	const double zoom = o.value(QLatin1String("zoom_factor")).toDouble(1.0);
-	/* Re-read the box's own field of view only when the ratio it was saved at
-	   has changed: it is a lens query, and the answer cannot change while the
-	   ratio does not. */
-	if (!qFuzzyCompare(zoom + 1.0, angleBoxZoom_ + 1.0)) {
-		angleBoxZoom_ = (float)zoom;
-		fetchAngleBoxHfov(zoom);
+	const auto num = [](const QJsonObject &o, const char *key, float fallback) {
+		const QJsonValue v = o.value(QLatin1String(key));
+		return v.isDouble() ? (float)v.toDouble() : fallback;
+	};
+
+	if (doc.value(QLatin1String("fix_angle_box")).isObject()) {
+		const QJsonObject o =
+		    doc.value(QLatin1String("fix_angle_box")).toObject();
+		angleBoxPan_ = num(o, "pan", angleBoxPan_);
+		angleBoxTilt_ = num(o, "tilt", angleBoxTilt_);
+		/* The lock-angle region can carry an roi too — the page reads the
+		   same four fields for it — and ignoring them is what drew it too
+		   large (bug 243). */
+		angleRoiL_ = num(o, "left", 0.0f);
+		angleRoiT_ = num(o, "top", 0.0f);
+		angleRoiW_ = num(o, "width", 1.0f);
+		angleRoiH_ = num(o, "height", 1.0f);
+		/* Re-read the box's own field of view only when the ratio it was
+		   saved at has changed: it is a lens query, and the answer cannot
+		   change while the ratio does not. */
+		const double zoom = o.value(QLatin1String("zoom_factor")).toDouble(1.0);
+		if (!qFuzzyCompare(zoom + 1.0, angleBoxZoom_ + 1.0)) {
+			angleBoxZoom_ = (float)zoom;
+			fetchBoxHfov(zc::WorldBoxLockAngle, zoom);
+		}
 	}
-	pushAngleBox();
+
+	if (doc.value(QLatin1String("tracking_box")).isObject()) {
+		const QJsonObject o =
+		    doc.value(QLatin1String("tracking_box")).toObject();
+		trackBoxPan_ = num(o, "pan", trackBoxPan_);
+		trackBoxTilt_ = num(o, "tilt", trackBoxTilt_);
+		trackRoiL_ = num(o, "left", 0.0f);
+		trackRoiT_ = num(o, "top", 0.0f);
+		trackRoiW_ = num(o, "width", 1.0f);
+		trackRoiH_ = num(o, "height", 1.0f);
+		const double zoom = o.value(QLatin1String("zoom_factor")).toDouble(1.0);
+		if (!qFuzzyCompare(zoom + 1.0, trackBoxZoom_ + 1.0)) {
+			trackBoxZoom_ = (float)zoom;
+			fetchBoxHfov(zc::WorldBoxRange, zoom);
+		}
+	}
+
+	pushWorldBoxes();
 }
 
-void ZcFramingPanel::fetchAngleBoxHfov(double zoomFactor)
+/* One lens query per box, per ratio. `pending` is per box: a shared flag made
+   the second box's query answer for the first (and a query dropped while the
+   first was in flight left the second box at a stale width, which is the other
+   half of bug 243's "the frame is the wrong size"). */
+void ZcFramingPanel::fetchBoxHfov(int kind, double zoomFactor)
 {
-	if (!client_ || angleHfovPending_)
+	if (!client_)
 		return;
-	angleHfovPending_ = true;
-	client_->lensHfov(zoomFactor, [this](const QJsonObject &doc) {
-		angleHfovPending_ = false;
+	const bool range = kind == zc::WorldBoxRange;
+	bool &pending = range ? trackHfovPending_ : angleHfovPending_;
+	if (pending)
+		return;
+	pending = true;
+	client_->lensHfov(zoomFactor, [this, kind](const QJsonObject &doc) {
+		const bool range = kind == zc::WorldBoxRange;
+		(range ? trackHfovPending_ : angleHfovPending_) = false;
 		if (!client_)
 			return;
 		const QJsonValue h = doc.value(QLatin1String("hfov"));
 		if (!h.isDouble() || h.toDouble() <= 0.0)
 			return;
-		angleBoxHfov_ = (float)h.toDouble();
-		pushAngleBox();
+		(range ? trackBoxHfov_ : angleBoxHfov_) = (float)h.toDouble();
+		pushWorldBoxes();
 	});
 }
 
-void ZcFramingPanel::pushAngleBox()
+/* Both frames, one view pose: they hang on the same head. */
+void ZcFramingPanel::pushWorldBoxes()
 {
 	if (!link_)
 		return;
-	/* Only a >=1.0.5 camera has a lock-angle box at all, and only while it is
-	   switched on does the region mean anything. Everything else takes the
-	   frame off the picture rather than leaving a stale one behind. */
-	const bool on = fw15_ && fixAngleBoxOn_ && angleBoxHfov_ > 0.1f &&
-			angleViewHfov_ > 0.1f;
-	link_->setAngleBox(on, angleBoxPan_, angleBoxTilt_, angleBoxHfov_,
-			   angleViewPan_, angleViewTilt_, angleViewHfov_);
+
+	zc::WorldBoxPose view;
+	view.valid = angleViewHfov_ > 0.1f;
+	view.pan = angleViewPan_;
+	view.tilt = angleViewTilt_;
+	view.hfov = angleViewHfov_;
+
+	zc::WorldBoxPose range;
+	range.valid = fw15_ && trackingBoxOn_ && trackBoxHfov_ > 0.1f &&
+		      view.valid;
+	range.pan = trackBoxPan_;
+	range.tilt = trackBoxTilt_;
+	range.hfov = trackBoxHfov_;
+	range.roiLeft = trackRoiL_;
+	range.roiTop = trackRoiT_;
+	range.roiWidth = trackRoiW_;
+	range.roiHeight = trackRoiH_;
+
+	zc::WorldBoxPose angle;
+	angle.valid = fw15_ && fixAngleBoxOn_ && angleBoxHfov_ > 0.1f &&
+		      view.valid;
+	angle.pan = angleBoxPan_;
+	angle.tilt = angleBoxTilt_;
+	angle.hfov = angleBoxHfov_;
+	angle.roiLeft = angleRoiL_;
+	angle.roiTop = angleRoiT_;
+	angle.roiWidth = angleRoiW_;
+	angle.roiHeight = angleRoiH_;
+
+	link_->setWorldBox(zc::WorldBoxRange, range, view);
+	link_->setWorldBox(zc::WorldBoxLockAngle, angle, view);
 }
 
 void ZcFramingPanel::syncAngleBoxPoll()
 {
 	if (!angleBoxPoll_)
 		return;
-	/* Not gated on this page being the current tab: the frame is drawn into
+	/* Not gated on this page being the current tab: the frames are drawn into
 	   the monitor window, which the operator watches while the dock shows some
 	   other page. `window()` is the dock itself, so closing it stops the
-	   sampling. */
-	const bool want = client_ && fw15_ && fixAngleBoxOn_ && window() &&
-			  window()->isVisible();
+	   sampling. Both frames are sampled by the one timer because both need the
+	   same view pose. */
+	const bool want = client_ && fw15_ && (fixAngleBoxOn_ || trackingBoxOn_) &&
+			  window() && window()->isVisible();
 	if (want && !angleBoxPoll_->isActive())
 		angleBoxPoll_->start();
 	else if (!want && angleBoxPoll_->isActive())
 		angleBoxPoll_->stop();
 	if (!want)
-		pushAngleBox();
+		pushWorldBoxes();
 }
 
 /* The two poses that go into the projection move independently: the head
@@ -7893,9 +8072,17 @@ void ZcFramingPanel::updateGating()
 
 	/* Bug list 18: once Start has the camera tracking, the framing-box mode
 	   choices (fix angle / range) grey — the camera refuses a mode switch
-	   mid-track; Stop brings them back. */
+	   mid-track; Stop brings them back.
+
+	   Bug 242: they are NOT part of the framing engine's block. The two boxes
+	   are camera state (`fix_angle_box` / `tracking_box`), settable whether or
+	   not auto framing is running, and the page keeps them live with the
+	   framing switch off; gating them on detection greyed the whole group on
+	   every camera whose auto framing was disabled (and again after importing
+	   a framing profile, which turns the switch off — bug 230). Only an
+	   actual track still locks the mode. */
 	if (boxModeSeg_)
-		boxModeSeg_->setEnabled(liveBase && !traceOn_);
+		boxModeSeg_->setEnabled(haveSnapshot_ && !traceOn_);
 
 	/* Bug 34 used to add a second condition here: with "Track Active Face" on
 	   the box's own status switch was greyed as well, on the reading that the
@@ -7904,9 +8091,12 @@ void ZcFramingPanel::updateGating()
 	   `track_active_face`, QA could not switch the box at all on a P2 running
 	   1.0.6 (which reports track_active_face:true by default), and importing a
 	   framing profile — which turns the flag on — greyed the status switch for
-	   good (bugs 228/230). Only an actual track greys it. */
+	   good (bugs 228/230). Only an actual track greys it.
+
+	   Bug 242: and it does not follow detection either — the box is camera
+	   state, not a framing-engine control. */
 	if (boxEnableSeg_)
-		boxEnableSeg_->setEnabled(liveBase && !traceOn_);
+		boxEnableSeg_->setEnabled(haveSnapshot_ && !traceOn_);
 
 	/* Bug list 13: Tilt Lock on — the pad's up/down arrows grey, left/right
 	   keeps working. */
@@ -8040,6 +8230,10 @@ void ZcFramingPanel::updateGating()
 	if (onFramingOwnsPtz)
 		onFramingOwnsPtz(detectOn_ ||
 				 (statusIndex_ >= 1 && statusIndex_ <= 3));
+	/* Bug 232: a real track is the narrower state — only status 2 (Tracking)
+	   refuses a preset recall on the camera's own page. */
+	if (onFramingTracking)
+		onFramingTracking(detectOn_ && statusIndex_ == 2);
 }
 
 /* A projector window on this camera's source.
@@ -8963,6 +9157,10 @@ void ZcPresetPanel::onSlotClicked(int index)
 	   moving the selection to another slot would target a different take. */
 	if (traceMode_ && !traceActions(traceStateFromInt(traceState_)).navigate)
 		return;
+	/* Bug 232: nothing can be recalled while a track runs, so selecting
+	   another slot would only produce a refused click. */
+	if (!traceMode_ && framingTracking_)
+		return;
 	/* Click toggles: clicking the selected slot again clears the selection,
 	   and no action is available while nothing is selected (spec §3). */
 	selected_ = (selected_ == index) ? -1 : index;
@@ -8997,23 +9195,45 @@ void ZcPresetPanel::setFramingOwned(bool owned)
 	updateActions();
 }
 
+void ZcPresetPanel::setFramingTracking(bool tracking)
+{
+	if (framingTracking_ == tracking)
+		return;
+	framingTracking_ = tracking;
+	/* The cards grey as well, not just the buttons: the camera's page dims
+	   its whole preset grid while a track runs, and dimming only the buttons
+	   left the thumbnails looking selectable (bug 232). The two family tabs
+	   stay live, so the operator can still read the trace face's own
+	   explanation instead of being stuck on a dead page. */
+	for (Slot &s : slots_) {
+		if (s.frame)
+			s.frame->setEnabled(!tracking);
+	}
+	updateActions();
+	updateSpeedControls();
+}
+
 void ZcPresetPanel::updateActions()
 {
 	const bool has = selected_ >= 0;
 	const bool named = selectedIsNamed();
 
 	if (!traceMode_) {
+		/* Bug 232: a running track refuses a preset recall on the camera, so
+		   the whole preset face greys while it lasts. Detecting and
+		   target-lost leave it live, exactly as the camera's page does. */
+		const bool live = !framingTracking_;
 		primaryBtn_->setText(ztr("ZCameraPlugin.Dock.Recall"));
 		/* Recall / Delete / Rename act on a preset that already exists, so a
 		   selected-but-empty slot must grey them; "Add" writes a new preset and
 		   stays available (the camera's web UI toggles Add/Replace similarly). */
-		primaryBtn_->setEnabled(named);
+		primaryBtn_->setEnabled(named && live);
 		/* "Add" writes a new preset, "Replace" overwrites a named one — the
 		   same label toggle the camera's web UI uses. */
 		secondaryBtn_->setText(named ? ztr("ZCameraPlugin.Dock.Replace") : ztr("ZCameraPlugin.Dock.Add"));
-		secondaryBtn_->setEnabled(has);
-		deleteBtn_->setEnabled(named);
-		renameBtn_->setEnabled(named);
+		secondaryBtn_->setEnabled(has && live);
+		deleteBtn_->setEnabled(named && live);
+		renameBtn_->setEnabled(named && live);
 		/* With the PTZ preset speed mode "Common" the camera recalls every
 		   preset at one shared speed, so a per-preset unit/speed is refused; the
 		   camera's web UI greys its "Unit"/"Speed" entries in exactly this case.
@@ -9022,11 +9242,21 @@ void ZcPresetPanel::updateActions()
 		   re-selecting a preset cannot light the row up again (bug 74). */
 		const bool perPresetSpeed =
 		    !client_ || !speedModeKnown_ || !speedModeCommon_;
-		unitCombo_->setEnabled(named && perPresetSpeed);
+		unitCombo_->setEnabled(named && perPresetSpeed && live);
 		speedCombo_->setEnabled(named && perPresetSpeed &&
-					speedCombo_->count() > 0);
+					speedCombo_->count() > 0 && live);
 		for (QPushButton *btn : pageButtons_)
-			btn->setEnabled(true);
+			btn->setEnabled(live);
+		const QString trackingHint =
+		    ztr("ZCameraPlugin.Dock.PresetLockedByTracking");
+		if (framingTracking_) {
+			/* Only when the line is free: a "busy" or "rejected" message
+			   from the camera explains more than this does. */
+			if (hintLabel_->text().isEmpty())
+				hintLabel_->setText(trackingHint);
+		} else if (hintLabel_->text() == trackingHint) {
+			hintLabel_->clear();
+		}
 		return;
 	}
 
@@ -9521,6 +9751,17 @@ bool ZcControlDock::nativeEvent(const QByteArray &eventType, void *message,
 bool ZcControlDock::eventFilter(QObject *watched, QEvent *event)
 {
 	if (event->type() == QEvent::MouseButtonDblClick && watched == this) {
+		/* Bug 226: a double click that a CHILD control ignored (a spin box's
+		   step arrows pressed at the end of their range, a label, a slider's
+		   groove) bubbles up the widget tree and arrives here, where it used
+		   to be read as a click on the title strip — the panel maximized
+		   itself over OBS. Only a click that landed on the dock's own surface
+		   is a title-strip click; anything over a child is the child's
+		   business. */
+		auto *me = static_cast<QMouseEvent *>(event);
+		if (me &&
+		    childAt(mapFromGlobal(me->globalPosition().toPoint())))
+			return QDockWidget::eventFilter(watched, event);
 		toggleMaximized();
 		return true;
 	}
@@ -10300,34 +10541,12 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 			if (rail_)
 				rail_->setHostOffline(currentHost_, !live);
 		});
-	/* Bug 17: read the camera's tracking-box ("range") ROI and mirror it
-	   into the matching source's overlay, so the monitor window draws the
-	   region frame the web preview shows. Re-run whenever the framing
-	   configuration changes. */
-	const auto pushTrackBox = [this]() {
-		if (!client_)
-			return;
-		client_->framingTrackingBoxQuery([this](const QJsonObject &o) {
-			if (!client_ || !overlay_)
-				return;
-			const QJsonValue en = o.value("enable");
-			const bool on = en.type() == QJsonValue::Double
-						? en.toInt() == 1
-						: en.toBool();
-			overlay_->setTrackBox(on,
-					      (float)o.value("left").toDouble(),
-					      (float)o.value("top").toDouble(),
-					      (float)o.value("width").toDouble(),
-					      (float)o.value("height")
-						  .toDouble());
-		});
-	};
-
-	/* The operator's own box switch does not come back as a settings-changed
-	   event (that one is for changes made elsewhere), so the frame the monitor
-	   window draws would only appear after some other write (bug 53). */
-	if (framing_)
-		framing_->onBoxStateChanged = pushTrackBox;
+	/* The two framing frames are the framing panel's: it owns the camera
+	   queries that read their poses and the timer that keeps them attached to
+	   the head (bugs 17/53/243/244). Nothing is mirrored from here — the old
+	   push in this spot fed the range frame the roi's numbers as if they were
+	   picture coordinates, which is what bug 244 reported as "the frame never
+	   moves". */
 
 	/* /info arrives asynchronously: the tab appears (or disappears) and the
 	   preset list loads once the model is known. Bug 194: the reply can also
@@ -10340,7 +10559,7 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 	   firmware's Lock Zoom / Sensitivity / Acceleration rows stayed hidden.
 	   Hence the same work is done once here, after connect() returns, as well
 	   as on every later /info. */
-	const auto applyCameraInfo = [this, pushTrackBox]() {
+	const auto applyCameraInfo = [this]() {
 		updatePtzTab();
 		if (framing_)
 			framing_->setFirmwareNew(
@@ -10361,7 +10580,6 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 		}
 		if (client_ && client_->cameraSupportsAutoFraming())
 			framing_->refresh();
-		pushTrackBox();
 	};
 	connect(client_, &ZcCameraClient::cameraInfoChanged, this,
 		applyCameraInfo);
@@ -10380,11 +10598,12 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 				framing_->applyStatus(status);
 		});
 	connect(client_, &ZcCameraClient::framingSettingsChanged, this,
-		[this, pushTrackBox]() {
+		[this]() {
+			/* A settings change can move a box or its roi (bug 17), so the
+			   panel re-reads the whole snapshot — which carries both box
+			   objects — rather than only the switches. */
 			if (framing_)
 				framing_->refresh();
-			/* The box ROI may be what changed (bug 17). */
-			pushTrackBox();
 		});
 	/* Framing ownership of the head: the panel reports it, because the panel is
 	   what every snapshot lands in — the websocket event, the re-read after a
@@ -10396,6 +10615,14 @@ bool ZcControlDock::openCameraNow(const QString &host, const ZcCredentials &cred
 		framing_->onFramingOwnsPtz = [this](bool owned) {
 			if (presets_)
 				presets_->setFramingOwned(owned);
+		};
+	/* Bug 232: a running track greys the preset family too, which is a
+	   narrower state than "framing owns the head" — merely detecting keeps the
+	   presets live. */
+	if (framing_)
+		framing_->onFramingTracking = [this](bool tracking) {
+			if (presets_)
+				presets_->setFramingTracking(tracking);
 		};
 	/* The WS event only reports framing CHANGES. If the camera was already
 	   framing when we connected, the transport must be greyed now — waiting
