@@ -2854,6 +2854,16 @@ ZcPtzPad::ZcPtzPad(QWidget *parent) : QWidget(parent)
 	focusRow->addWidget(focusFarLabel_);
 	focusRow->addWidget(focusValue_);
 	layout->addLayout(focusRow);
+	/* Bug 249: the camera's own page keeps its focus bar on the live focus
+	   position, not on the speed the bar is being dragged at. `lens_focus_pos`
+	   is the key the settings page already reads for that number, so poll it
+	   while the rocker is at rest and the panel is in MF (askFocusPos()). One
+	   second is enough: the motor steps a few percent at a time and the
+	   camera's httpd is single-threaded. */
+	focusPosTimer_ = new QTimer(this);
+	focusPosTimer_->setInterval(1000);
+	connect(focusPosTimer_, &QTimer::timeout, this,
+		[this]() { askFocusPos(); });
 	updateFocusLabel(0);
 	/* Grey from the start: until the camera has said it is in MF a click would
 	   move nothing, and the page greys its own bar for the same reason. */
@@ -3114,6 +3124,8 @@ void ZcPtzPad::setClient(ZcCameraClient *client)
 	/* Drop the previous channel hook before the pointer moves on. */
 	if (liveConn_)
 		disconnect(liveConn_);
+	if (focusPosTimer_)
+		focusPosTimer_->stop();
 	liveConn_ = QMetaObject::Connection();
 	channelLive_ = false;
 	client_ = client;
@@ -3693,8 +3705,19 @@ void ZcPtzPad::pushFocus(int value)
 
 	if (dir == 0) {
 		client_->lensFocusStop();
+		/* Back at rest: the number beside the bar goes back to being the
+		   camera's focus position (bug 249), and it is read at once rather
+		   than at the next tick so it lands with the released bar. */
+		if (focusPosTimer_) {
+			focusPosTimer_->start();
+			askFocusPos();
+		}
 		return;
 	}
+	/* Dragging: the useful number is the speed being sent, so the position
+	   poll is held off until the bar is released. */
+	if (focusPosTimer_)
+		focusPosTimer_->stop();
 	const int speed = qBound(1, bucket * 20, 100);
 	/* Left of centre is near, right is far — the direction the bar is labelled
 	   in, and the same way round the page's two arrows read. */
@@ -3717,6 +3740,27 @@ void ZcPtzPad::updateFocusLabel(int value)
 	focusValue_->setText(text);
 }
 
+/* Bug 249: the focus position, for the read-out beside the rocker. The
+   camera's own page keeps its bar on this number, and `lens_focus_pos` is the
+   key the settings page already reads for it. Asked for only while the bar is
+   at rest and the panel is in MF: during a drag the useful number is the speed
+   being sent, and in AF the motor is the camera's business. An empty answer
+   (a body without the key) leaves the label as it was rather than inventing a
+   position. */
+void ZcPtzPad::askFocusPos()
+{
+	if (!client_ || !focusManual_)
+		return;
+	ZcCameraClient *c = client_;
+	c->readSetting(QStringLiteral("lens_focus_pos"),
+		       [this, c](const ZcSettingValue &v) {
+			       if (c != client_ || focusDir_ != 0 ||
+				   v.value.isEmpty() || !focusValue_)
+				       return;
+			       focusValue_->setText(v.value);
+		       });
+}
+
 void ZcPtzPad::askFocusMode()
 {
 	if (!client_)
@@ -3734,6 +3778,16 @@ void ZcPtzPad::askFocusMode()
 			focusNearLabel_->setEnabled(focusManual_);
 		if (focusFarLabel_)
 			focusFarLabel_->setEnabled(focusManual_);
+		/* The position read-out is only meaningful in MF (bug 249): in AF the
+		   motor is the camera's business and the bar is greyed anyway. */
+		if (focusPosTimer_) {
+			if (focusManual_) {
+				focusPosTimer_->start();
+				askFocusPos();
+			} else {
+				focusPosTimer_->stop();
+			}
+		}
 		if (!focusManual_) {
 			/* The motor refuses in AF; drop the rocker back to rest so it
 			   cannot sit there looking held. */
@@ -4663,12 +4717,34 @@ public:
 	{
 		QStyleOptionViewItem opt = option;
 		initStyleOption(&opt, index);
-		if (index.data(kFaceInactiveRole).toBool()) {
-			const QColor grey(QStringLiteral("#6b7a80"));
-			opt.palette.setBrush(QPalette::Text, grey);
-			opt.palette.setBrush(QPalette::HighlightedText, grey);
+		if (!index.data(kFaceInactiveRole).toBool()) {
+			QStyledItemDelegate::paint(p, opt, index);
+			return;
 		}
-		QStyledItemDelegate::paint(p, opt, index);
+		const QColor grey(QStringLiteral("#6b7a80"));
+		opt.palette.setBrush(QPalette::Text, grey);
+		opt.palette.setBrush(QPalette::HighlightedText, grey);
+		/* The dialog sits under the framing panel's stylesheet, whose
+		   `QListWidget { color:#eef2ed; }` beats the palette — so tinting
+		   Text/HighlightedText alone was invisible on screen and bug 223 came
+		   back a second time ("the name is still highlighted"). Let the style
+		   draw the row, the selection band and the thumbnail without its
+		   text, then draw the text here in the inactive colour. */
+		const QString text = opt.text;
+		opt.text.clear();
+		QStyle *style = opt.widget ? opt.widget->style()
+					   : QApplication::style();
+		style->drawControl(QStyle::CE_ItemViewItem, &opt, p, opt.widget);
+		if (text.isEmpty())
+			return;
+		const QRect area = style->subElementRect(
+		    QStyle::SE_ItemViewItemText, &opt, opt.widget);
+		p->save();
+		p->setPen(grey);
+		p->drawText(area, Qt::AlignLeft | Qt::AlignVCenter,
+			    opt.fontMetrics.elidedText(text, Qt::ElideRight,
+						       area.width()));
+		p->restore();
 	}
 };
 
@@ -4753,15 +4829,12 @@ public:
 		add_ = new QPushButton(ztr("ZCameraPlugin.Framing.FaceRegAdd"), this);
 		add_->setToolTip(ztr("ZCameraPlugin.Framing.FaceRegAddTip"));
 		add_->setEnabled(false);
-		apply_ = new QPushButton(
-		    ztr("ZCameraPlugin.Framing.FaceRegApply"), this);
 		del_ = new QPushButton(ztr("ZCameraPlugin.Framing.FaceRegDelete"),
 				       this);
 		refresh_ = new QPushButton(
 		    ztr("ZCameraPlugin.Framing.FaceRegRefresh"), this);
 		row->addWidget(capture_);
 		row->addWidget(add_);
-		row->addWidget(apply_);
 		row->addWidget(del_);
 		row->addWidget(refresh_);
 		lay->addLayout(row);
@@ -4772,8 +4845,6 @@ public:
 			[this]() { capture(); });
 		connect(add_, &QPushButton::clicked, this,
 			[this]() { addStaged(); });
-		connect(apply_, &QPushButton::clicked, this,
-			[this]() { applyEdit(); });
 		connect(del_, &QPushButton::clicked, this, [this]() { remove(); });
 		connect(list_, &QListWidget::currentRowChanged, this,
 			[this](int row) {
@@ -4818,13 +4889,15 @@ private:
 		capture_->setEnabled(on);
 		/* Add stays dead until a capture has actually produced a face. */
 		add_->setEnabled(on && stagedUid_ >= 0);
-		apply_->setEnabled(on);
 		del_->setEnabled(on);
 	}
 
 	/* Bug 251: with nothing selected there is nothing to edit, and the camera's
 	   page greys the form out for exactly that reason; this dialog left the
-	   fields live, so every keystroke went nowhere and Apply did nothing.
+	   fields live, so every keystroke went nowhere. Bug 250: there is no Apply
+	   button either — the page writes name and priority as they are edited
+	   (scheduleApply), so a button only promised a second, later commit that
+	   the operator could forget to press.
 	   Bug 252: a fresh entry is prefilled with "Name", which is what the page
 	   does — the operator edits it instead of having to invent one before the
 	   first capture can be stored. */
@@ -4837,7 +4910,6 @@ private:
 		name_->setEnabled(editable);
 		priority_->setEnabled(editable);
 		active_->setEnabled(supported_ && sel);
-		apply_->setEnabled(supported_ && sel);
 		del_->setEnabled(supported_ && sel);
 		capture_->setEnabled(supported_);
 		if (!editable) {
@@ -5551,7 +5623,6 @@ public:
 	QCheckBox *active_ = nullptr;
 	QPushButton *capture_ = nullptr;
 	QPushButton *add_ = nullptr;
-	QPushButton *apply_ = nullptr;
 	QPushButton *del_ = nullptr;
 	QPushButton *refresh_ = nullptr;
 	/* Liveness token. The dialog is WA_DeleteOnClose, yet the client's HTTP
@@ -7081,6 +7152,18 @@ void ZcFramingPanel::setClient(ZcCameraClient *client)
 {
 	/* A different camera: its rectangle has to be read again. */
 	maskRectRead_ = false;
+	/* The pose hook below is re-established per camera, so drop the previous
+	   one first. It used to ask for Qt::UniqueConnection, which a lambda
+	   cannot honour: Qt logs "unique connections require a pointer to member
+	   function of a QObject subclass" on every switch (seen in the log of
+	   bug 243) and the hooks piled up. */
+	if (poseConn_)
+		disconnect(poseConn_);
+	/* The previous camera's `target_num` must not clip the next camera's boxes
+	   before its own snapshot arrives (bug 248). */
+	if (client_)
+		zc::overlayPublishAiTargetLimit(client_->host(), 0);
+	poseConn_ = QMetaObject::Connection();
 	client_ = client;
 	/* Firmware generation first: /info may already be cached from the
 	   previous connect, and the rows it decides must not flash the wrong
@@ -7194,13 +7277,12 @@ void ZcFramingPanel::setClient(ZcCameraClient *client)
 	   pose). A frame projected from a polled pose trails the picture while the
 	   head moves — which is the "does not follow the camera" half of bug
 	   244, and half of what made bug 243's frame sit in the wrong place. */
-	connect(client, &ZcCameraClient::ptzPositionChanged, this,
-		[this](double pan, double tilt, double) {
-			angleViewPan_ = (float)pan;
-			angleViewTilt_ = (float)tilt;
-			pushWorldBoxes();
-		},
-		Qt::UniqueConnection);
+	poseConn_ = connect(client, &ZcCameraClient::ptzPositionChanged, this,
+			    [this](double pan, double tilt, double) {
+				    angleViewPan_ = (float)pan;
+				    angleViewTilt_ = (float)tilt;
+				    pushWorldBoxes();
+			    });
 	/* A camera that already has its framing frames switched on: sample their
 	   poses from the start rather than waiting for the first snapshot. */
 	syncAngleBoxPoll();
@@ -8094,10 +8176,16 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 			       1));
 	}
 	if (doc.contains("target_num")) {
-		const int idx = targetNumCombo_->findData(
-		    asInt("target_num", kFramingTargetNumMin));
+		const int want = asInt("target_num", kFramingTargetNumMin);
+		const int idx = targetNumCombo_->findData(want);
 		if (idx >= 0)
 			targetNumCombo_->setCurrentIndex(idx);
+		/* Bug 248: the source draws what the camera reports, and the camera
+		   reports every face it sees. Hand it the number of targets the
+		   camera was told to follow so the picture stops carrying a box per
+		   face. */
+		if (client_)
+			zc::overlayPublishAiTargetLimit(client_->host(), want);
 	}
 	/* The View Angle dropdown and the Size stepper behind it. all_status
 	   carries both as indices: fov_type is the dropdown entry, body_size the
@@ -10233,22 +10321,13 @@ void ZcControlDock::refreshCameras()
 	}
 	advertised_ = live;
 
-	/* Session memory: a camera discovery has seen before but that is not
-	   advertising right now keeps its row, marked offline, instead of vanishing
-	   from the rail. That is what lets an operator whose camera dropped off the
-	   network still find it — and click it back — once it returns. Sorted by
-	   address so these rows do not move around between scans. */
-	QList<QString> goneHosts;
-	for (auto it = knownCameras_.constBegin(); it != knownCameras_.constEnd();
-	     ++it) {
-		if (!listed.contains(it.key()))
-			goneHosts.append(it.key());
-	}
-	std::sort(goneHosts.begin(), goneHosts.end());
-	for (const QString &host : goneHosts) {
-		listed.insert(host);
-		rows.append({knownCameras_.value(host), host, true});
-	}
+	/* Bug 231: a camera discovery has seen before, is not advertising now and
+	   is *not* an OBS source has no business staying in the rail. It used to be
+	   kept as a "session memory" row, marked offline, which read as "the
+	   refresh button does not clear offline cameras" — the tester's OBS had no
+	   such source at all, so the row only ever existed in this list. The
+	   spec's §1 L11 promise is about cameras OBS holds as sources, and those
+	   are added by the pass below; everything else simply drops out. */
 
 	/* Spec §1, L11: a camera OBS holds as a source is listed even when discovery
 	   is not advertising it — otherwise a configured camera whose mDNS record is

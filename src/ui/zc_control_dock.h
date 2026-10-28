@@ -447,6 +447,9 @@ private:
 	   is attached and whenever the PTZ tab is shown, so a mode changed on the
 	   camera's web UI is picked up without a reconnect. */
 	void askFocusMode();
+	/* Read `lens_focus_pos` and show it in the read-out beside the rocker
+	   (bug 249). Called at rest only — see the definition. */
+	void askFocusPos();
 
 	ZcCameraClient *client_ = nullptr;
 	/* Whether the camera's notification socket is up, i.e. whether a request
@@ -503,6 +506,9 @@ private:
 	   otherwise, and a control that clicks but does nothing is bug 237. */
 	bool focusManualKnown_ = false;
 	bool focusManual_ = false;
+	/* Polls `lens_focus_pos` for the read-out beside the rocker (bug 249),
+	   only while in MF and the bar is at rest (see askFocusPos). */
+	QTimer *focusPosTimer_ = nullptr;
 
 	/* Current Position read-out (live, from ptzfChange / the query reply). */
 	QLabel *positionLabel_ = nullptr;
@@ -997,6 +1003,9 @@ private:
 	bool haveSnapshot_ = false;
 
 	ZcCameraClient *client_ = nullptr;
+	/* The pose push that re-projects the framing frames (ptzPositionChanged).
+	   Held so a camera switch can drop the previous one. */
+	QMetaObject::Connection poseConn_;
 	/* The interaction link, shared with the dock (detection-area editing).
 	   owning_ is dropped while the panel paints a pushed snapshot, so the
 	   push does not arm a mode by itself. */

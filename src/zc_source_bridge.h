@@ -148,6 +148,15 @@ void overlaySetPointerSink(OverlayPointerSink *sink);
 void overlayPublishAiTarget(const QString &ip, int targetId);
 int overlayReadAiTarget(const QString &ip);
 
+/* How many targets the camera was told to follow (`target_num` on its framing
+   page). Bug 248: the camera keeps reporting every face it sees, so with the
+   setting at 1 the picture still drew a box around each of them. The dock
+   publishes the value it read from the camera and the source clips the list
+   before drawing; 0 (never read, or firmware without the setting) means "draw
+   everything", which keeps the old behaviour on bodies that cannot limit. */
+void overlayPublishAiTargetLimit(const QString &ip, int limit);
+int overlayReadAiTargetLimit(const QString &ip);
+
 /* Called by the source from its mouse callbacks. */
 void overlayDispatchPointer(int phase, int button, float nx, float ny);
 

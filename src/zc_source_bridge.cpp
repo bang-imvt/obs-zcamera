@@ -26,6 +26,10 @@ OverlayPointerSink *g_sink = nullptr;
    the table above this one is written from the source's notification thread,
    which is why the same mutex covers it. */
 QHash<QString, int> g_aiTargets;
+/* Camera address -> `target_num`, the number of targets it was told to follow
+   (bug 248). Written by the dock when a framing snapshot arrives, read by the
+   source when it draws the boxes. */
+QHash<QString, int> g_aiLimits;
 
 } /* namespace */
 
@@ -46,6 +50,25 @@ int overlayReadAiTarget(const QString &ip)
 		return 0;
 	QMutexLocker lock(&g_mutex);
 	return g_aiTargets.value(ip, 0);
+}
+
+void overlayPublishAiTargetLimit(const QString &ip, int limit)
+{
+	if (ip.isEmpty())
+		return;
+	QMutexLocker lock(&g_mutex);
+	if (limit > 0)
+		g_aiLimits.insert(ip, limit);
+	else
+		g_aiLimits.remove(ip);
+}
+
+int overlayReadAiTargetLimit(const QString &ip)
+{
+	if (ip.isEmpty())
+		return 0;
+	QMutexLocker lock(&g_mutex);
+	return g_aiLimits.value(ip, 0);
 }
 
 void overlaySetPointerSink(OverlayPointerSink *sink)

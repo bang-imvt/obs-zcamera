@@ -1111,6 +1111,27 @@ void ZcSspSource::drawAiOverlay(gs_effect_t *effect)
 		return;
 	}
 
+	/* Bug 248: the camera reports every face its AI can see, not just the ones
+	   it has been told to follow, so `target_num` never reached the picture —
+	   set it to 1 and a box still appeared around each face in frame. Clip the
+	   list to that number here. The camera's own selected target is kept first:
+	   the setting is about how many people may be followed, and the one being
+	   followed is the one the operator must keep seeing. */
+	const QString overlayIp = overlayRegisteredIp_;
+	const int boxLimit = zc::overlayReadAiTargetLimit(overlayIp);
+	if (boxLimit > 0 && boxes.size() > boxLimit) {
+		const int selected = zc::overlayReadAiTarget(overlayIp);
+		QVector<ZcAiBox> kept;
+		kept.reserve(boxLimit);
+		for (const ZcAiBox &b : boxes) {
+			if (selected > 0 && b.id == selected)
+				kept.prepend(b);
+			else
+				kept.append(b);
+		}
+		boxes = kept.mid(0, boxLimit);
+	}
+
 	/* The camera reports normalized frame coordinates, so they are scaled by
 	   the decoded picture size — the same space OBS projects the source into
 	   in every preview pane that reaches this code. */
