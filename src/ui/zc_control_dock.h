@@ -433,7 +433,30 @@ private:
 	void pushZoom(int value);
 	void updateZoomLabel(int value);
 
+	/* Manual focus (bug 247). Same spring-return rocker shape as the zoom one,
+	   because the two are the same kind of command — but a different endpoint:
+	   /ctrl/lens?action=focusnear|focusfar&fspeed= / focusstop. This is what
+	   the camera's own page drives on every body that reports
+	   `feature.lens_ctrl_ptz` (each PTZ here); on those it hides its
+	   "set focus position" field, so writing `lens_focus_pos` is not the way
+	   in. The rocker follows /ctrl/get?k=focus: the camera only moves the
+	   focus motor in MF and the page greys its own bar otherwise. */
+	void pushFocus(int value);
+	void updateFocusLabel(int value);
+	/* Read `focus` and grey the rocker unless it says MF. Called when a client
+	   is attached and whenever the PTZ tab is shown, so a mode changed on the
+	   camera's web UI is picked up without a reconnect. */
+	void askFocusMode();
+
 	ZcCameraClient *client_ = nullptr;
+	/* Whether the camera's notification socket is up, i.e. whether a request
+	   can reach it at all (see setClient). The pad is built before the
+	   transport has probed an origin, so askFocusMode() waits for this. */
+	bool channelLive_ = false;
+	/* The notifierStateChanged hook that fills channelLive_. Held so a
+	   re-attach (every camera switch calls setClient again) can drop the old
+	   one: a lambda connection cannot be deduped by Qt::UniqueConnection. */
+	QMetaObject::Connection liveConn_;
 	/* The interaction link, shared with the dock (click-to-move). */
 	ZcOverlayLink *link_ = nullptr;
 	QWidget *joystickArea_ = nullptr;
@@ -467,6 +490,19 @@ private:
 	   drag sends one request per bucket instead of one per pixel. */
 	int zoomDir_ = 0;
 	int zoomBucket_ = 0;
+
+	/* Lens focus rocker (see pushFocus). */
+	QSlider *focusSlider_ = nullptr;
+	QLabel *focusValue_ = nullptr;
+	QLabel *focusNearLabel_ = nullptr;
+	QLabel *focusFarLabel_ = nullptr;
+	bool focusDragging_ = false;
+	int focusDir_ = 0;
+	int focusBucket_ = 0;
+	/* Last `focus` answer: true only for MF. The camera refuses the motor
+	   otherwise, and a control that clicks but does nothing is bug 237. */
+	bool focusManualKnown_ = false;
+	bool focusManual_ = false;
 
 	/* Current Position read-out (live, from ptzfChange / the query reply). */
 	QLabel *positionLabel_ = nullptr;
@@ -944,6 +980,17 @@ private:
 	/* The two /ctrl/framing/fov offsets, as last read or written. */
 	int placement_ = 0;
 	int faceHeight_ = 0;
+	/* The camera's own geometry for the subject it is told to place
+	   (all_status `info_face_height` / `info_human_bottom`, both fractions of
+	   the frame). Only the 1.0.3 generation needs them: on that body the
+	   View Angle dropdown does not touch the body-size stepper, so the Size
+	   the figure was drawn from never moved while the camera's own picture
+	   of the subject did (bug 245). >=1.0.5 keeps drawing from Size, which
+	   its View Angle does move. `hasInfoGeometry_` is false until a snapshot
+	   carries both numbers. */
+	double infoFaceHeight_ = 0.0;
+	double infoHumanBottom_ = 0.0;
+	bool hasInfoGeometry_ = false;
 	/* Set by the first full snapshot. Controls stay disabled until then, so a
 	   control that has never been filled from the camera cannot write its
 	   placeholder value back. */

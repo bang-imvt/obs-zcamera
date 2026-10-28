@@ -126,10 +126,27 @@ public:
 	   one per frame, each carrying the same view pose. */
 	virtual void setOverlayWorldBox(int kind, const WorldBoxPose &box,
 					const WorldBoxPose &view) = 0;
+	/* Keep the camera's notification feed open without drawing anything.
+	   The face-registration dialog needs it — the selected AI target's id only
+	   ever arrives there (bug 3) — and it must not turn the boxes on to get
+	   it. */
+	virtual void setAiFeedWanted(bool on) = 0;
 };
 
 /* Register / replace the dock's sink. Pass nullptr to detach. */
 void overlaySetPointerSink(OverlayPointerSink *sink);
+
+/* The AI target the camera has selected right now — the `sel` field of its `AI`
+   notification. That id is what /ctrl/framing/trace_target?id= and
+   /facedb/prepare?face_id= both take, so the face-registration dialog cannot
+   work without it: the camera's own page reads the id off the same
+   notification before it captures (bug 3, where the plugin guessed a database
+   slot instead and every capture answered "face not found").
+
+   Published by the source's notification thread, read by the dock, so the
+   table is mutex-guarded like the one above. 0 means "no target selected". */
+void overlayPublishAiTarget(const QString &ip, int targetId);
+int overlayReadAiTarget(const QString &ip);
 
 /* Called by the source from its mouse callbacks. */
 void overlayDispatchPointer(int phase, int button, float nx, float ny);

@@ -547,6 +547,21 @@ void ZcCameraClient::setFramingZoomLock(bool enabled)
 	framingFlag(transport_, "/zoom_lock", enabled);
 }
 
+/* /ctrl/framing/trace_target?id= — pin one AI target. The camera's own
+   registration page calls this immediately before /facedb/prepare, with the
+   `sel` id off the AI notification, and hands the same number to prepare as
+   `face_id` (bug 3; measured on 1.0.5, and the endpoint answers on 1.0.3 as
+   well). Without it prepare keeps answering "face not found" however many
+   people stand in front of the lens. */
+void ZcCameraClient::framingTraceTarget(
+    int id, std::function<void(const QJsonObject &)> cb)
+{
+	QUrlQuery q;
+	q.addQueryItem(QStringLiteral("id"), QString::number(id));
+	transport_.getQuery(QString(http::kFraming) + QStringLiteral("/trace_target"),
+			    q, jsonObjectCb(cb), 20000);
+}
+
 void ZcCameraClient::setFramingTiltLock(bool enabled)
 {
 	framingFlag(transport_, "/tilt_lock", enabled);

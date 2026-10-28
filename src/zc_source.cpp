@@ -207,6 +207,7 @@ public:
 	void setOverlayMarker(bool on, float nx, float ny) override;
 	void setOverlayWorldBox(int kind, const zc::WorldBoxPose &box,
 				const zc::WorldBoxPose &view) override;
+	void setAiFeedWanted(bool on) override;
 
 	/* Delivered from the Interact window's mouse callbacks (zc_source.cpp's
 	   zc_source_mouse_click/mouse_move). Runs on the OBS UI thread. */
@@ -429,6 +430,9 @@ private:
 	   graphics thread, so it is atomic: unticking "Draw AI box" must stop the
 	   boxes on the next frame, not eventually. */
 	std::atomic<bool> aiOverlay_{false};
+	/* Set while the face-registration dialog is open (bug 3): it needs the
+	   notification feed's `sel` id even with the overlay unticked. */
+	std::atomic<bool> aiFeedWanted_{false};
 	/* Where a box is allowed to appear. Monitor-only keeps it out of the
 	   program output -- and therefore out of the recording and the stream --
 	   but that also hides it from the standard preview pane, which just blits
@@ -812,6 +816,21 @@ void ZcSspSource::setAiOverlay(bool on)
 	startAiFeed();
 }
 
+/* Bug 3: the face dialog asks for the notification feed without asking for the
+   boxes. Opening it is what lets the camera's selected target be read at all —
+   `sel` only ever arrives on this socket — and the drawing path stays off, so
+   nothing appears on the picture. */
+void ZcSspSource::setAiFeedWanted(bool on)
+{
+	aiFeedWanted_ = on;
+	if (on) {
+		startAiFeed();
+		return;
+	}
+	if (!aiOverlay_)
+		stopAiFeed();
+}
+
 void ZcSspSource::startAiFeed()
 {
 #if defined(__APPLE__) && !defined(ZC_MAC_ZERO_COPY)
@@ -822,7 +841,10 @@ void ZcSspSource::startAiFeed()
 	   profile carried over from Windows with the option saved on. */
 	return;
 #endif
-	if (!aiOverlay_)
+	/* Bug 3: the face-registration dialog reads the selected target's id off
+	   this feed and draws nothing, so its request keeps the socket up with the
+	   overlay itself unticked. */
+	if (!aiOverlay_ && !aiFeedWanted_.load(std::memory_order_relaxed))
 		return;
 	if (ip_.empty() || !isValidHostAddress(ip_)) {
 		/* The overlay keys on the Properties IP field, and a source can exist
@@ -866,6 +888,13 @@ void ZcSspSource::startAiFeed()
 				 /* AI feed thread. Only the decoded box list and its
 				    arrival stamp cross to the graphics thread. */
 				 const QVector<ZcAiBox> boxes = parseAiDetection(payload);
+				 /* The face-registration dialog needs the selected target's
+				    id, and this notification is the only place the camera
+				    ever says it (bug 3). Published even when the box list
+				    is empty: the selection outlives the box that names
+				    it. */
+				 zc::overlayPublishAiTarget(host,
+							    parseAiSelected(payload));
 				 const uint64_t now = os_gettime_ns();
 				 {
 					 std::lock_guard<std::mutex> lock(aiMutex_);

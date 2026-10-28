@@ -177,6 +177,11 @@ public:
 	void setFramingTargetNum(int num);        /* /target_num?num= */
 	void setFramingAutoTarget(bool enabled);  /* /auto_target?enable= */
 	void setFramingAutoStart(bool enabled);   /* /auto_start?enable= */
+	/* Pin the AI target the camera should trace (bug 3): the page sends this
+	   right before a face capture, and the id it uses is the `sel` from the AI
+	   notification — the same number /facedb/prepare takes as `face_id`. */
+	void framingTraceTarget(int id,
+				std::function<void(const QJsonObject &)> cb);
 	void setFramingZoomLock(bool enabled);    /* /zoom_lock?enable= */
 	void setFramingTiltLock(bool enabled);    /* /tilt_lock?enable= */
 	void setFramingTrackActiveFace(bool enabled); /* /track_active_face?enable= */

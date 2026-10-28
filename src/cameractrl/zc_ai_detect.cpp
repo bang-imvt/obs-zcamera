@@ -64,4 +64,14 @@ QVector<ZcAiBox> parseAiDetection(const QJsonObject &payload)
 	return boxes;
 }
 
+int parseAiSelected(const QJsonObject &payload)
+{
+	/* Deliberately independent of `num`: the camera reports the selection even
+	   with an empty object list ({"num":0,...,"sel":174}), and that is exactly
+	   the state face registration has to read — it pins the target first, and
+	   only then does the box it belongs to show up. */
+	const QJsonValue v = payload.value(QLatin1String("sel"));
+	return v.isDouble() ? v.toInt() : 0;
+}
+
 } // namespace zc

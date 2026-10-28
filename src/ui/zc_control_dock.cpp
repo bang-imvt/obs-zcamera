@@ -40,6 +40,7 @@ along with this program; If not, see <https://www.gnu.org/licenses/>
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QJsonDocument>
 #include <QSplitter>
 #include <QListWidget>
 #include <QLabel>
@@ -2826,6 +2827,57 @@ ZcPtzPad::ZcPtzPad(QWidget *parent) : QWidget(parent)
 	layout->addLayout(stickRow);
 	updateZoomLabel(0);
 
+	/* Manual focus (bug 247): "对焦方式设成 MF 后没有任何对焦条，根本没法手动对焦".
+	   The camera's own page drives this through the lens motor on every body
+	   that reports `feature.lens_ctrl_ptz` — it hides its "set focus position"
+	   field there and uses /ctrl/lens?action=focusnear|focusfar&fspeed= plus
+	   focusstop on release. So this is a spring-return rocker like the zoom
+	   one: near to the left, far to the right, the distance from the centre is
+	   the speed, releasing recentres it and stops the motor. Horizontal
+	   because it reads as a bar, which is what the report asked for, and
+	   because the row it sits in already spans the pane. */
+	auto *focusRow = new QHBoxLayout;
+	focusRow->setSpacing(6);
+	focusNearLabel_ = new QLabel(ztr("ZCameraPlugin.Dock.FocusNear"), this);
+	focusSlider_ = new QSlider(Qt::Horizontal, this);
+	focusSlider_->setObjectName("ptzFocus");
+	focusSlider_->setRange(-100, 100);
+	focusSlider_->setValue(0);
+	focusSlider_->setToolTip(ztr("ZCameraPlugin.Dock.FocusTip"));
+	focusFarLabel_ = new QLabel(ztr("ZCameraPlugin.Dock.FocusFar"), this);
+	focusValue_ = new QLabel(this);
+	focusValue_->setObjectName("PtzFocusValue");
+	focusValue_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+	focusValue_->setMinimumWidth(42);
+	focusRow->addWidget(focusNearLabel_);
+	focusRow->addWidget(focusSlider_, 1);
+	focusRow->addWidget(focusFarLabel_);
+	focusRow->addWidget(focusValue_);
+	layout->addLayout(focusRow);
+	updateFocusLabel(0);
+	/* Grey from the start: until the camera has said it is in MF a click would
+	   move nothing, and the page greys its own bar for the same reason. */
+	focusSlider_->setEnabled(false);
+	focusNearLabel_->setEnabled(false);
+	focusFarLabel_->setEnabled(false);
+
+	connect(focusSlider_, &QSlider::sliderPressed, this,
+		[this]() { focusDragging_ = true; });
+	connect(focusSlider_, &QSlider::valueChanged, this, [this](int v) {
+		if (focusDragging_)
+			pushFocus(v);
+	});
+	connect(focusSlider_, &QSlider::sliderReleased, this, [this]() {
+		focusDragging_ = false;
+		if (client_)
+			client_->lensFocusStop();
+		focusDir_ = 0;
+		focusBucket_ = 0;
+		QSignalBlocker blocker(focusSlider_);
+		focusSlider_->setValue(0);
+		updateFocusLabel(0);
+	});
+
 	connect(targetBtn_, &QToolButton::toggled, this, [this](bool on) {
 		if (!link_)
 			return;
@@ -3059,6 +3111,11 @@ ZcPtzPad::ZcPtzPad(QWidget *parent) : QWidget(parent)
 
 void ZcPtzPad::setClient(ZcCameraClient *client)
 {
+	/* Drop the previous channel hook before the pointer moves on. */
+	if (liveConn_)
+		disconnect(liveConn_);
+	liveConn_ = QMetaObject::Connection();
+	channelLive_ = false;
 	client_ = client;
 	/* The zoom rocker is stateless, but its "last command sent" memory must not
 	   survive a camera change: the next drag has to be able to send the same
@@ -3067,6 +3124,37 @@ void ZcPtzPad::setClient(ZcCameraClient *client)
 	zoomDir_ = 0;
 	zoomBucket_ = 0;
 	zoomDragging_ = false;
+	/* The focus rocker carries the same "last command sent" memory, plus the
+	   camera's focus mode: an MF answer belongs to the camera that gave it, so
+	   a switch clears it and the rocker greys until the new body answers. */
+	focusDir_ = 0;
+	focusBucket_ = 0;
+	focusDragging_ = false;
+	focusManualKnown_ = false;
+	focusManual_ = false;
+	if (focusSlider_) {
+		QSignalBlocker blocker(focusSlider_);
+		focusSlider_->setValue(0);
+		focusSlider_->setEnabled(false);
+	}
+	if (focusNearLabel_)
+		focusNearLabel_->setEnabled(false);
+	if (focusFarLabel_)
+		focusFarLabel_->setEnabled(false);
+	updateFocusLabel(0);
+	/* Not askFocusMode() here: at this point the transport has not resolved
+	   its origin yet, and the read lands as `req /ctrl/get?k=focus code 0 err
+	   Host not found` (the same class of bug 5bfdfad). Wait for the control
+	   channel to come up and ask then; showEvent covers the tab being opened
+	   later. */
+	if (client_)
+		liveConn_ = connect(client_,
+				    &ZcCameraClient::notifierStateChanged, this,
+				    [this](bool live) {
+					    channelLive_ = live;
+					    if (live)
+						    askFocusMode();
+				    });
 	if (zoomSlider_) {
 		QSignalBlocker blocker(zoomSlider_);
 		zoomSlider_->setValue(0);
@@ -3585,6 +3673,81 @@ void ZcPtzPad::updateZoomLabel(int value)
 	zoomValue_->setText(text);
 }
 
+/* Same shape as pushZoom, on the focus motor (bug 247). The bucket count is
+   the same five: fspeed is a percentage on the wire and one request per
+   (direction, bucket) change keeps the camera's single-threaded httpd sane
+   during a drag. */
+void ZcPtzPad::pushFocus(int value)
+{
+	updateFocusLabel(value);
+	if (!client_)
+		return;
+
+	const int dead = 4;
+	const int dir = (value > dead) ? 1 : (value < -dead ? -1 : 0);
+	const int bucket = (dir == 0) ? 0 : qBound(1, (qAbs(value) + 19) / 20, 5);
+	if (dir == focusDir_ && bucket == focusBucket_)
+		return;
+	focusDir_ = dir;
+	focusBucket_ = bucket;
+
+	if (dir == 0) {
+		client_->lensFocusStop();
+		return;
+	}
+	const int speed = qBound(1, bucket * 20, 100);
+	/* Left of centre is near, right is far — the direction the bar is labelled
+	   in, and the same way round the page's two arrows read. */
+	if (dir > 0)
+		client_->lensFocusFar(speed);
+	else
+		client_->lensFocusNear(speed);
+}
+
+void ZcPtzPad::updateFocusLabel(int value)
+{
+	if (!focusValue_)
+		return;
+	const int dead = 4;
+	QString text = QStringLiteral("\u00b7");
+	if (value > dead)
+		text = QStringLiteral("+%1").arg(qMin(100, value));
+	else if (value < -dead)
+		text = QStringLiteral("-%1").arg(qMin(100, -value));
+	focusValue_->setText(text);
+}
+
+void ZcPtzPad::askFocusMode()
+{
+	if (!client_)
+		return;
+	ZcCameraClient *c = client_;
+	c->readSetting(QStringLiteral("focus"), [this, c](const ZcSettingValue &v) {
+		if (c != client_ || v.value.isEmpty())
+			return;
+		focusManualKnown_ = true;
+		focusManual_ = v.value.compare(QLatin1String("MF"),
+					       Qt::CaseInsensitive) == 0;
+		if (focusSlider_)
+			focusSlider_->setEnabled(focusManual_);
+		if (focusNearLabel_)
+			focusNearLabel_->setEnabled(focusManual_);
+		if (focusFarLabel_)
+			focusFarLabel_->setEnabled(focusManual_);
+		if (!focusManual_) {
+			/* The motor refuses in AF; drop the rocker back to rest so it
+			   cannot sit there looking held. */
+			focusDir_ = 0;
+			focusBucket_ = 0;
+			if (focusSlider_) {
+				QSignalBlocker blocker(focusSlider_);
+				focusSlider_->setValue(0);
+			}
+			updateFocusLabel(0);
+		}
+	});
+}
+
 void ZcPtzPad::mousePressEvent(QMouseEvent *event)
 {
 	if (event->button() != Qt::LeftButton || mode_ != JoystickMode::None) {
@@ -3670,6 +3833,13 @@ void ZcPtzPad::showEvent(QShowEvent *event)
 	QWidget::showEvent(event);
 	if (limitPollTimer_ && client_)
 		limitPollTimer_->start();
+	/* The focus mode can be switched on the camera's own page while this tab
+	   is closed, and the camera pushes nothing when it changes: re-read it each
+	   time the tab comes up so the rocker is not stale. Only once the channel
+	   is up, though — the tab is shown at startup, before the transport has an
+	   origin, and the read would land as `Host not found`. */
+	if (channelLive_)
+		askFocusMode();
 }
 
 void ZcPtzPad::hideEvent(QHideEvent *event)
@@ -4473,6 +4643,10 @@ const QString kFramingPanelStyle =
 /* Bug 223: whether a face entry is switched off, carried as item data so the
    delegate below can paint it in both states. */
 constexpr int kFaceInactiveRole = Qt::UserRole + 11;
+/* Bug 225: the row's own uid. Restoring the scroll position needs a stable
+   handle on the row — an index is not one across a rebuild, because the camera
+   may reorder or the operator may be looking at a row that moved. */
+constexpr int kFaceUidRole = Qt::UserRole + 12;
 
 /* An inactive entry's name has to read grey even while its row is SELECTED.
    `QListWidgetItem::setForeground` only reaches Qt::Text, and a selected row
@@ -4505,6 +4679,12 @@ public:
 	{
 		setWindowTitle(ztr("ZCameraPlugin.Framing.FaceRegTitle"));
 		setMinimumWidth(560);
+		/* The camera publishes the selected AI target only on its
+		   notification feed, and that feed is otherwise the overlay's
+		   private business (bug 3). Ask for it while this dialog is open —
+		   no boxes get drawn, the feed is only read. */
+		if (auto *target = zc::overlayFindTarget(client_->host()))
+			target->setAiFeedWanted(true);
 		auto *lay = new QVBoxLayout(this);
 
 		info_ = new QLabel(this);
@@ -4596,7 +4776,10 @@ public:
 			[this]() { applyEdit(); });
 		connect(del_, &QPushButton::clicked, this, [this]() { remove(); });
 		connect(list_, &QListWidget::currentRowChanged, this,
-			[this](int row) { fillFromRow(row); });
+			[this](int row) {
+				fillFromRow(row);
+				updateFormState();
+			});
 
 		/* Bug 190: the page treats name, priority and the activate switch as
 		   three independent writes — changing one takes effect on its own.
@@ -4639,10 +4822,48 @@ private:
 		del_->setEnabled(on);
 	}
 
+	/* Bug 251: with nothing selected there is nothing to edit, and the camera's
+	   page greys the form out for exactly that reason; this dialog left the
+	   fields live, so every keystroke went nowhere and Apply did nothing.
+	   Bug 252: a fresh entry is prefilled with "Name", which is what the page
+	   does — the operator edits it instead of having to invent one before the
+	   first capture can be stored. */
+	void updateFormState()
+	{
+		const bool sel = list_->currentRow() >= 0 &&
+				 list_->currentRow() < names_.size();
+		const bool staged = stagedUid_ >= 0;
+		const bool editable = supported_ && (sel || staged);
+		name_->setEnabled(editable);
+		priority_->setEnabled(editable);
+		active_->setEnabled(supported_ && sel);
+		apply_->setEnabled(supported_ && sel);
+		del_->setEnabled(supported_ && sel);
+		capture_->setEnabled(supported_);
+		if (!editable) {
+			const bool wasFilling = filling_;
+			filling_ = true;
+			name_->setText(
+			    ztr("ZCameraPlugin.Framing.FaceRegDefaultName"));
+			filling_ = wasFilling;
+		}
+	}
+
 	void refresh()
 	{
 		if (!client_)
 			return;
+		/* Bug 225: the top row is what has to stay put, and a scrollbar value
+		   is the wrong handle for it — Qt re-derives the range while the rows
+		   are being built, and the value written back is clamped to whatever
+		   the range was at that instant. Remembering the row instead lets the
+		   view jump straight to it once it exists. */
+		int keepTopUid = -1;
+		if (const QListWidgetItem *top = list_->itemAt(2, 2)) {
+			const int row = list_->row(top);
+			if (row >= 0 && row < uids_.size())
+				keepTopUid = uids_.at(row);
+		}
 		/* Bumped per rebuild: a thumbnail that arrives after the list was
 		   rebuilt belongs to a row that no longer exists, and the item
 		   pointer it captured is dangling (bug 9). */
@@ -4652,8 +4873,8 @@ private:
 					? uids_.at(list_->currentRow())
 					: -1;
 		QPointer<QObject> alive(alive_);
-		client_->framingFaceQuery([this, alive, keepUid](
-						  const QJsonObject &doc) {
+		client_->framingFaceQuery([this, alive, keepUid, keepTopUid](
+					  const QJsonObject &doc) {
 			if (!alive)
 				return;
 			if (doc.contains(QLatin1String("code")) &&
@@ -4734,6 +4955,7 @@ private:
 				   and reading the checkbox. The role feeds
 				   ZcFaceItemDelegate, which is what makes it stick on a
 				   selected row as well. */
+				item->setData(kFaceUidRole, uids_.last());
 				item->setData(kFaceInactiveRole,
 					      !actives_.last());
 				if (!actives_.last())
@@ -4791,14 +5013,38 @@ private:
 			   the current item into view, and that has to be undone after
 			   the layout runs, not before. */
 			if (keepScroll > 0) {
+				/* Second attempt at bug 225: put the ROW back at the top
+				   rather than restoring a scrollbar value. The value was
+				   clamped because the new range did not exist yet; a row
+				   scroll is resolved by the view itself once the rows are
+				   laid out, so it cannot be clamped away. */
 				QPointer<QListWidget> lw(list_);
-				QTimer::singleShot(0, this,
-						   [lw, keepScroll]() {
-							   if (lw && lw->verticalScrollBar())
-								   lw->verticalScrollBar()
-								       ->setValue(keepScroll);
-						   });
+				const int wantedUid = keepTopUid >= 0 ? keepTopUid
+								      : keepUid;
+				QTimer::singleShot(0, this, [lw, wantedUid, keepScroll]() {
+					if (!lw || !lw->verticalScrollBar())
+						return;
+					bool done = false;
+					if (wantedUid >= 0) {
+						for (int i = 0; i < lw->count(); ++i) {
+							if (lw->item(i)
+								->data(kFaceUidRole)
+								.toInt() == wantedUid) {
+								lw->scrollToItem(
+								    lw->item(i),
+								    QAbstractItemView::
+									PositionAtTop);
+								done = true;
+								break;
+							}
+						}
+					}
+					if (!done)
+						lw->verticalScrollBar()
+						    ->setValue(keepScroll);
+				});
 			}
+			updateFormState();
 			/* Bug 190: a new entry gets the priority the camera says is
 			   next, not a repeated 1. Priority decides between two
 			   faces in frame, so two entries sharing one leaves that
@@ -4850,6 +5096,20 @@ private:
 				preview_->size(), Qt::KeepAspectRatio,
 				Qt::SmoothTransformation));
 		    });
+	}
+
+	/* Hand the feed back when the dialog closes: if the overlay is off the
+	   source stops the socket again. */
+	~ZcFaceRegDialog() override
+	{
+		if (!client_)
+			return;
+		if (auto *target = zc::overlayFindTarget(client_->host()))
+			target->setAiFeedWanted(false);
+		/* Put detection back the way the operator left it. Leaving it on kept
+		   the camera's auto target working after the dialog was gone. */
+		if (detectTurnedOn_)
+			client_->setFramingEnabled(false);
 	}
 
 	/* Icon for one list row. Same generation rule as showPicture(). */
@@ -4976,64 +5236,161 @@ public:
 	{
 		if (!client_ || !supported_)
 			return;
-		/* The first slot the list does not already hold; the camera
-		   captures INTO a slot, so add() and prepare() have to agree on
-		   one (bug list #3: without a slot the camera said "face not
-		   found" for every capture). All slots taken falls back to 0 —
-		   the camera rejects the store itself if it is really full. */
-		int slot = 0;
-		while (slot < max_ && uids_.contains(slot))
-			++slot;
-		if (slot >= max_)
-			slot = 0;
+		/* Bug 3, fifth round — and this time the camera's own page was
+		   captured (doc/1.0.5固件版本人脸注册.har). It does, in order:
+
+		     GET /ctrl/framing/trace_target?id=102
+		     GET /facedb/prepare?face_id=102
+		     GET /facedb/add?which=0&name=…&priority=…&activate=1
+
+		   `face_id` is NOT a database slot. It is the id of the AI target
+		   the camera has pinned, the number the `AI` notification carries
+		   as `sel`. Everything before this sent a slot index (0..9) that
+		   the camera had selected nothing for, which is why every attempt
+		   answered "face not found" while the page one click earlier
+		   worked fine. The store's own uid comes back from add(), never
+		   from the slot. */
+		const int targetId = zc::overlayReadAiTarget(client_->host());
 		stagedUid_ = -1;
 		stagedThumb_.clear();
 		add_->setEnabled(false);
+		if (targetId <= 0) {
+			/* No selected target: detection is off, nobody is in frame,
+			   or the feed has not delivered a notification yet. Saying
+			   that beats relaying the camera's "face not found", which
+			   is what made the failure look unexplainable. */
+			info_->setText(
+			    ztr("ZCameraPlugin.Framing.FaceRegNoTarget"));
+			return;
+		}
 		info_->setText(ztr("ZCameraPlugin.Framing.FaceRegCapturing"));
+		/* One line per press, not per frame: bug 3 has been reopened four
+		   times and every report read "it says face not found" with nothing
+		   in the log to tell "no target selected", "detection was off" and
+		   "the camera answered something else" apart. The id and the two
+		   replies are the whole diagnosis, and a press is rare enough that
+		   this cannot flood a log. */
+		const bool trace = true;
+		blog(LOG_INFO,
+		     "[obs-zcamera] face capture: target=%d max=%d taken=%d",
+		     targetId, max_, (int)uids_.size());
 		QPointer<QObject> alive(alive_);
-		/* Bug 3: /prepare only looks for a registrable face while
-		   detection is running. The camera's page always has it on, this
-		   dialog never turned it on, and the failure is identical whether
-		   detection is off or nobody is in frame ("face not found") —
-		   which is why the capture looked broken on one side and fine on
-		   the other. Read the state, switch it on if needed, and give the
-		   detector a moment before asking for the face. */
-		client_->framingQuery([this, alive, slot](const QJsonObject &st) {
+		/* /prepare only looks for a face while detection is running, and
+		   the page always has it on. Read the state, switch it on if
+		   needed, and give the detector a moment before asking. */
+		client_->framingQuery([this, alive, targetId, trace](
+					  const QJsonObject &st) {
 			if (!alive)
 				return;
-			if (st.value(QLatin1String("detect")).toBool(false)) {
-				prepareInto(slot);
+			const bool detect =
+			    st.value(QLatin1String("detect")).toBool(false);
+			if (trace)
+				blog(LOG_INFO,
+				     "[obs-zcamera] face capture: framing/status %s"
+				     " (detect=%d)",
+				     QJsonDocument(st)
+					 .toJson(QJsonDocument::Compact)
+					 .constData(),
+				     detect ? 1 : 0);
+			if (detect) {
+				traceThenPrepare(targetId);
 				return;
 			}
 			if (client_)
 				client_->setFramingEnabled(true);
-			QTimer::singleShot(1500, this,
-					   [this, slot]() { prepareInto(slot); });
+			detectTurnedOn_ = true;
+			QTimer::singleShot(1500, this, [this, targetId]() {
+				traceThenPrepare(targetId);
+			});
 		});
 	}
 
-	void prepareInto(int slot)
+	/* Pin the target, then ask for its face — the two calls the page makes in
+	   this order. trace_target is what makes `prepare` look at that person;
+	   sending prepare alone leaves the camera with nothing selected, which is
+	   also why prepare used to fail while the page worked. */
+	void traceThenPrepare(int targetId)
+	{
+		if (!client_)
+			return;
+		QPointer<QObject> alive(alive_);
+		client_->framingTraceTarget(
+		    targetId, [this, alive, targetId](const QJsonObject &r) {
+			    if (!alive)
+				    return;
+			    blog(LOG_INFO,
+				 "[obs-zcamera] face capture: trace_target %d -> %s",
+				 targetId,
+				 QJsonDocument(r).toJson(QJsonDocument::Compact).constData());
+			    prepareInto(targetId);
+		    });
+	}
+
+	/* `faceId` is the AI target id, not a slot — see capture(). The `uid` the
+	   camera returns here is not the store's id either; it is 0 in the page's
+	   own capture and stays an arm token. The real uid arrives with add(). */
+	void prepareInto(int faceId)
 	{
 		if (!client_)
 			return;
 		QPointer<QObject> alive(alive_);
 		client_->framingFacePrepare(
-		    slot, [this, alive](const QJsonObject &doc) {
+		    faceId, [this, alive, faceId](const QJsonObject &doc) {
 			    if (!alive)
 				    return;
+			    blog(LOG_INFO,
+				 "[obs-zcamera] face capture: prepare face_id=%d -> %s",
+				 faceId,
+				 QJsonDocument(doc).toJson(QJsonDocument::Compact).constData());
 			    const int status =
 				doc.value(QLatin1String("status")).toInt(-1);
 			    const int uid =
 				doc.value(QLatin1String("uid")).toInt(-1);
 			    if (status != 0 || uid < 0) {
-				    /* The camera's own wording ("face not found",
-				       "face too small") is the useful part. */
-				    QString why =
+				    /* Bug 3: the camera distinguishes several
+				       refusals and the bare English detail said
+				       nothing to the operator. 2 = no face,
+				       4 = the face it took is a side view. */
+				    const QString detail =
 					doc.value(QLatin1String("detail"))
 					    .toString();
-				    if (why.isEmpty())
+				    QString why;
+				    if (status == 4)
 					    why = ztr("ZCameraPlugin.Framing."
-						      "FaceRegCaptureFailed");
+						      "FaceRegSideView");
+				    else if (status == 2)
+					    why = ztr("ZCameraPlugin.Framing."
+						      "FaceRegNoFace");
+				    else if (detail.contains(
+						 QLatin1String("small"),
+						 Qt::CaseInsensitive))
+					    why = ztr("ZCameraPlugin.Framing."
+						      "FaceRegFaceSmall");
+				    if (why.isEmpty())
+					    why = detail.isEmpty()
+						      ? ztr("ZCameraPlugin."
+							    "Framing."
+							    "FaceRegCaptureFailed")
+						      : detail;
+				    /* Status 4 still hands back a thumbnail: the
+				       camera did take the picture and only judged
+				       the angle. Refusing outright left QA with
+				       a camera that "cannot capture at all" while
+				       its own page could, so the picture is staged
+				       and Add is left available — the message says
+				       what it is. */
+				    const QString thm =
+					doc.value(QLatin1String("thm"))
+					    .toString();
+				    if (!thm.isEmpty()) {
+					    stagedUid_ = qMax(0, uid);
+					    stagedThumb_ = thm;
+					    add_->setEnabled(true);
+					    showPicture(thm);
+					    info_->setText(why);
+					    updateFormState();
+					    return;
+				    }
 				    info_->setText(why);
 				    explainStoreState(why);
 				    return;
@@ -5180,6 +5537,12 @@ public:
 	/* Bumped on every list rebuild; a thumbnail reply carries the value it
 	   was asked for and is dropped when they differ. */
 	int generation_ = 0;
+	/* Set when the capture path had to switch detection on because the camera
+	   had it off. The dialog owns that switch then, and puts it back on close:
+	   leaving detection running after a failed capture kept the camera's own
+	   auto target busy on the bench (reported as the head drifting with nobody
+	   touching the pad), and it is not a state the operator asked for. */
+	bool detectTurnedOn_ = false;
 	QTimer *applyTimer_ = nullptr;
 	QLabel *preview_ = nullptr;
 	QListWidget *list_ = nullptr;
@@ -6774,6 +7137,7 @@ void ZcFramingPanel::setClient(ZcCameraClient *client)
 		faceHeight_ = 0;
 		zoomLockOn_ = false;
 		hasFovSize_ = false;
+		hasInfoGeometry_ = false;
 		/* The preset sizes and the config probe belong to one camera. */
 		fovConfigProbed_ = false;
 		fovPresetFullBody_ = 100;
@@ -6935,11 +7299,33 @@ void ZcFramingPanel::refreshFovPresets()
 /* The Size the subject figure should be drawn at. The >=1.0.5 camera keeps one
    0..100 value; the 1.0.3 camera's body-size stepper walks four steps between
    its own floor and ceiling, so its position is turned back into a percentage
-   to keep one scale for the drawing. */
+   to keep one scale for the drawing.
+
+   Bug 245: on the 1.0.3 body the stepper is the *only* thing that path reads,
+   and its View Angle dropdown does not move the stepper — so switching
+   Full body -> Close-up left the figure the same size while the camera's own
+   page drew it bigger. That camera reports the geometry it will place instead
+   (`info_face_height` = where the head sits, `info_human_bottom` = how much of
+   the body falls below the frame), which is exactly what the preset tiles are
+   already drawn from. Feeding the same pair through the pad's own height ramp
+   keeps one drawing scale and lets the figure follow the View Angle.
+
+   >=1.0.5 is deliberately left on Size: its View Angle *does* move the Size
+   slider, and QA asked for that generation not to change. */
 int ZcFramingPanel::subjectSizePct() const
 {
 	if (hasFovSize_ && fovSizeSp_)
 		return fovSizeSp_->value();
+	if (!fw15_ && hasInfoGeometry_) {
+		/* Head top to the point where the body leaves the frame; the pad
+		   sizes the figure with 0.34 + 0.52 * sizeT, so the inverse of that
+		   ramp is what turns a fraction of the frame back into a Size. */
+		const double hFrac = qBound(0.05, 1.0 - infoHumanBottom_ -
+						   infoFaceHeight_,
+					    1.0);
+		const double sizeT = qBound(0.0, (hFrac - 0.34) / 0.52, 1.0);
+		return int(sizeT * 100.0 + 0.5);
+	}
 	if (bodySizeSp_) {
 		const int span = kFramingBodySizeMax - kFramingBodySizeMin;
 		if (span > 0)
@@ -7599,6 +7985,20 @@ void ZcFramingPanel::applyStatus(const QJsonObject &doc)
 			return v.toBool() ? 1 : 0;
 		return fallback;
 	};
+	const auto asDbl = [&doc](const char *key, double fallback) {
+		const QJsonValue v = doc.value(QLatin1String(key));
+		return v.isDouble() ? v.toDouble() : fallback;
+	};
+	/* Bug 245: the 1.0.3 body reports the subject it will place as this pair,
+	   and its View Angle changes them while it leaves the body-size stepper
+	   alone. Latched together, because half a geometry is worse than none:
+	   the figure is only sized from it when both have been seen. */
+	if (doc.contains("info_face_height") && doc.contains("info_human_bottom")) {
+		infoFaceHeight_ = asDbl("info_face_height", infoFaceHeight_);
+		infoHumanBottom_ = asDbl("info_human_bottom", infoHumanBottom_);
+		hasInfoGeometry_ = true;
+		paintPad();
+	}
 
 	/* The camera's live switches. `value` is the FramingStatusChanged status
 	   index; `status` comes from the dedicated endpoint. Whichever is present
@@ -8150,16 +8550,31 @@ void ZcFramingPanel::updateGating()
 		tiltLockSeg_->setEnabled(haveSnapshot_ && detectOn_ &&
 					 !fixAngleOn);
 
-	/* Bug list #48: on a >=1.0.5 firmware the page greys the detection-area
-	   button while Auto Target is off. That interlock is dropped here: the
-	   rectangle is an operator aid, and the camera takes /mask_area whether
-	   or not Auto Target is running. Gating it on Auto Target left the
-	   switch (and with it the whole editor) greyed out on a camera whose
-	   Auto Target happened to be off, which read as "the detection area
-	   cannot be adjusted at all". The one thing the editor really needs is
-	   the area switched on, because that is what the camera paints. */
-	if (maskSeg_)
-		maskSeg_->setEnabled(haveSnapshot_);
+	/* Bug 88: on a >=1.0.5 firmware the page greys the detection area while
+	   Auto Target is off, and QA has asked for that parity three times. The
+	   interlock is therefore back — but only on the *switch*, which is the
+	   control the page greys.
+
+	   It must not come back on the editor below. An earlier change
+	   (bd52418) dropped the interlock altogether because gating the whole
+	   group left "the detection area cannot be adjusted at all" on a camera
+	   whose Auto Target happened to be off. The two are reconcilable: this
+	   greys "cannot switch the area on", while `maskEditBtn_` still follows
+	   "the area is on", so a rectangle the camera already paints stays
+	   editable. 1.0.3 keeps its own rule (that generation's page does not
+	   grey the area at all — see bug list #48). */
+	const bool autoTargetOk =
+	    !fw15_ ||
+	    (autoTargetKnown_
+		 ? autoTargetOn_
+		 : (autoTargetSeg_ && autoTargetSeg_->currentIndex() == 1));
+	if (maskSeg_) {
+		maskSeg_->setEnabled(haveSnapshot_ && autoTargetOk);
+		maskSeg_->setToolTip(
+		    autoTargetOk || !haveSnapshot_
+			? ztr("ZCameraPlugin.Framing.MaskAreaTip")
+			: ztr("ZCameraPlugin.Framing.MaskAreaAutoTargetTip"));
+	}
 	const bool maskOn = maskSeg_ && maskSeg_->currentIndex() == 1;
 	if (maskEditBtn_) {
 		maskEditBtn_->setEnabled(haveSnapshot_ && maskOn);

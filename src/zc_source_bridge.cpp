@@ -22,8 +22,31 @@ namespace {
 QMutex g_mutex;
 QHash<QString, OverlayTarget *> g_targets;
 OverlayPointerSink *g_sink = nullptr;
+/* Camera address -> the AI target id its last `AI` notification carried. Unlike
+   the table above this one is written from the source's notification thread,
+   which is why the same mutex covers it. */
+QHash<QString, int> g_aiTargets;
 
 } /* namespace */
+
+void overlayPublishAiTarget(const QString &ip, int targetId)
+{
+	if (ip.isEmpty())
+		return;
+	QMutexLocker lock(&g_mutex);
+	if (targetId > 0)
+		g_aiTargets.insert(ip, targetId);
+	else
+		g_aiTargets.remove(ip);
+}
+
+int overlayReadAiTarget(const QString &ip)
+{
+	if (ip.isEmpty())
+		return 0;
+	QMutexLocker lock(&g_mutex);
+	return g_aiTargets.value(ip, 0);
+}
 
 void overlaySetPointerSink(OverlayPointerSink *sink)
 {

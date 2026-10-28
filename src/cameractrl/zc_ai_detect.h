@@ -51,4 +51,12 @@ struct ZcAiBox {
    (num == 0) simply means the camera sees nothing right now. */
 QVector<ZcAiBox> parseAiDetection(const QJsonObject &payload);
 
+/* The id of the target the camera has selected, from the same payload's `sel`
+   field. Measured on e2ptz 1.0.3: {"what":"AI","num":0,"cols":8,"sel":174,
+   "objs":[]}. It is the id the camera's own page hands to
+   /ctrl/framing/trace_target?id= and /facedb/prepare?face_id=, so face
+   registration has to read the same number (bug 3). 0 when absent, which is
+   also the camera's "nothing selected". */
+int parseAiSelected(const QJsonObject &payload);
+
 } // namespace zc
