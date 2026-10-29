@@ -9462,6 +9462,25 @@ void ZcPresetPanel::buildUi()
 	showPage(0);
 }
 
+/* Bug 74: whether `ptz_speed_mode` means "Common", i.e. one shared recall speed
+   for every preset, so the per-preset unit/speed is refused and has to grey out.
+   The value is not always the literal "Common": some firmware answers the
+   choice INDEX ("1") and reports the labels separately in `choices`. Compare
+   the label the index points at before giving up — matching only the literal
+   word is why the row stayed editable on the body QA tested. */
+static bool speedModeIsCommon(const QString &value,
+			      const QStringList &choices)
+{
+	if (value.contains(QLatin1String("common"), Qt::CaseInsensitive))
+		return true;
+	bool ok = false;
+	const int idx = value.trimmed().toInt(&ok);
+	if (ok && idx >= 0 && idx < choices.size())
+		return choices.at(idx).contains(QLatin1String("common"),
+						Qt::CaseInsensitive);
+	return false;
+}
+
 void ZcPresetPanel::setClient(ZcCameraClient *client)
 {
 	client_ = client;
@@ -9486,10 +9505,17 @@ void ZcPresetPanel::setClient(ZcCameraClient *client)
 							    "ptz_speed_mode"))
 						      : QString();
 				if (!v.isEmpty()) {
+					ZcSettingValue def;
+					const QStringList choices =
+					    client_ && client_->settingDefinition(
+							   QStringLiteral(
+							       "ptz_speed_mode"),
+							   &def)
+						? def.choices
+						: QStringList();
 					speedModeKnown_ = true;
 					speedModeCommon_ =
-					    v.compare(QStringLiteral("Common"),
-						      Qt::CaseInsensitive) == 0;
+					    speedModeIsCommon(v, choices);
 				}
 				updateActions();
 			});
@@ -9528,8 +9554,18 @@ void ZcPresetPanel::askSpeedMode()
 				       return;
 			       speedModeKnown_ = true;
 			       speedModeCommon_ =
-				   v.value.compare(QStringLiteral("Common"),
-						   Qt::CaseInsensitive) == 0;
+				   speedModeIsCommon(v.value, v.choices);
+			       /* One line per camera: if the row still does not grey
+			          (bug 74), this says what the body actually answers and
+			          which labels it reported, instead of another round trip
+			          through QA. */
+			       blog(LOG_INFO,
+				    "[obs-zcamera] ptz_speed_mode = '%s' (%s), "
+				    "choices [%s]",
+				    qUtf8Printable(v.value),
+				    speedModeCommon_ ? "Common" : "per-preset",
+				    qUtf8Printable(v.choices.join(
+					QStringLiteral(", "))));
 			       updateActions();
 		       });
 }
