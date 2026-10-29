@@ -2029,12 +2029,16 @@ void ZcSspSource::drawInteractionOverlay(gs_effect_t *effect)
 			}
 		}
 
-		/* Self-test aid (opt-in): the poses the frame was computed from and
-		   how much of it landed, so a run can tell "the pose never arrived"
-		   from "the frame is behind the camera". */
+		/* The poses the frame was computed from and how much of it landed, so
+		   a run can tell "the pose never arrived" from "the frame is behind
+		   the camera". Always on, rate-limited to one line per kind per 2 s:
+		   this only runs while the angle/range box is drawn, and QA could not
+		   produce the line even with ZC_TEST_ANGLE set (bug 243 came back
+		   twice with "the log has no such line"), because the variable has
+		   to be set in the environment of the OBS process, which is easy to
+		   get wrong on Windows. */
 		const uint64_t now = os_gettime_ns();
-		if (qEnvironmentVariableIsSet("ZC_TEST_ANGLE") &&
-		    now >= overlayBoxNextNs_[kind]) {
+		if (now >= overlayBoxNextNs_[kind]) {
 			overlayBoxNextNs_[kind] = now + 2000000000ULL;
 			blog(LOG_INFO,
 			     "[obs-zcamera] overlay %s box: box %.2f/%.2f hfov "

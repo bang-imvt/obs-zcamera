@@ -509,6 +509,9 @@ private:
 	/* Polls `lens_focus_pos` for the read-out beside the rocker (bug 249),
 	   only while in MF and the bar is at rest (see askFocusPos). */
 	QTimer *focusPosTimer_ = nullptr;
+	/* Last focus position the camera reported, shown beside the rocker while
+	   it is at rest (bug 249). */
+	QString focusPosText_;
 
 	/* Current Position read-out (live, from ptzfChange / the query reply). */
 	QLabel *positionLabel_ = nullptr;

@@ -3126,6 +3126,7 @@ void ZcPtzPad::setClient(ZcCameraClient *client)
 		disconnect(liveConn_);
 	if (focusPosTimer_)
 		focusPosTimer_->stop();
+	focusPosText_.clear();
 	liveConn_ = QMetaObject::Connection();
 	channelLive_ = false;
 	client_ = client;
@@ -3737,6 +3738,11 @@ void ZcPtzPad::updateFocusLabel(int value)
 		text = QStringLiteral("+%1").arg(qMin(100, value));
 	else if (value < -dead)
 		text = QStringLiteral("-%1").arg(qMin(100, -value));
+	else if (!focusPosText_.isEmpty())
+		/* At rest the label shows the camera's focus position, not the
+		   centre mark — releasing the bar used to wipe the reading QA was
+		   looking at (bug 249). */
+		text = focusPosText_;
 	focusValue_->setText(text);
 }
 
@@ -3757,7 +3763,10 @@ void ZcPtzPad::askFocusPos()
 			       if (c != client_ || focusDir_ != 0 ||
 				   v.value.isEmpty() || !focusValue_)
 				       return;
-			       focusValue_->setText(v.value);
+			       /* Keep the last position so releasing the rocker can
+			          go back to it instead of to the centre mark. */
+			       focusPosText_ = v.value;
+			       focusValue_->setText(focusPosText_);
 		       });
 }
 
@@ -3786,6 +3795,8 @@ void ZcPtzPad::askFocusMode()
 				askFocusPos();
 			} else {
 				focusPosTimer_->stop();
+				/* A position remembered from MF means nothing in AF. */
+				focusPosText_.clear();
 			}
 		}
 		if (!focusManual_) {
@@ -4838,6 +4849,12 @@ public:
 		row->addWidget(del_);
 		row->addWidget(refresh_);
 		lay->addLayout(row);
+		/* Bug 265: these are the dialog's only buttons, so Qt made the first
+		   one the default and Enter in the name field ran a capture instead
+		   of committing the rename — which also re-armed Add behind the
+		   operator's back. Enter belongs to the field. */
+		for (QPushButton *b : {capture_, add_, del_, refresh_})
+			b->setAutoDefault(false);
 
 		connect(refresh_, &QPushButton::clicked, this,
 			[this]() { refresh(); });
@@ -4860,6 +4877,12 @@ public:
 		   arrow would otherwise fire one update per step. */
 		connect(name_, &QLineEdit::editingFinished, this,
 			[this]() { scheduleApply(); });
+		/* Enter means "commit this name", not "capture again" (bug 265). */
+		connect(name_, &QLineEdit::returnPressed, this, [this]() {
+			if (applyTimer_)
+				applyTimer_->stop();
+			applyNow();
+		});
 		connect(priority_,
 			QOverload<int>::of(&QSpinBox::valueChanged), this,
 			[this](int) { scheduleApply(); });
@@ -4880,43 +4903,59 @@ public:
 	}
 
 private:
+	/* The "this camera has a face database at all" switch. Which *field* is
+	   editable in which state is updateFormState()'s job: both used to enable
+	   the same widgets, so a refresh turned the form back on right after the
+	   state function had greyed it (bugs 251/253/256). */
 	void setBodyEnabled(bool on)
 	{
-		list_->setEnabled(on);
-		name_->setEnabled(on);
-		priority_->setEnabled(on);
-		active_->setEnabled(on);
-		capture_->setEnabled(on);
-		/* Add stays dead until a capture has actually produced a face. */
-		add_->setEnabled(on && stagedUid_ >= 0);
-		del_->setEnabled(on);
+		supported_ = on;
+		updateFormState();
 	}
 
-	/* Bug 251: with nothing selected there is nothing to edit, and the camera's
-	   page greys the form out for exactly that reason; this dialog left the
-	   fields live, so every keystroke went nowhere. Bug 250: there is no Apply
-	   button either — the page writes name and priority as they are edited
-	   (scheduleApply), so a button only promised a second, later commit that
-	   the operator could forget to press.
-	   Bug 252: a fresh entry is prefilled with "Name", which is what the page
-	   does — the operator edits it instead of having to invent one before the
-	   first capture can be stored. */
+	/* The form has exactly three states, and every control follows from them
+	   rather than deciding on its own:
+
+	     Empty    nothing selected, nothing captured — everything is greyed
+	     Selected an entry of the library — name/priority/activate/delete edit it
+	     Staged   a capture waiting for Add — name and activate apply to the new
+	              entry, priority is the camera's (next_priority), delete is not
+	              meaningful
+
+	   Bug 251: Empty left the name field live, so the operator typed into a
+	   control that wrote nothing. Bug 250: there is no Apply button — the page
+	   writes name and priority as they are edited (scheduleApply). Bug 252: a
+	   fresh entry is prefilled with "Name". */
 	void updateFormState()
 	{
-		const bool sel = list_->currentRow() >= 0 &&
-				 list_->currentRow() < names_.size();
-		const bool staged = stagedUid_ >= 0;
-		const bool editable = supported_ && (sel || staged);
-		name_->setEnabled(editable);
-		priority_->setEnabled(editable);
-		active_->setEnabled(supported_ && sel);
-		del_->setEnabled(supported_ && sel);
-		capture_->setEnabled(supported_);
-		if (!editable) {
+		const int row = list_->currentRow();
+		const bool sel = row >= 0 && row < names_.size();
+		const bool staged = !sel && stagedUid_ >= 0;
+		const bool live = supported_ && client_;
+
+		list_->setEnabled(live);
+		capture_->setEnabled(live);
+		name_->setEnabled(live && (sel || staged));
+		/* Bug 256: a capture stores the number the camera hands out
+		   (next_priority); letting it be edited promised a write add() never
+		   sends. */
+		priority_->setEnabled(live && sel);
+		/* Bug 253: activation is meaningful for a capture as well — add()
+		   carries it. */
+		active_->setEnabled(live && (sel || staged));
+		/* Bugs 257/260: Add stores only a picture the camera accepted. A side
+		   view, or a refusal that still hands back a frame, shows the picture
+		   but does not arm the store. */
+		add_->setEnabled(live && staged && stagedUsable_);
+		del_->setEnabled(live && sel);
+
+		if (!sel && !staged) {
 			const bool wasFilling = filling_;
 			filling_ = true;
-			name_->setText(
-			    ztr("ZCameraPlugin.Framing.FaceRegDefaultName"));
+			const QString placeholder =
+			    ztr("ZCameraPlugin.Framing.FaceRegDefaultName");
+			if (name_->text() != placeholder)
+				name_->setText(placeholder);
 			filling_ = wasFilling;
 		}
 	}
@@ -5084,7 +5123,13 @@ private:
 			   after the first attempt. `setCurrentRow` above also scrolls
 			   the current item into view, and that has to be undone after
 			   the layout runs, not before. */
-			if (keepScroll > 0) {
+			/* Bugs 258/259: the guard used to be `keepScroll > 0`, which
+			   skipped the restore exactly when the list was showing its
+			   first row (that is scroll == 0) — and `setCurrentRow` had
+			   already scrolled the selected entry into view, so editing a
+			   face further down pulled the whole list up. Restoring the top
+			   row is what matters, not the value it had. */
+			if (keepTopUid >= 0 || keepScroll > 0) {
 				/* Second attempt at bug 225: put the ROW back at the top
 				   rather than restoring a scrollbar value. The value was
 				   clamped because the new range did not exist yet; a row
@@ -5116,6 +5161,14 @@ private:
 						    ->setValue(keepScroll);
 				});
 			}
+			/* Bug 192/251: a QListWidget makes its first row current as
+			   soon as the model is populated, so a dialog opened on a
+			   non-empty library looked as if the operator had chosen that
+			   face — name and priority were filled in and editable, which
+			   is what QA reported twice ("the field is not greyed"). Start
+			   unselected; updateFormState() then greys the form. */
+			if (keepUid < 0 && stagedUid_ < 0)
+				list_->setCurrentRow(-1);
 			updateFormState();
 			/* Bug 190: a new entry gets the priority the camera says is
 			   next, not a repeated 1. Priority decides between two
@@ -5286,7 +5339,7 @@ public:
 		if (!filling_) {
 			stagedUid_ = -1;
 			stagedThumb_.clear();
-			add_->setEnabled(false);
+			stagedUsable_ = false;
 		}
 		const bool wasFilling = filling_;
 		clampPriorityRange(true);
@@ -5325,7 +5378,11 @@ public:
 		const int targetId = zc::overlayReadAiTarget(client_->host());
 		stagedUid_ = -1;
 		stagedThumb_.clear();
-		add_->setEnabled(false);
+		stagedUsable_ = false;
+		/* Bug 260: a failed capture must leave Add dead even when a previous
+		   capture had armed it — the picture on screen no longer describes
+		   what Add would store. */
+		updateFormState();
 		if (targetId <= 0) {
 			/* No selected target: detection is off, nobody is in frame,
 			   or the feed has not delivered a notification yet. Saying
@@ -5457,9 +5514,14 @@ public:
 				    if (!thm.isEmpty()) {
 					    stagedUid_ = qMax(0, uid);
 					    stagedThumb_ = thm;
-					    add_->setEnabled(true);
+					    /* Bug 257: the tester's rule is that a side
+					       view is shown but not stored, so Add stays
+					       dead and the message beside the picture
+					       says why. */
+					    stagedUsable_ = false;
 					    showPicture(thm);
 					    info_->setText(why);
+					    list_->setCurrentRow(-1);
 					    updateFormState();
 					    return;
 				    }
@@ -5470,10 +5532,18 @@ public:
 			    stagedUid_ = uid;
 			    stagedThumb_ =
 				doc.value(QLatin1String("thm")).toString();
-			    add_->setEnabled(true);
+			    stagedUsable_ = true;
 			    info_->setText(ztr(
 				"ZCameraPlugin.Framing.FaceRegCaptured"));
 			    showPicture(stagedThumb_);
+			    /* Bug 264: a capture is its own state — clear the list
+			       selection so the fields describe the new entry, and put
+			       the caret in the name so a second capture in a row can
+			       be named straight away. */
+			    list_->setCurrentRow(-1);
+			    updateFormState();
+			    name_->setFocus();
+			    name_->selectAll();
 		    });
 	}
 
@@ -5523,13 +5593,35 @@ public:
 			    ztr("ZCameraPlugin.Framing.FaceRegNeedName"));
 			return;
 		}
+		/* Bugs 254/255: the store has a maximum, and saying so here beats
+		   relaying whatever the camera answers for an over-limit add (the
+		   tester only saw the entry not appear). The library already knows
+		   both numbers from the last /list read. */
+		if (max_ > 0 && uids_.size() >= max_) {
+			info_->setText(ztr(
+			    "ZCameraPlugin.Framing.FaceRegMaxReached").arg(max_));
+			return;
+		}
+		if (active_->isChecked() && maxActive_ > 0) {
+			int on = 0;
+			for (bool a : actives_)
+				if (a)
+					++on;
+			if (on >= maxActive_) {
+				info_->setText(
+				    ztr("ZCameraPlugin.Framing.FaceRegMaxActive")
+					.arg(maxActive_));
+				return;
+			}
+		}
 		/* `which` is the uid prepare just handed back; activate makes the
 		   camera adopt the new entry at once, as the page does. */
 		client_->framingFaceAdd(stagedUid_, name, priority_->value(),
 					active_->isChecked());
 		stagedUid_ = -1;
 		stagedThumb_.clear();
-		add_->setEnabled(false);
+		stagedUsable_ = false;
+		updateFormState();
 		/* The store is asynchronous; give the camera a beat before
 		   reading the list back. */
 		QTimer::singleShot(400, this, [this]() { refresh(); });
@@ -5596,6 +5688,10 @@ public:
 	   staged. Add is what writes it (bug 3). */
 	int stagedUid_ = -1;
 	QString stagedThumb_;
+	/* Whether the staged picture may be stored. False for a side view or a
+	   refusal that still handed back a frame: the picture is shown, Add is
+	   not armed (bugs 257/260). */
+	bool stagedUsable_ = false;
 	/* The entry an applyEdit() asked for, -1 when nothing is pending. */
 	int pendingUid_ = -1;
 	QString pendingName_;
@@ -7181,8 +7277,11 @@ void ZcFramingPanel::setClient(ZcCameraClient *client)
 		faceRegDlg_ = nullptr;
 	}
 	/* A different camera: reset to the defaults and let the first refresh paint
-	   what this camera actually has. */
-	if (!client_) {
+	   what this camera actually has. Bug 266: this used to run only when the
+	   camera disappeared, so a switch from a 1.0.3 body to a 1.0.6 one kept
+	   the previous body's rows and values until — and only if — the new
+	   snapshot arrived. */
+	{
 		painting_ = true;
 		sceneCombo_->setCurrentIndex(0);
 		startPosCombo_->setCurrentIndex(0);
@@ -7270,7 +7369,8 @@ void ZcFramingPanel::setClient(ZcCameraClient *client)
 		trackBoxZoom_ = 0.0f;
 		trackBoxHfov_ = 0.0f;
 		syncAngleBoxPoll();
-		return;
+		if (!client_)
+			return;
 	}
 	/* The head's pose arrives by push, exactly as on the camera's own page
 	   (its `ptzfChange` handler calls RenderPtzComposition() with the new
