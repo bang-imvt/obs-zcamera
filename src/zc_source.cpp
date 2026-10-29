@@ -1203,12 +1203,36 @@ void ZcSspSource::drawAiOverlay(gs_effect_t *effect)
 	gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
 	gs_effect_set_texture(img, aiSolid_);
 
+	/* Bug 246: the AI coordinates are normalized to the camera's own reference
+	   frame (its 16:9 main view), not to the decoded picture. A vertical
+	   stream1 (1080x1920) is a centre crop of that frame — the camera keeps
+	   only the middle column — so multiplying by the picture width squeezed
+	   every box sideways: it sat to the right of the face and covered half of
+	   it, and targets that are outside the crop (e.g. a face on the wall)
+	   still produced a box, because their reference-frame x is inside 0..1.
+	   Un-crop x/width first, then scale; y is untouched because the crop keeps
+	   the full height. */
+	const float kRefAspect = 16.0f / 9.0f;
+	const float kOutAspect = (float)fw / (float)fh;
+	const bool cropX = kOutAspect < kRefAspect;
+	const float kCrop = cropX ? kOutAspect / kRefAspect : 1.0f;
+	const float cropOffset = cropX ? (1.0f - kCrop) * 0.5f : 0.0f;
+
 	for (const ZcAiBox &box : boxes) {
-		float x = (float)box.x * (float)fw;
+		float nx = (float)box.x;
+		float nw = (float)box.width;
+		if (cropX && kCrop > 0.0001f) {
+			nx = (nx - cropOffset) / kCrop;
+			nw = nw / kCrop;
+		}
+		float x = nx * (float)fw;
 		float y = (float)box.y * (float)fh;
-		float w = (float)box.width * (float)fw;
+		float w = nw * (float)fw;
 		float h = (float)box.height * (float)fh;
-		if (w <= 0.0f || h <= 0.0f)
+		/* Also drops what the un-crop above pushed off the picture: a target
+		   that lives outside the centre column has no place on this frame
+		   (bug 246, the box that appeared on the wall). */
+		if (w <= 0.0f || h <= 0.0f || x >= (float)fw || y >= (float)fh)
 			continue;
 		/* A target half out of frame must not draw a box that wraps around
 		   the picture. */
