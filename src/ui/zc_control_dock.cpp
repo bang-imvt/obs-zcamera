@@ -4809,6 +4809,12 @@ public:
 				0, 0);
 		name_ = new QLineEdit(this);
 		name_->setMaxLength(18);
+		/* Bug 251: the dialog inherits the framing panel's stylesheet, whose
+		   `color` beats the palette — so a disabled field still looked alive
+		   and QA reported "not greyed" twice while it was in fact not
+		   editable. A rule on the widget itself wins over the inherited one. */
+		name_->setStyleSheet(QStringLiteral(
+		    "QLineEdit:disabled { color:#6b7a80; }"));
 		form->addWidget(name_, 0, 1);
 		form->addWidget(
 		    new QLabel(ztr("ZCameraPlugin.Framing.FaceRegPriority"), this),
@@ -4883,9 +4889,13 @@ public:
 				applyTimer_->stop();
 			applyNow();
 		});
-		connect(priority_,
-			QOverload<int>::of(&QSpinBox::valueChanged), this,
-			[this](int) { scheduleApply(); });
+		/* Bug 272: a spin box emits valueChanged on every keystroke, so typing
+		   "12" applied 1 the moment the first digit landed, and the camera was
+		   already re-sorting the library under the operator's hands. Wait for
+		   editingFinished — Enter or leaving the field — which is the same
+		   moment the camera's own page commits the number. */
+		connect(priority_, &QAbstractSpinBox::editingFinished, this,
+			[this]() { applyNow(); });
 		connect(active_, &QCheckBox::toggled, this,
 			[this]() { applyNow(); });
 
@@ -5123,42 +5133,50 @@ private:
 			   after the first attempt. `setCurrentRow` above also scrolls
 			   the current item into view, and that has to be undone after
 			   the layout runs, not before. */
-			/* Bugs 258/259: the guard used to be `keepScroll > 0`, which
-			   skipped the restore exactly when the list was showing its
-			   first row (that is scroll == 0) — and `setCurrentRow` had
-			   already scrolled the selected entry into view, so editing a
-			   face further down pulled the whole list up. Restoring the top
-			   row is what matters, not the value it had. */
-			if (keepTopUid >= 0 || keepScroll > 0) {
-				/* Second attempt at bug 225: put the ROW back at the top
-				   rather than restoring a scrollbar value. The value was
-				   clamped because the new range did not exist yet; a row
-				   scroll is resolved by the view itself once the rows are
-				   laid out, so it cannot be clamped away. */
+			/* Bugs 258/259: what has to survive a refresh is the row the
+			   operator is editing — it has to stay *visible*, not necessarily
+			   at the top. Earlier attempts restored the top row (or a
+			   scrollbar value), but `setCurrentRow` had already scrolled the
+			   selection into view against the old row geometry, so editing a
+			   face further down pulled the whole list up. Deferred for the
+			   same reason as before: a just-refilled list has not laid its
+			   rows out yet. */
+			{
 				QPointer<QListWidget> lw(list_);
-				const int wantedUid = keepTopUid >= 0 ? keepTopUid
-								      : keepUid;
-				QTimer::singleShot(0, this, [lw, wantedUid, keepScroll]() {
+				const int selectedUid = keepUid;
+				const int topUid = keepTopUid;
+				const int fallback = keepScroll;
+				QTimer::singleShot(0, this, [lw, selectedUid, topUid,
+							     fallback]() {
 					if (!lw || !lw->verticalScrollBar())
 						return;
-					bool done = false;
-					if (wantedUid >= 0) {
-						for (int i = 0; i < lw->count(); ++i) {
+					auto rowOf = [lw](int uid) {
+						if (uid < 0)
+							return -1;
+						for (int i = 0; i < lw->count(); ++i)
 							if (lw->item(i)
 								->data(kFaceUidRole)
-								.toInt() == wantedUid) {
-								lw->scrollToItem(
-								    lw->item(i),
-								    QAbstractItemView::
-									PositionAtTop);
-								done = true;
-								break;
-							}
-						}
+								.toInt() == uid)
+								return i;
+						return -1;
+					};
+					const int sel = rowOf(selectedUid);
+					if (sel >= 0) {
+						/* EnsureVisible scrolls only when the row is
+						   outside the viewport, so an entry that was
+						   already on screen does not move at all. */
+						lw->scrollToItem(lw->item(sel),
+								 QAbstractItemView::
+								     EnsureVisible);
+						return;
 					}
-					if (!done)
-						lw->verticalScrollBar()
-						    ->setValue(keepScroll);
+					const int top = rowOf(topUid);
+					if (top >= 0)
+						lw->scrollToItem(lw->item(top),
+								 QAbstractItemView::
+								     PositionAtTop);
+					else
+						lw->verticalScrollBar()->setValue(fallback);
 				});
 			}
 			/* Bug 192/251: a QListWidget makes its first row current as
@@ -5541,6 +5559,11 @@ public:
 			       the caret in the name so a second capture in a row can
 			       be named straight away. */
 			    list_->setCurrentRow(-1);
+			    /* Bug 270: every capture starts from the same default —
+			       the switch was left however the previous entry was
+			       added, so a face captured after turning activation off
+			       silently went in inactive. */
+			    active_->setChecked(true);
 			    updateFormState();
 			    name_->setFocus();
 			    name_->selectAll();
@@ -5654,6 +5677,28 @@ public:
 			info_->setText(
 			    ztr("ZCameraPlugin.Framing.FaceRegNoSelection"));
 			return;
+		}
+		/* Bug 271: switching an EXISTING face on can exceed max_active just
+		   as adding one can, and the camera refuses it without saying so (the
+		   tester saw the entry stay inactive). Only check when the face is
+		   being turned on — an entry that already counts must be editable
+		   (rename, priority) without tripping the limit. */
+		if (active_->isChecked() && maxActive_ > 0 &&
+		    !actives_.value(row, false)) {
+			int on = 0;
+			for (bool a : actives_)
+				if (a)
+					++on;
+			if (on >= maxActive_) {
+				info_->setText(
+				    ztr("ZCameraPlugin.Framing.FaceRegMaxActive")
+					.arg(maxActive_));
+				/* Put the switch back: the write is not going out, so
+				   leaving it ticked would claim it took effect. */
+				QSignalBlocker block(active_);
+				active_->setChecked(false);
+				return;
+			}
 		}
 		/* Remember what was asked for: the refresh that follows compares the
 		   camera's own values against it, so a refused update shows as a
@@ -8046,6 +8091,15 @@ void ZcFramingPanel::showEvent(QShowEvent *event)
 {
 	QWidget::showEvent(event);
 	syncAngleBoxPoll();
+	/* Bug 266: the page is rebuilt from a camera snapshot, and a switch
+	   between two bodies (1.0.6 -> 1.0.3 -> 1.0.6) left the previous body's
+	   rows on screen — Lock Zoom / Acceleration / Sensitivity missing — which
+	   means the snapshot that would have rebuilt them never arrived for the
+	   newly attached camera. Re-read on every show: the page is only looked at
+	   when it is visible, and one read is cheaper than a page that lies about
+	   which body it describes. */
+	if (client_ && client_->isConnected())
+		refresh();
 }
 
 void ZcFramingPanel::hideEvent(QHideEvent *event)
